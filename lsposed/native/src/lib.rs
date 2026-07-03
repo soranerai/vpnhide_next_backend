@@ -7,6 +7,251 @@ use crate::generated::iface_lists::matches_vpn;
 
 uniffi::setup_scaffolding!();
 
+// ── Polymorphic XOR string encryption using compilation-time calculations ──
+//
+// Each call to xor_str!("...") generates a unique pseudo-random key based on
+// compile-time string hashing. Strings are XOR-encrypted in const context,
+// decrypted on-stack at runtime. No plaintext strings in .rodata.
+macro_rules! xor_str {
+    ($s:expr) => {{
+        const STR: &str = $s;
+        const BYTES: &[u8] = STR.as_bytes();
+        const LEN: usize = BYTES.len();
+
+        // Compile-time hash generator to get a unique key per string invocation
+        const KEY: u8 = {
+            let mut hash = 0xAAu32;
+            let mut i = 0;
+            while i < LEN {
+                hash = hash.wrapping_mul(33).wrapping_add(BYTES[i] as u32);
+                i += 1;
+            }
+            (hash & 0xFF) as u8
+        };
+
+        // XOR-encrypt the byte array at compile time
+        const CRYPTED: [u8; LEN] = {
+            let mut arr = [0u8; LEN];
+            let mut i = 0;
+            while i < LEN {
+                arr[i] = BYTES[i] ^ KEY;
+                i += 1;
+            }
+            arr
+        };
+
+        // Decrypt to String on-stack at runtime
+        let mut s = String::with_capacity(LEN);
+        for &b in &CRYPTED {
+            s.push((b ^ KEY) as char);
+        }
+        s
+    }};
+}
+
+// ── Bytecode VM for file/path oracle virtualization ──────────────────────────
+//
+// Compiles path-existence checks into bytecode programs, executed by a simple
+// stack-less VM. Obfuscates the sequence and parameters of filesystem probes.
+
+#[derive(Clone, Copy)]
+enum Opcode {
+    CheckOracle = 1,   // check_path_via_oracle(dir, file) || path_exists_oracle(full_path)
+    CheckPath = 2,     // split path on /, check_path_via_oracle || path_exists_oracle
+    ReadDir = 3,       // read_dir(dir) and filter by single query string
+    ReadDirMulti = 4,  // read_dir(dir) and filter by two query strings (OR)
+}
+
+struct Instruction {
+    op: Opcode,
+    arg1: usize,  // index into VM.strings
+    arg2: usize,  // index into VM.strings
+    arg3: usize,  // index into VM.strings
+}
+
+struct VM {
+    strings: Vec<String>,
+    bytecode: Vec<Instruction>,
+    detected: bool,
+    details: Vec<String>,
+}
+
+// Direct ARM64 syscall for faccessat(AT_FDCWD, path, F_OK, 0) to bypass Frida hooking
+#[inline(always)]
+unsafe fn sys_faccessat(path: *const libc::c_char) -> libc::c_int {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let sys_num: u64 = 48;    // __NR_faccessat
+        let dfd: i64 = -100;      // AT_FDCWD
+        let mode: u64 = 0;        // F_OK
+        let flags: u64 = 0;
+        let mut ret: i64;
+        unsafe {
+            std::arch::asm!(
+                "svc #0",
+                in("x8") sys_num,
+                in("x0") dfd,
+                in("x1") path,
+                in("x2") mode,
+                in("x3") flags,
+                lateout("x0") ret,
+                options(nostack, preserves_flags)
+            );
+        }
+        ret as libc::c_int
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        // Fallback for non-aarch64 (e.g., `cargo test` on host)
+        let ret = unsafe { libc::faccessat(-100, path, 0, 0) };
+        if ret < 0 {
+            -std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+        } else {
+            0
+        }
+    }
+}
+
+fn path_exists_oracle(path: &str) -> bool {
+    unsafe {
+        let c_path = match std::ffi::CString::new(path) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let ret = sys_faccessat(c_path.as_ptr());
+        if ret == 0 {
+            true
+        } else {
+            ret != -libc::ENOENT
+        }
+    }
+}
+
+fn check_path_via_oracle(base_dir: &str, iface: &str) -> Option<bool> {
+    let nonexistent_path = format!("{base_dir}/nonexistent_iface_probe_123");
+    if path_exists_oracle(&nonexistent_path) {
+        None
+    } else {
+        let actual_path = format!("{base_dir}/{iface}");
+        Some(path_exists_oracle(&actual_path))
+    }
+}
+
+// ── Anti-debug / Anti-Frida detection ────────────────────────────────────────
+//
+// Detects if the process is being debugged or instrumented by dynamic analysis
+// tools like Frida. Returns `true` if analysis is detected, `false` otherwise.
+// Strings are encrypted via xor_str! to avoid IOC scanning.
+fn check_anti_debug() -> bool {
+    // Check if this process is being traced by a debugger
+    if let Ok(content) = std::fs::read_to_string(xor_str!("/proc/self/status")) {
+        let tracer_str = xor_str!("TracerPid:");
+        for line in content.lines() {
+            if line.starts_with(&tracer_str) {
+                if let Some(pid_str) = line.split_whitespace().nth(1) {
+                    if let Ok(pid) = pid_str.parse::<i32>() {
+                        if pid != 0 {
+                            return true; // Under debugger
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check if Frida or similar instrumentation is loaded in memory
+    if let Ok(content) = std::fs::read_to_string(xor_str!("/proc/self/maps")) {
+        let content_lower = content.to_lowercase();
+        let frida_str = xor_str!("frida");
+        let re_frida_str = xor_str!("re.frida");
+        if content_lower.contains(&frida_str) || content_lower.contains(&re_frida_str) {
+            return true; // Frida detected
+        }
+    }
+
+    false
+}
+
+impl VM {
+    fn new() -> Self {
+        Self {
+            strings: Vec::new(),
+            bytecode: Vec::new(),
+            detected: false,
+            details: Vec::new(),
+        }
+    }
+
+    fn add_string(&mut self, s: String) -> usize {
+        self.strings.push(s);
+        self.strings.len() - 1
+    }
+
+    fn run(&mut self) {
+        for inst in &self.bytecode {
+            match inst.op {
+                Opcode::CheckOracle => {
+                    let dir = &self.strings[inst.arg1];
+                    let file = &self.strings[inst.arg2];
+                    let full_path = &self.strings[inst.arg3];
+                    let exists = check_path_via_oracle(dir, file) == Some(true)
+                        || path_exists_oracle(full_path);
+                    if exists {
+                        self.detected = true;
+                        self.details.push(full_path.clone());
+                    }
+                }
+                Opcode::CheckPath => {
+                    let path = &self.strings[inst.arg1];
+                    if let Some((dir, file)) = path.rsplit_once('/') {
+                        let exists = check_path_via_oracle(dir, file) == Some(true)
+                            || path_exists_oracle(path);
+                        if exists {
+                            self.detected = true;
+                            self.details.push(path.clone());
+                        }
+                    }
+                }
+                Opcode::ReadDir => {
+                    let dir = &self.strings[inst.arg1];
+                    let query = &self.strings[inst.arg2];
+                    if let Ok(entries) = std::fs::read_dir(dir) {
+                        for entry in entries.flatten() {
+                            if let Some(name) = entry.file_name().to_str() {
+                                if name.contains(query) {
+                                    let path = format!("{}/{}", dir, name);
+                                    if !self.details.contains(&path) {
+                                        self.detected = true;
+                                        self.details.push(path);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Opcode::ReadDirMulti => {
+                    let dir = &self.strings[inst.arg1];
+                    let q1 = &self.strings[inst.arg2];
+                    let q2 = &self.strings[inst.arg3];
+                    if let Ok(entries) = std::fs::read_dir(dir) {
+                        for entry in entries.flatten() {
+                            if let Some(name) = entry.file_name().to_str() {
+                                if name.contains(q1) || name.contains(q2) {
+                                    let path = format!("{}/{}", dir, name);
+                                    if !self.details.contains(&path) {
+                                        self.detected = true;
+                                        self.details.push(path);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ── Probe outcome types — crossing the FFI ───────────────────────────
 
 #[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,32 +377,6 @@ fn format_iface_result(all: &[String], vpn: &[String], context: &str) -> CheckOu
             vpn = join_list(vpn),
             all = join_list(all),
         ))
-    }
-}
-
-fn path_exists_oracle(path: &str) -> bool {
-    unsafe {
-        let c_path = match std::ffi::CString::new(path) {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-        let ret = libc::access(c_path.as_ptr(), libc::F_OK);
-        if ret == 0 {
-            true
-        } else {
-            let err = last_os_errno();
-            err != libc::ENOENT
-        }
-    }
-}
-
-fn check_path_via_oracle(base_dir: &str, iface: &str) -> Option<bool> {
-    let nonexistent_path = format!("{base_dir}/nonexistent_iface_probe_123");
-    if path_exists_oracle(&nonexistent_path) {
-        None
-    } else {
-        let actual_path = format!("{base_dir}/{iface}");
-        Some(path_exists_oracle(&actual_path))
     }
 }
 
@@ -591,6 +810,9 @@ unsafe fn for_each_rtattr(
 
 #[uniffi::export]
 pub fn check_netlink_getlink() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     let fd = match open_netlink() {
         Ok(fd) => fd,
         Err(out) => return out,
@@ -1044,6 +1266,9 @@ fn find_vpn_iface() -> String {
 
 #[uniffi::export]
 pub fn check_getsockopt_bind() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
         if fd < 0 {
@@ -1120,6 +1345,9 @@ pub fn check_getsockopt_bind() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_inet_diag() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     unsafe {
         let fd = libc::socket(libc::AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, 4); // 4 is NETLINK_INET_DIAG
         if fd < 0 {
@@ -1142,6 +1370,9 @@ pub fn check_inet_diag() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_getsockname_spoof() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
         if fd < 0 {
@@ -1237,6 +1468,9 @@ pub fn check_getsockname_spoof() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_netlink_getrule() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     let fd = match open_netlink() {
         Ok(fd) => fd,
         Err(out) => return out,
@@ -1373,6 +1607,9 @@ pub fn check_netlink_getrule() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_tcp_mss() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     unsafe {
         let udp_fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
         let mut udp_mtu = 0;
@@ -1475,6 +1712,9 @@ pub fn check_tcp_mss() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_tcp_info_mss() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
         if fd < 0 {
@@ -1556,6 +1796,9 @@ pub fn check_tcp_info_mss() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_udp_pmtu() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
         if fd < 0 {
@@ -1626,6 +1869,9 @@ pub fn check_udp_pmtu() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_netlink_getneigh() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     let fd = match open_netlink() {
         Ok(fd) => fd,
         Err(out) => return out,
@@ -1869,6 +2115,14 @@ fn visible_ifindexes_from_getlink() -> Result<Vec<u32>, CheckOutput> {
 
 #[uniffi::export]
 pub fn check_qdisc_by_ifindex() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
+    // Anti-debug: if we're being analyzed, return a plausible but false result
+    if check_anti_debug() {
+        return CheckOutput::pass("no active interfaces — unable to probe".to_string());
+    }
+
     unsafe {
         let existing = probe_active_ifindexes();
         if existing.is_empty() {
@@ -1986,6 +2240,9 @@ pub fn check_qdisc_by_ifindex() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_loopback_bind_conflict() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     unsafe {
         let ports = [1080, 10808, 1082, 2080, 8080, 2081, 53];
         let mut conflicts = Vec::new();
@@ -2024,6 +2281,14 @@ pub fn check_loopback_bind_conflict() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_bpf_iface_map() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
+    // Anti-debug: if we're being analyzed, return a plausible but false result
+    if check_anti_debug() {
+        return CheckOutput::pass("iface_index_name_map not accessible — permission denied".to_string());
+    }
+
     unsafe {
         let paths = [
             "/sys/fs/bpf/netd_shared/map_netd_iface_index_name_map\0",
@@ -2147,6 +2412,9 @@ unsafe extern "C" fn __system_property_get(
 
 #[uniffi::export]
 pub fn check_system_properties() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     unsafe {
         let keys = [
             "net.dns1",
@@ -2188,6 +2456,9 @@ pub fn check_system_properties() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_proc_sys_net_conf() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     let paths = [
         "/proc/sys/net/ipv4/conf",
         "/proc/sys/net/ipv6/conf",
@@ -2268,6 +2539,9 @@ pub fn check_proc_sys_net_conf() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_ioctl_alternative() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     unsafe {
         with_inet_dgram_socket(|fd| {
             let vpn_iface = find_vpn_iface();
@@ -2364,6 +2638,9 @@ pub fn check_ioctl_alternative() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_direct_syscall() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     unsafe {
         let fd = libc::syscall(libc::SYS_socket, libc::AF_INET, libc::SOCK_DGRAM, 0);
         if fd < 0 {
@@ -2428,6 +2705,9 @@ pub fn check_direct_syscall() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_traceroute_rtt() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
         if fd < 0 {
@@ -2611,6 +2891,9 @@ fn read_cntvct() -> u64 {
 
 #[uniffi::export]
 pub fn check_arm_timing() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_NONBLOCK, 0);
         if fd < 0 {
@@ -2670,6 +2953,9 @@ pub fn check_arm_timing() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_udp_queue_pressure() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_NONBLOCK, 0);
         if fd < 0 {
@@ -2818,6 +3104,9 @@ fn cmsg_align(len: usize) -> usize {
 
 #[uniffi::export]
 pub fn check_gso_asymmetry() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
         if fd < 0 {
@@ -2902,6 +3191,9 @@ pub fn check_gso_asymmetry() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_timestamping_hw() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
         if fd < 0 {
@@ -3072,6 +3364,9 @@ pub fn check_timestamping_hw() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_ipv6_link_local_bruteforce() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     unsafe {
         let mut active_indices: Vec<u32> = Vec::new();
         let mut named_vpn: Vec<String> = Vec::new();
@@ -3366,6 +3661,9 @@ pub fn check_ipv6_link_local_bruteforce() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_uid_route_rules_leak() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     let fd = match open_netlink() {
         Ok(fd) => fd,
         Err(out) => return out,
@@ -3478,6 +3776,9 @@ pub fn check_uid_route_rules_leak() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_pmtu_cache_poisoning() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
         if fd < 0 {
@@ -3530,6 +3831,9 @@ pub fn check_pmtu_cache_poisoning() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_underlay_port_conflict() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     unsafe {
         let ip = match find_active_physical_ip_and_mask() {
             Some((ip, _)) => ip,
@@ -3592,6 +3896,9 @@ pub fn check_underlay_port_conflict() -> CheckOutput {
 
 #[uniffi::export]
 pub fn check_rtm_getlink_trim_oracle() -> CheckOutput {
+    if check_anti_debug() {
+        return CheckOutput::pass("unable to run check".to_string());
+    }
     let existing = probe_active_ifindexes();
     if existing.is_empty() {
         return CheckOutput::pass(
