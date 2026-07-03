@@ -14,20 +14,28 @@ jobs:
   build-native:
     name: Build Rust native library
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/ylarod/android-ndk:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v6
 
+      - name: Set up Java (for gradle/android SDK)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 35
+          ndk-version: r28
+
       - name: Install Rust
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          source $HOME/.cargo/env
-          rustup target add aarch64-linux-android
-          cargo install cargo-ndk
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -42,8 +50,11 @@ jobs:
       - name: Build libvpnhide_checks.so (aarch64)
         run: |
           cd lsposed/native
-          source $HOME/.cargo/env
           cargo ndk -t arm64-v8a build --release
+
+      - name: Verify .so exists
+        run: |
+          ls -lh lsposed/native/target/aarch64-linux-android/release/libvpnhide_checks.so
 
       - name: Upload .so as artifact
         uses: actions/upload-artifact@v4
@@ -67,6 +78,9 @@ jobs:
           - android16-6.12
     container:
       image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-20260313
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v6
 
@@ -75,10 +89,13 @@ jobs:
           cd kmod
           python3 build.py --kmi ${{ matrix.kmi }} --inside-container
 
+      - name: Verify .zip exists
+        run: ls -lh vpnhide-kmod-${{ matrix.kmi }}.zip
+
       - name: Upload module zip as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vpnhide-kmod-${{ matrix.kmi }}.zip
+          name: vpnhide-kmod-${{ matrix.kmi }}
           path: vpnhide-kmod-${{ matrix.kmi }}.zip
           retention-days: 30
 
@@ -87,6 +104,8 @@ jobs:
     needs: [build-native, build-kmod]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
 
@@ -94,6 +113,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
+
+      - name: List artifacts
+        run: find dist -type f
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -103,3 +125,5 @@ jobs:
             dist/vpnhide-kmod-*/vpnhide-kmod-*.zip
           draft: false
           generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
