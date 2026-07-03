@@ -81,12 +81,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Mark workspace safe
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
       - name: Build kernel module
         run: |
-          cd "$GITHUB_WORKSPACE/kmod"
+          cd kmod
           python3 build.py --kmi ${{ matrix.kmi }} --inside-container
 
       - name: Upload module zip as artifact
