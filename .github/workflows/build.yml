@@ -52,6 +52,10 @@ jobs:
           cd lsposed/native
           cargo ndk -t arm64-v8a build --release
 
+      - name: Strip symbols from .so
+        run: |
+          aarch64-linux-android-strip --strip-all lsposed/native/target/aarch64-linux-android/release/libvpnhide_checks.so
+
       - name: Upload .so as artifact
         uses: actions/upload-artifact@v4
         with:
