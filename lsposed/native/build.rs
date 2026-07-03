@@ -10,11 +10,5 @@
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-
-    // Align ELF LOAD segments on 16 KiB for 16 KiB-page devices
     println!("cargo:rustc-link-arg=-Wl,-z,max-page-size=16384");
-
-    // Explicitly link libc (getifaddrs, freeifaddrs)
-    // This must come before -nodefaultlibs in the final linker command
-    println!("cargo:rustc-link-lib=c");
 }
