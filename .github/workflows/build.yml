@@ -48,8 +48,6 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-native-
 
       - name: Build libvpnhide_checks.so (aarch64)
-        env:
-          RUSTFLAGS: -l c
         run: |
           cd lsposed/native
           cargo ndk -t arm64-v8a build --release
