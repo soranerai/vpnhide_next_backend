@@ -41,12 +41,15 @@ jobs:
       - name: Build native lib via Gradle (Gobley cargo plugin)
         run: |
           cd lsposed
-          ./gradlew :app:generateFromNativeLib
+          # assembleDebug compiles native lib through Gobley cargo plugin
+          ./gradlew :app:assembleDebug
 
       - name: Copy .so to artifacts
         run: |
           mkdir -p artifacts
-          find lsposed/native/target/aarch64-linux-android/release -name 'libvpnhide_checks.so' -exec cp {} artifacts/ \;
+          # Extract .so from either Gradle build intermediates or cargo target
+          find lsposed -name 'libvpnhide_checks.so' -type f ! -path '*/deps/*' -exec cp {} artifacts/ \;
+          ls -lh artifacts/
 
       - name: Upload .so as artifact
         uses: actions/upload-artifact@v4
