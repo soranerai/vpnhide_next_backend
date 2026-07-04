@@ -14,9 +14,11 @@
 void print_usage(const char *prog)
 {
 	fprintf(stderr,
-		"Usage: %s <load|targets|port_targets|lsposed_targets|port_rules|iface_prefixes|set_spoof_ip|debug|active_hooks|java_hooks|app_hooks|stats> [args...]\n",
+		"Usage: %s <load|targets|port_targets|lsposed_targets|port_rules|iface_prefixes|set_spoof_ip|debug|active_hooks|java_hooks|app_hooks|stats|stats_window> [args...]\n",
 		prog);
 	fprintf(stderr, "  load format: <json_path> [self_uid]\n");
+	fprintf(stderr,
+		"  stats_window format: <seconds_per_bucket> (window = 30 * seconds)\n");
 	fprintf(stderr,
 		"  port_rules format: <uid> <rule_count> <start> <end> <proto> ...\n");
 	fprintf(stderr,
@@ -533,14 +535,27 @@ int main(int argc, char **argv)
 				return 1;
 			}
 			for (int i = 0; i < sdata.count; i++) {
-				printf("%u;%u;%u;%u;%u;%u;%u\n", sdata.stats[i].uid,
+				printf("%u;%u;%u;%u;%u;%u;%u;%u\n", sdata.stats[i].uid,
 				       sdata.stats[i].ioctl_count,
 				       sdata.stats[i].netlink_count,
 				       sdata.stats[i].proc_count,
 				       sdata.stats[i].sockopt_count,
 				       sdata.stats[i].connect_count,
-				       sdata.stats[i].getname_count);
+				       sdata.stats[i].getname_count,
+				       sdata.stats[i].port_count);
 			}
+		}
+	} else if (strcmp(argv[1], "stats_window") == 0) {
+		if (argc < 3) {
+			print_usage(argv[0]);
+			close(fd);
+			return 1;
+		}
+		unsigned int secs = (unsigned int)strtoul(argv[2], NULL, 0);
+		if (ioctl(fd, VH_SET_STATS_WINDOW, &secs) < 0) {
+			perror("VH_SET_STATS_WINDOW");
+			close(fd);
+			return 1;
 		}
 	} else {
 		print_usage(argv[0]);

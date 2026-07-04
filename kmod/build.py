@@ -112,7 +112,9 @@ def build_ctl_host(repo_root: Path, kmod_dir: Path) -> Path:
                 ndk_home = str(ndk_base / versions[-1])
 
     if not ndk_home:
-        raise RuntimeError("ANDROID_NDK_HOME not set and NDK not found in standard locations")
+        raise RuntimeError(
+            "ANDROID_NDK_HOME not set and NDK not found in standard locations"
+        )
 
     print(f"Using NDK to build ctl: {ndk_home}")
 
@@ -153,7 +155,14 @@ def build_ctl_host(repo_root: Path, kmod_dir: Path) -> Path:
 
     # Build daemon binary as well
     out_daemon = kmod_dir / "vpnhide-daemon-host"
-    cmd_daemon = [clang, "-O2", "-Wall", str(kmod_dir / "vpnhide_daemon.c"), "-o", str(out_daemon)]
+    cmd_daemon = [
+        clang,
+        "-O2",
+        "-Wall",
+        str(kmod_dir / "vpnhide_daemon.c"),
+        "-o",
+        str(out_daemon),
+    ]
     try:
         subprocess.run(cmd_daemon + ["-static"], check=True, capture_output=True)
     except subprocess.CalledProcessError:
@@ -193,7 +202,9 @@ def native_build_one(
         shutil.copy(ctl_src, staging / "vpnhide-ctl")
         os.chmod(staging / "vpnhide-ctl", 0o755)
     else:
-        print(f"[{kmi}] warning: vpnhide-ctl-host not found, module will be missing the ctl tool")
+        print(
+            f"[{kmi}] warning: vpnhide-ctl-host not found, module will be missing the ctl tool"
+        )
 
     # Copy the host-built daemon binary
     daemon_src = kmod_dir / "vpnhide-daemon-host"
@@ -211,15 +222,22 @@ def native_build_one(
 
     module_prop = staging / "module.prop"
     content = module_prop.read_text(encoding="utf-8")
-    content = re.sub(r"^version=.*", f"version=v{build_version}", content, flags=re.MULTILINE)
+    content = re.sub(
+        r"^version=.*", f"version=v{build_version}", content, flags=re.MULTILINE
+    )
     if re.search(r"^gkiVariant=", content, flags=re.MULTILINE):
-        content = re.sub(r"^gkiVariant=.*", f"gkiVariant={kmi}", content, flags=re.MULTILINE)
+        content = re.sub(
+            r"^gkiVariant=.*", f"gkiVariant={kmi}", content, flags=re.MULTILINE
+        )
     else:
         content = content.rstrip() + f"\ngkiVariant={kmi}\n"
     update_json_url = f"https://raw.githubusercontent.com/soranerai/vpnhide/main/update-json/update-kmod-{kmi}.json"
     if re.search(r"^updateJson=", content, flags=re.MULTILINE):
         content = re.sub(
-            r"^updateJson=.*", f"updateJson={update_json_url}", content, flags=re.MULTILINE
+            r"^updateJson=.*",
+            f"updateJson={update_json_url}",
+            content,
+            flags=re.MULTILINE,
         )
     else:
         content = content.rstrip() + f"\nupdateJson={update_json_url}\n"
@@ -295,7 +313,9 @@ def find_runtime() -> tuple[str, bool]:
     sys.exit(1)
 
 
-def container_build_one(runtime: str, is_podman: bool, repo_root: Path, kmi: str) -> None:
+def container_build_one(
+    runtime: str, is_podman: bool, repo_root: Path, kmi: str
+) -> None:
     # Build ctl utility on host first
     try:
         build_ctl_host(repo_root, repo_root / "kmod")
@@ -394,7 +414,9 @@ def main() -> int:
     parser.add_argument(
         "--kdir",
         type=str,
-        help=("Kernel source directory (overrides KDIR/KERNEL_SRC). Implies native mode."),
+        help=(
+            "Kernel source directory (overrides KDIR/KERNEL_SRC). Implies native mode."
+        ),
     )
     parser.add_argument(
         "--clang-dir",

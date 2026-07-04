@@ -83,7 +83,9 @@ def write_fragment(path: Path, en: str, ru: str) -> None:
 
 def main() -> int:
     console = Console()
-    parser = argparse.ArgumentParser(description="Create an unreleased changelog fragment.")
+    parser = argparse.ArgumentParser(
+        description="Create an unreleased changelog fragment."
+    )
     parser.add_argument("type", choices=VALID_TYPES)
     parser.add_argument("en", help="English text")
     parser.add_argument("ru", help="Russian text")

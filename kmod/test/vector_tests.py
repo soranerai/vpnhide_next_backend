@@ -15,7 +15,7 @@ SO_BINDTOIFINDEX = 62  # On Linux (asm-generic/socket.h), SO_BINDTOIFINDEX is 62
 SIOCGIFFLAGS = 0x8913
 SIOCGIFADDR = 0x8915
 SIOCGIFDSTADDR = 0x8917
-SIOCGIFNETMASK = 0x891b
+SIOCGIFNETMASK = 0x891B
 
 
 def safe_fork():
@@ -45,7 +45,9 @@ def test_dev_ioctl(vpn0_idx):
     try:
         ifr = struct.pack("16sH", b"vpn0", 0)
         fcntl.ioctl(s.fileno(), SIOCGIFFLAGS, ifr)
-        print("[dev_ioctl] Non-target ioctl(SIOCGIFFLAGS, 'vpn0') succeeded as expected")
+        print(
+            "[dev_ioctl] Non-target ioctl(SIOCGIFFLAGS, 'vpn0') succeeded as expected"
+        )
     except Exception as e:
         print(f"FAIL: dev_ioctl SIOCGIFFLAGS non-target: {e}")
         return False
@@ -63,7 +65,9 @@ def test_dev_ioctl(vpn0_idx):
     try:
         ifr = struct.pack("16sH", b"vpn0", 0)
         fcntl.ioctl(s.fileno(), SIOCGIFDSTADDR, ifr)
-        print("[dev_ioctl] Non-target ioctl(SIOCGIFDSTADDR, 'vpn0') succeeded as expected")
+        print(
+            "[dev_ioctl] Non-target ioctl(SIOCGIFDSTADDR, 'vpn0') succeeded as expected"
+        )
     except Exception as e:
         print(f"FAIL: dev_ioctl SIOCGIFDSTADDR non-target: {e}")
         return False
@@ -72,7 +76,9 @@ def test_dev_ioctl(vpn0_idx):
     try:
         ifr = struct.pack("16sH", b"vpn0", 0)
         fcntl.ioctl(s.fileno(), SIOCGIFNETMASK, ifr)
-        print("[dev_ioctl] Non-target ioctl(SIOCGIFNETMASK, 'vpn0') succeeded as expected")
+        print(
+            "[dev_ioctl] Non-target ioctl(SIOCGIFNETMASK, 'vpn0') succeeded as expected"
+        )
     except Exception as e:
         print(f"FAIL: dev_ioctl SIOCGIFNETMASK non-target: {e}")
         return False
@@ -86,58 +92,86 @@ def test_dev_ioctl(vpn0_idx):
             # Should fail (raises OSError/ValueError)
             try:
                 socket.if_nametoindex("vpn0")
-                print("FAIL: dev_ioctl if_nametoindex target succeeded but should have failed")
+                print(
+                    "FAIL: dev_ioctl if_nametoindex target succeeded but should have failed"
+                )
                 sys.exit(1)
             except (OSError, ValueError) as e:
-                print(f"[dev_ioctl] Target if_nametoindex('vpn0') failed as expected: {e}")
+                print(
+                    f"[dev_ioctl] Target if_nametoindex('vpn0') failed as expected: {e}"
+                )
 
             # Test SIOCGIFFLAGS (target, should fail with ENODEV)
             try:
                 ifr = struct.pack("16sH", b"vpn0", 0)
                 fcntl.ioctl(s.fileno(), SIOCGIFFLAGS, ifr)
-                print("FAIL: dev_ioctl SIOCGIFFLAGS target succeeded but should have failed")
+                print(
+                    "FAIL: dev_ioctl SIOCGIFFLAGS target succeeded but should have failed"
+                )
                 sys.exit(1)
             except OSError as e:
                 if e.errno != 19:  # ENODEV
-                    print(f"FAIL: dev_ioctl SIOCGIFFLAGS target expected errno 19, got {e.errno}")
+                    print(
+                        f"FAIL: dev_ioctl SIOCGIFFLAGS target expected errno 19, got {e.errno}"
+                    )
                     sys.exit(1)
-                print(f"[dev_ioctl] Target ioctl(SIOCGIFFLAGS, 'vpn0') failed as expected: errno {e.errno}")
+                print(
+                    f"[dev_ioctl] Target ioctl(SIOCGIFFLAGS, 'vpn0') failed as expected: errno {e.errno}"
+                )
 
             # Test SIOCGIFADDR (target, should fail with ENODEV)
             try:
                 ifr = struct.pack("16sH", b"vpn0", 0)
                 fcntl.ioctl(s.fileno(), SIOCGIFADDR, ifr)
-                print("FAIL: dev_ioctl SIOCGIFADDR target succeeded but should have failed")
+                print(
+                    "FAIL: dev_ioctl SIOCGIFADDR target succeeded but should have failed"
+                )
                 sys.exit(1)
             except OSError as e:
                 if e.errno != 19:  # ENODEV
-                    print(f"FAIL: dev_ioctl SIOCGIFADDR target expected errno 19, got {e.errno}")
+                    print(
+                        f"FAIL: dev_ioctl SIOCGIFADDR target expected errno 19, got {e.errno}"
+                    )
                     sys.exit(1)
-                print(f"[dev_ioctl] Target ioctl(SIOCGIFADDR, 'vpn0') failed as expected: errno {e.errno}")
+                print(
+                    f"[dev_ioctl] Target ioctl(SIOCGIFADDR, 'vpn0') failed as expected: errno {e.errno}"
+                )
 
             # Test SIOCGIFDSTADDR (target, should fail with ENODEV)
             try:
                 ifr = struct.pack("16sH", b"vpn0", 0)
                 fcntl.ioctl(s.fileno(), SIOCGIFDSTADDR, ifr)
-                print("FAIL: dev_ioctl SIOCGIFDSTADDR target succeeded but should have failed")
+                print(
+                    "FAIL: dev_ioctl SIOCGIFDSTADDR target succeeded but should have failed"
+                )
                 sys.exit(1)
             except OSError as e:
                 if e.errno != 19:  # ENODEV
-                    print(f"FAIL: dev_ioctl SIOCGIFDSTADDR target expected errno 19, got {e.errno}")
+                    print(
+                        f"FAIL: dev_ioctl SIOCGIFDSTADDR target expected errno 19, got {e.errno}"
+                    )
                     sys.exit(1)
-                print(f"[dev_ioctl] Target ioctl(SIOCGIFDSTADDR, 'vpn0') failed as expected: errno {e.errno}")
+                print(
+                    f"[dev_ioctl] Target ioctl(SIOCGIFDSTADDR, 'vpn0') failed as expected: errno {e.errno}"
+                )
 
             # Test SIOCGIFNETMASK (target, should fail with ENODEV)
             try:
                 ifr = struct.pack("16sH", b"vpn0", 0)
                 fcntl.ioctl(s.fileno(), SIOCGIFNETMASK, ifr)
-                print("FAIL: dev_ioctl SIOCGIFNETMASK target succeeded but should have failed")
+                print(
+                    "FAIL: dev_ioctl SIOCGIFNETMASK target succeeded but should have failed"
+                )
                 sys.exit(1)
             except OSError as e:
                 if e.errno != 19:  # ENODEV
-                    print(f"FAIL: dev_ioctl SIOCGIFNETMASK target expected errno 19, got {e.errno}")
+                    print(
+                        f"FAIL: dev_ioctl SIOCGIFNETMASK target expected errno 19, got {e.errno}"
+                    )
                     sys.exit(1)
-                print(f"[dev_ioctl] Target ioctl(SIOCGIFNETMASK, 'vpn0') failed as expected: errno {e.errno}")
+                print(
+                    f"[dev_ioctl] Target ioctl(SIOCGIFNETMASK, 'vpn0') failed as expected: errno {e.errno}"
+                )
 
             sys.exit(0)
         except Exception as e:
@@ -158,7 +192,9 @@ def test_setsockopt(vpn0_idx):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.setsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE, b"vpn0")
-        print("[setsockopt] Non-target setsockopt(SO_BINDTODEVICE, 'vpn0') succeeded as expected")
+        print(
+            "[setsockopt] Non-target setsockopt(SO_BINDTODEVICE, 'vpn0') succeeded as expected"
+        )
     except Exception as e:
         print(f"FAIL: setsockopt SO_BINDTODEVICE non-target: {e}")
         return False
@@ -181,7 +217,9 @@ def test_setsockopt(vpn0_idx):
             s_tgt = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
                 s_tgt.setsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE, b"vpn0")
-                print("FAIL: setsockopt SO_BINDTODEVICE target succeeded but should have failed")
+                print(
+                    "FAIL: setsockopt SO_BINDTODEVICE target succeeded but should have failed"
+                )
                 sys.exit(1)
             except OSError as e:
                 print(
@@ -194,8 +232,12 @@ def test_setsockopt(vpn0_idx):
                     sys.exit(1)
 
             try:
-                s_tgt.setsockopt(socket.SOL_SOCKET, SO_BINDTOIFINDEX, struct.pack("i", vpn0_idx))
-                print("FAIL: setsockopt SO_BINDTOIFINDEX target succeeded but should have failed")
+                s_tgt.setsockopt(
+                    socket.SOL_SOCKET, SO_BINDTOIFINDEX, struct.pack("i", vpn0_idx)
+                )
+                print(
+                    "FAIL: setsockopt SO_BINDTOIFINDEX target succeeded but should have failed"
+                )
                 sys.exit(1)
             except OSError as e:
                 print(
@@ -248,9 +290,13 @@ def test_getsockopt(vpn0_idx):
             # 2. getsockopt SO_BINDTOIFINDEX
             val_idx = s_idx.getsockopt(socket.SOL_SOCKET, SO_BINDTOIFINDEX, 4)
             idx = struct.unpack("i", val_idx)[0]
-            print(f"[getsockopt] Target getsockopt(SO_BINDTOIFINDEX) returned: {idx} (expected: 0)")
+            print(
+                f"[getsockopt] Target getsockopt(SO_BINDTOIFINDEX) returned: {idx} (expected: 0)"
+            )
             if idx != 0:
-                print(f"FAIL: getsockopt SO_BINDTOIFINDEX target: expected 0, got {idx}")
+                print(
+                    f"FAIL: getsockopt SO_BINDTOIFINDEX target: expected 0, got {idx}"
+                )
                 sys.exit(1)
 
             sys.exit(0)
@@ -361,14 +407,18 @@ def test_connect_port_block():
             s_tgt.settimeout(2.0)
             try:
                 s_tgt.connect(("127.0.0.1", 8080))
-                print("FAIL: connect port block target succeeded but should have failed")
+                print(
+                    "FAIL: connect port block target succeeded but should have failed"
+                )
                 sys.exit(1)
             except OSError as e:
                 print(
                     f"[connect_port_block] Target connection to 127.0.0.1:8080 failed as expected: errno {e.errno} ({e.strerror})"
                 )
                 if e.errno != 111:  # ECONNREFUSED is 111
-                    print(f"FAIL: connect port block target expected errno 111, got {e.errno}")
+                    print(
+                        f"FAIL: connect port block target expected errno 111, got {e.errno}"
+                    )
                     sys.exit(1)
             sys.exit(0)
         except Exception as e:
@@ -686,7 +736,9 @@ def test_udp_queue_pressure():
             pass
     print(f"[UDP Queue Pressure] Non-target success rate: {success_count_nt}/1000")
     if success_count_nt < 950:
-        print(f"FAIL: UDP queue pressure non-target success rate too low: {success_count_nt}/1000")
+        print(
+            f"FAIL: UDP queue pressure non-target success rate too low: {success_count_nt}/1000"
+        )
         return False
 
     # 2. Target check (UID 5555)
@@ -700,7 +752,9 @@ def test_udp_queue_pressure():
             eagain_count = 0
             for _ in range(1000):
                 try:
-                    s_tgt.sendto(b"test_payload_32_bytes_long_here", ("127.0.0.1", 12345))
+                    s_tgt.sendto(
+                        b"test_payload_32_bytes_long_here", ("127.0.0.1", 12345)
+                    )
                     success_count += 1
                 except OSError as e:
                     if e.errno == 11:  # EAGAIN is 11
@@ -714,7 +768,9 @@ def test_udp_queue_pressure():
                 )
                 sys.exit(1)
             if eagain_count == 0:
-                print("FAIL: UDP queue pressure target did not receive any EAGAIN errors")
+                print(
+                    "FAIL: UDP queue pressure target did not receive any EAGAIN errors"
+                )
                 sys.exit(1)
             sys.exit(0)
         except Exception as e:

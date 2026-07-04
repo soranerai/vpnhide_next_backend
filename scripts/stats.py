@@ -22,7 +22,9 @@ def github_token() -> str | None:
     if token := os.environ.get("GITHUB_TOKEN"):
         return token
     try:
-        out = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=True)
+        out = subprocess.run(
+            ["gh", "auth", "token"], capture_output=True, text=True, check=True
+        )
         return out.stdout.strip() or None
     except (FileNotFoundError, subprocess.CalledProcessError):
         return None
@@ -32,7 +34,9 @@ headers = {"Accept": "application/vnd.github+json"}
 if token := github_token():
     headers["Authorization"] = f"Bearer {token}"
 
-resp = httpx.get("https://api.github.com/repos/soranerai/vpnhide_next/releases", headers=headers)
+resp = httpx.get(
+    "https://api.github.com/repos/soranerai/vpnhide_next/releases", headers=headers
+)
 resp.raise_for_status()
 releases = resp.json()
 

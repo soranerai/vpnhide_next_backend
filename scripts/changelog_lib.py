@@ -78,7 +78,9 @@ def save_json(data: dict) -> None:
     )
 
 
-_FRAGMENT_FILENAME = re.compile(r"^(?P<type>[a-z]+)-(?P<slug>.+)-(?P<hex>[0-9a-f]{4,})\.md$")
+_FRAGMENT_FILENAME = re.compile(
+    r"^(?P<type>[a-z]+)-(?P<slug>.+)-(?P<hex>[0-9a-f]{4,})\.md$"
+)
 _DATE_LINE = re.compile(r"^_(\d{4}-\d{2}-\d{2})_\s*$", re.M)
 _EN_HEADING = re.compile(r"^##\s+English\s*$", re.M)
 _RU_HEADING = re.compile(r"^##\s+Русский\s*$", re.M)
@@ -115,7 +117,9 @@ def parse_fragment(path: Path) -> dict:
     if en_match.start() > ru_match.start():
         raise ValueError(f"{path.name}: `## English` must appear before `## Русский`")
     if date_match.start() > en_match.start():
-        raise ValueError(f"{path.name}: date line must appear before the language sections")
+        raise ValueError(
+            f"{path.name}: date line must appear before the language sections"
+        )
 
     en_body = text[en_match.end() : ru_match.start()].strip()
     ru_body = text[ru_match.end() :].strip()
@@ -134,7 +138,9 @@ def load_fragments() -> list[dict]:
     """
     if not FRAGMENTS_DIR.is_dir():
         return []
-    fragments = [parse_fragment(p) for p in FRAGMENTS_DIR.glob("*.md") if p.name != "README.md"]
+    fragments = [
+        parse_fragment(p) for p in FRAGMENTS_DIR.glob("*.md") if p.name != "README.md"
+    ]
     fragments.sort(key=lambda f: (f["date"], f["path"].name))
     return fragments
 

@@ -117,7 +117,9 @@ def main() -> int:
         return 2
 
     version, version_code = parse_version(sys.argv[1])
-    console.print(f"[bold]Releasing v{version}[/bold]  [dim](versionCode {version_code})[/dim]")
+    console.print(
+        f"[bold]Releasing v{version}[/bold]  [dim](versionCode {version_code})[/dim]"
+    )
 
     # Check that the version hasn't already been released.
     data = load_json()

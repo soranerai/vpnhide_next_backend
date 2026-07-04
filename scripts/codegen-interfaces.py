@@ -29,7 +29,9 @@ TOML_PATH = REPO_ROOT / "data" / "interfaces.toml"
 OUT_KMOD = REPO_ROOT / "kmod" / "generated" / "iface_lists.h"
 OUT_KMOD_TEST = REPO_ROOT / "kmod" / "test_iface_lists.c"
 OUT_ZYGISK = REPO_ROOT / "zygisk" / "src" / "generated" / "iface_lists.rs"
-OUT_LSP_NATIVE = REPO_ROOT / "lsposed" / "native" / "src" / "generated" / "iface_lists.rs"
+OUT_LSP_NATIVE = (
+    REPO_ROOT / "lsposed" / "native" / "src" / "generated" / "iface_lists.rs"
+)
 OUT_LSP_KT = (
     REPO_ROOT
     / "lsposed"
@@ -135,7 +137,9 @@ def parse_test(entry: dict[str, Any]) -> TestVector:
         raise SystemExit(f"[[test]] entry needs name and is_vpn: {entry!r}")
     name = str(entry["name"])
     if not all(0x20 <= ord(c) < 0x7F for c in name):
-        raise SystemExit(f"non-ASCII test name {name!r}; the matcher itself is ASCII-only")
+        raise SystemExit(
+            f"non-ASCII test name {name!r}; the matcher itself is ASCII-only"
+        )
     return TestVector(name=name, is_vpn=bool(entry["is_vpn"]))
 
 
@@ -338,7 +342,9 @@ def emit_kmod_test(tests: list[TestVector]) -> str:
     lines.append(f"/* {GENERATED_HEADER_LINE} */")
     lines.append("/*")
     lines.append(" * Userspace test driver for generated/iface_lists.h.")
-    lines.append(" * Build: gcc -O2 -Wall -Werror -o test_iface_lists test_iface_lists.c")
+    lines.append(
+        " * Build: gcc -O2 -Wall -Werror -o test_iface_lists test_iface_lists.c"
+    )
     lines.append(" * Run: ./test_iface_lists  (exit 0 on success, 1 on failure)")
     lines.append(" */")
     lines.append("")
@@ -353,7 +359,9 @@ def emit_kmod_test(tests: list[TestVector]) -> str:
     lines.append("{")
     lines.append("\tbool got = vpnhide_iface_is_vpn(name);")
     lines.append("\tif (got != expected) {")
-    lines.append('\t\tfprintf(stderr, "FAIL: vpnhide_iface_is_vpn(\\"%s\\") = %s, expected %s\\n",')
+    lines.append(
+        '\t\tfprintf(stderr, "FAIL: vpnhide_iface_is_vpn(\\"%s\\") = %s, expected %s\\n",'
+    )
     lines.append('\t\t\tname, got ? "true" : "false", expected ? "true" : "false");')
     lines.append("\t\tfailures++;")
     lines.append("\t}")
@@ -436,7 +444,9 @@ def emit_rust(rules: list[Rule], tests: list[TestVector]) -> str:
     lines.append("    false")
     lines.append("}")
     lines.append("")
-    lines.append("/// True if the name matches any VPN-iface rule from data/interfaces.toml.")
+    lines.append(
+        "/// True if the name matches any VPN-iface rule from data/interfaces.toml."
+    )
     lines.append("pub fn matches_vpn(name: &[u8]) -> bool {")
     lines.append("    if name.is_empty() {")
     lines.append("        return false;")
@@ -445,7 +455,9 @@ def emit_rust(rules: list[Rule], tests: list[TestVector]) -> str:
         if r.note:
             lines.append(f"    // {r.note}")
         if r.needle == "tun" and r.kind == "prefix":
-            lines.append('    if starts_with_ci(name, b"tun") && !starts_with_ci(name, b"tunl") {')
+            lines.append(
+                '    if starts_with_ci(name, b"tun") && !starts_with_ci(name, b"tunl") {'
+            )
             lines.append("        return true;")
             lines.append("    }")
             continue
@@ -500,7 +512,9 @@ def emit_kotlin(rules: list[Rule]) -> str:
     lines.append("package dev.soranerai.vpnhidenext.generated")
     lines.append("")
     lines.append("internal object IfaceLists {")
-    lines.append("    /** True if `name` looks like a VPN tunnel per data/interfaces.toml. */")
+    lines.append(
+        "    /** True if `name` looks like a VPN tunnel per data/interfaces.toml. */"
+    )
     lines.append("    fun isVpnIface(name: String): Boolean {")
     lines.append("        if (name.isEmpty()) return false")
     lines.append("        val n = name.lowercase()")
@@ -508,7 +522,9 @@ def emit_kotlin(rules: list[Rule]) -> str:
         if r.note:
             lines.append(f"        // {r.note}")
         if r.needle == "tun" and r.kind == "prefix":
-            lines.append('        if (n.startsWith("tun") && !n.startsWith("tunl")) return true')
+            lines.append(
+                '        if (n.startsWith("tun") && !n.startsWith("tunl")) return true'
+            )
             continue
         if r.kind == "exact":
             cond = f"n == {kt_str_lit(r.needle)}"

@@ -9,9 +9,14 @@ def main():
     parser = argparse.ArgumentParser(
         description="Compile, push, and run Rust VPN hide checks on an Android device."
     )
-    parser.add_argument("-r", "--root", action="store_true", help="Run the checks as root (su)")
     parser.add_argument(
-        "-u", "--uid", type=str, help="Run the checks under a specific UID (requires root)"
+        "-r", "--root", action="store_true", help="Run the checks as root (su)"
+    )
+    parser.add_argument(
+        "-u",
+        "--uid",
+        type=str,
+        help="Run the checks under a specific UID (requires root)",
     )
     args = parser.parse_args()
 
@@ -44,19 +49,24 @@ def main():
         sys.exit(1)
 
     # Find the prebuilt toolchain bin directory
-    toolchain_bin = os.path.join(ndk_home, "toolchains", "llvm", "prebuilt", "linux-x86_64", "bin")
+    toolchain_bin = os.path.join(
+        ndk_home, "toolchains", "llvm", "prebuilt", "linux-x86_64", "bin"
+    )
     if not os.path.isdir(toolchain_bin):
         # Maybe on macOS or Windows?
         # NDK could have darwin-x86_64 or windows-x86_64
         for os_name in ["darwin-x86_64", "windows-x86_64", "linux-x86_64"]:
-            test_path = os.path.join(ndk_home, "toolchains", "llvm", "prebuilt", os_name, "bin")
+            test_path = os.path.join(
+                ndk_home, "toolchains", "llvm", "prebuilt", os_name, "bin"
+            )
             if os.path.isdir(test_path):
                 toolchain_bin = test_path
                 break
 
     if not os.path.isdir(toolchain_bin):
         print(
-            f"Error: Could not find prebuilt toolchain bin directory in {ndk_home}", file=sys.stderr
+            f"Error: Could not find prebuilt toolchain bin directory in {ndk_home}",
+            file=sys.stderr,
         )
         sys.exit(1)
 

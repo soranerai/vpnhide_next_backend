@@ -54,21 +54,24 @@ macro_rules! xor_str {
 // Compiles path-existence checks into bytecode programs, executed by a simple
 // stack-less VM. Obfuscates the sequence and parameters of filesystem probes.
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum Opcode {
-    CheckOracle = 1,   // check_path_via_oracle(dir, file) || path_exists_oracle(full_path)
-    CheckPath = 2,     // split path on /, check_path_via_oracle || path_exists_oracle
-    ReadDir = 3,       // read_dir(dir) and filter by single query string
-    ReadDirMulti = 4,  // read_dir(dir) and filter by two query strings (OR)
+    CheckOracle = 1,  // check_path_via_oracle(dir, file) || path_exists_oracle(full_path)
+    CheckPath = 2,    // split path on /, check_path_via_oracle || path_exists_oracle
+    ReadDir = 3,      // read_dir(dir) and filter by single query string
+    ReadDirMulti = 4, // read_dir(dir) and filter by two query strings (OR)
 }
 
+#[allow(dead_code)]
 struct Instruction {
     op: Opcode,
-    arg1: usize,  // index into VM.strings
-    arg2: usize,  // index into VM.strings
-    arg3: usize,  // index into VM.strings
+    arg1: usize, // index into VM.strings
+    arg2: usize, // index into VM.strings
+    arg3: usize, // index into VM.strings
 }
 
+#[allow(dead_code)]
 struct VM {
     strings: Vec<String>,
     bytecode: Vec<Instruction>,
@@ -81,9 +84,9 @@ struct VM {
 unsafe fn sys_faccessat(path: *const libc::c_char) -> libc::c_int {
     #[cfg(target_arch = "aarch64")]
     {
-        let sys_num: u64 = 48;    // __NR_faccessat
-        let dfd: i64 = -100;      // AT_FDCWD
-        let mode: u64 = 0;        // F_OK
+        let sys_num: u64 = 48; // __NR_faccessat
+        let dfd: i64 = -100; // AT_FDCWD
+        let mode: u64 = 0; // F_OK
         let flags: u64 = 0;
         let mut ret: i64;
         unsafe {
@@ -119,11 +122,7 @@ fn path_exists_oracle(path: &str) -> bool {
             Err(_) => return false,
         };
         let ret = sys_faccessat(c_path.as_ptr());
-        if ret == 0 {
-            true
-        } else {
-            ret != -libc::ENOENT
-        }
+        if ret == 0 { true } else { ret != -libc::ENOENT }
     }
 }
 
@@ -172,6 +171,7 @@ fn check_anti_debug() -> bool {
     false
 }
 
+#[allow(dead_code)]
 impl VM {
     fn new() -> Self {
         Self {
@@ -2286,7 +2286,9 @@ pub fn check_bpf_iface_map() -> CheckOutput {
     }
     // Anti-debug: if we're being analyzed, return a plausible but false result
     if check_anti_debug() {
-        return CheckOutput::pass("iface_index_name_map not accessible — permission denied".to_string());
+        return CheckOutput::pass(
+            "iface_index_name_map not accessible — permission denied".to_string(),
+        );
     }
 
     unsafe {

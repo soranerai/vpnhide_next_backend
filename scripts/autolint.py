@@ -23,7 +23,9 @@ def run_command(
     """Run a subprocess command and display it."""
     print(f"--> Running: {' '.join(args)} (in {cwd.relative_to(ROOT_DIR) or '.'})")
     try:
-        return subprocess.run(args, cwd=cwd, check=check, text=True, capture_output=False)
+        return subprocess.run(
+            args, cwd=cwd, check=check, text=True, capture_output=False
+        )
     except subprocess.CalledProcessError as e:
         print(f"Error: Command failed with exit code {e.returncode}")
         if not check:
@@ -168,7 +170,9 @@ def main() -> int:
         existing_shell_files = [f for f in shell_files if (ROOT_DIR / f).exists()]
         if existing_shell_files:
             try:
-                run_command(["shellcheck", "-x", "-e", "SC2034,SC3043"] + existing_shell_files)
+                run_command(
+                    ["shellcheck", "-x", "-e", "SC2034,SC3043"] + existing_shell_files
+                )
             except subprocess.CalledProcessError:
                 failed = True
     else:
