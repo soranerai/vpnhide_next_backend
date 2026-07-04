@@ -651,12 +651,12 @@ static void record_kmod_intercept(uid_t uid, int type)
 /*                                                                    */
 /*  What it does:                                                     */
 /*    Filters per-interface ioctls (SIOCGIFFLAGS, SIOCGIFNAME,        */
-/*    SIOCGIFMTU, SIOCGIFINDEX, SIOCGIFHWADDR, SIOCGIFADDR) and       */
-/*    returns -ENODEV if a target app queries a VPN interface.        */
+/*    SIOCGIFMTU, SIOCGIFINDEX, SIOCGIFHWADDR) and returns -ENODEV    */
+/*    if a target app queries a VPN interface.                        */
 /*                                                                    */
 /*  Consequence of absence (What happens without this hook):          */
-/*    Target apps can query state, MTU, ifindex, MAC, or IP address of*/
-/*    the VPN interface by its name directly, exposing its existence. */
+/*    Target apps can query state, MTU, ifindex, or MAC of the VPN    */
+/*    interface by its name directly, exposing its existence.         */
 /*                                                                    */
 /*  dev_ioctl() on GKI 6.1:                                           */
 /*    int dev_ioctl(struct net *net, unsigned int cmd,                */
@@ -665,7 +665,9 @@ static void record_kmod_intercept(uid_t uid, int type)
 /*  arm64: x0=net, x1=cmd, x2=ifr (KERNEL ptr), x3=data (__user)      */
 /*                                                                    */
 /*  Note: SIOCGIFCONF goes through sock_ioctl -> dev_ifconf, not      */
-/*  through dev_ioctl, so it is not covered here.                     */
+/*  through dev_ioctl, so it is not covered here. SIOCGIFADDR,        */
+/*  SIOCGIFDSTADDR, SIOCGIFBRDADDR, and SIOCGIFNETMASK are handled    */
+/*  by the IPv4-specific devinet_ioctl hook (Hook 1b) instead.        */
 /* ================================================================== */
 
 struct dev_ioctl_data {
@@ -727,6 +729,101 @@ static struct kretprobe dev_ioctl_krp = {
 	.data_size = sizeof(struct dev_ioctl_data),
 	.maxactive = VPNHIDE_KRETPROBE_MAXACTIVE,
 	.kp.symbol_name = "dev_ioctl",
+};
+
+/* ================================================================== */
+/*  Hook 1b: devinet_ioctl — IPv4 address ioctls (SIOCGIFADDR, etc.)  */
+/*  Android source path: net/ipv4/devinet.c                           */
+/*                                                                    */
+/*  What it does:                                                     */
+/*    Filters IPv4 address ioctls (SIOCGIFADDR, SIOCGIFDSTADDR,       */
+/*    SIOCGIFBRDADDR, SIOCGIFNETMASK) and returns -ENODEV if a        */
+/*    target app queries a VPN interface's IPv4 configuration.        */
+/*                                                                    */
+/*  Consequence of absence (What happens without this hook):          */
+/*    Target apps can query the IPv4 address, peer address, broadcast */
+/*    address, or netmask of the VPN interface, exposing both its     */
+/*    existence and network configuration.                            */
+/*                                                                    */
+/*  Why a separate hook from Hook 1 (dev_ioctl):                      */
+/*                                                                    */
+/*  On Linux, IPv4 address ioctls don't pass through dev_ioctl().     */
+/*  inet_ioctl() in net/ipv4/af_inet.c intercepts these specific      */
+/*  commands and routes them to devinet_ioctl() instead, which has    */
+/*  its own copy_from_user/copy_to_user of the ifreq. This is the     */
+/*  same architectural reason SIOCGIFCONF needed a separate hook      */
+/*  (sock_ioctl, Hook 2).                                             */
+/*                                                                    */
+/*  devinet_ioctl() on GKI 6.1:                                       */
+/*    int devinet_ioctl(struct net *net, unsigned int cmd,            */
+/*                      void __user *arg)                             */
+/*  arm64: x0=net, x1=cmd, x2=arg (__user pointer, not yet copied)    */
+/* ================================================================== */
+
+struct devinet_ioctl_data {
+	unsigned int cmd;
+	void __user *uarg; /* x2: still points to the user's ifreq */
+};
+
+static int devinet_ioctl_entry(struct kretprobe_instance *ri,
+				struct pt_regs *regs)
+{
+	struct devinet_ioctl_data *data;
+	if (!is_hook_active(HOOK_DEV_IOCTL, from_kuid(&init_user_ns, current_uid())))
+		return 1;
+
+	if (!is_target_uid())
+		return 1;
+
+	data = (void *)ri->data;
+	data->cmd = (unsigned int)regs->regs[1];
+	data->uarg = (void __user *)regs->regs[2];
+
+	vpnhide_dbg("devinet_ioctl_entry: uid=%u cmd=0x%x\n",
+		    from_kuid(&init_user_ns, current_uid()), data->cmd);
+	return 0;
+}
+
+static int devinet_ioctl_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct devinet_ioctl_data *data = (void *)ri->data;
+	char name[IFNAMSIZ];
+
+	if (regs_return_value(regs) != 0)
+		return 0;
+
+	/*
+	 * arg (x2) is a __user pointer to an ifreq that devinet_ioctl
+	 * has already processed (copy_from_user'd, modified, copy_to_user'd).
+	 * Read the interface name by copy_from_user, since we're in a return
+	 * handler at a point where the operation succeeded.
+	 */
+	if (!data->uarg)
+		return 0;
+
+	if (copy_from_user(name, data->uarg, IFNAMSIZ)) {
+		vpnhide_dbg("devinet_ioctl_ret: copy_from_user failed\n");
+		return 0;
+	}
+	name[IFNAMSIZ - 1] = '\0';
+
+	if (is_vpn_ifname(name)) {
+		vpnhide_dbg("devinet_ioctl_ret: hiding iface=%s cmd=0x%x\n", name,
+			    data->cmd);
+		record_kmod_intercept(from_kuid(&init_user_ns, current_uid()),
+				      0);
+		regs_set_return_value(regs, -ENODEV);
+	}
+
+	return 0;
+}
+
+static struct kretprobe devinet_ioctl_krp = {
+	.handler = devinet_ioctl_ret,
+	.entry_handler = devinet_ioctl_entry,
+	.data_size = sizeof(struct devinet_ioctl_data),
+	.maxactive = VPNHIDE_KRETPROBE_MAXACTIVE,
+	.kp.symbol_name = "devinet_ioctl",
 };
 
 /* ================================================================== */
@@ -5598,6 +5695,7 @@ static struct kretprobe sock_ioctl_krp = {
 
 static struct kretprobe_reg probes[] = {
 	{ &dev_ioctl_krp, "dev_ioctl", NULL, false, -1 },
+	{ &devinet_ioctl_krp, "devinet_ioctl", NULL, false, -1 },
 	{ &sock_ioctl_krp, "sock_ioctl", NULL, false, -1 },
 	{ &rtnl_fill_krp, "rtnl_fill_ifinfo", NULL, false, -1 },
 	{ &inet6_fill_krp, "inet6_fill_ifaddr", NULL, false, -1 },
