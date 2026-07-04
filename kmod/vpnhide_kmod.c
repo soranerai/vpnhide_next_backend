@@ -667,7 +667,7 @@ static void record_kmod_intercept(uid_t uid, int type)
 /*  Note: SIOCGIFCONF goes through sock_ioctl -> dev_ifconf, not      */
 /*  through dev_ioctl, so it is not covered here. SIOCGIFADDR,        */
 /*  SIOCGIFDSTADDR, SIOCGIFBRDADDR, and SIOCGIFNETMASK are handled    */
-/*  by the IPv4-specific devinet_ioctl hook (Hook 1b) instead.        */
+/*  by the IPv4-specific inet_ioctl hook (Hook 1b) instead.           */
 /* ================================================================== */
 
 struct dev_ioctl_data {
@@ -732,8 +732,8 @@ static struct kretprobe dev_ioctl_krp = {
 };
 
 /* ================================================================== */
-/*  Hook 1b: devinet_ioctl — IPv4 address ioctls (SIOCGIFADDR, etc.)  */
-/*  Android source path: net/ipv4/devinet.c                           */
+/*  Hook 1b: inet_ioctl — IPv4 address ioctls (SIOCGIFADDR, etc.)     */
+/*  Android source path: net/ipv4/af_inet.c                           */
 /*                                                                    */
 /*  What it does:                                                     */
 /*    Filters IPv4 address ioctls (SIOCGIFADDR, SIOCGIFDSTADDR,       */
@@ -748,27 +748,54 @@ static struct kretprobe dev_ioctl_krp = {
 /*  Why a separate hook from Hook 1 (dev_ioctl):                      */
 /*                                                                    */
 /*  On Linux, IPv4 address ioctls don't pass through dev_ioctl().     */
-/*  inet_ioctl() in net/ipv4/af_inet.c intercepts these specific      */
-/*  commands and routes them to devinet_ioctl() instead, which has    */
-/*  its own copy_from_user/copy_to_user of the ifreq. This is the     */
+/*  inet_ioctl() intercepts these specific commands and routes them   */
+/*  to devinet_ioctl() (net/ipv4/devinet.c) instead. This is the      */
 /*  same architectural reason SIOCGIFCONF needed a separate hook      */
 /*  (sock_ioctl, Hook 2).                                             */
 /*                                                                    */
-/*  devinet_ioctl() on GKI 6.1:                                       */
-/*    int devinet_ioctl(struct net *net, unsigned int cmd,            */
-/*                      void __user *arg)                             */
-/*  arm64: x0=net, x1=cmd, x2=arg (__user pointer, not yet copied)    */
+/*  Why probe inet_ioctl and not devinet_ioctl directly:              */
+/*                                                                    */
+/*  devinet_ioctl() has exactly one call site (the switch inside      */
+/*  inet_ioctl()) and is a prime candidate for Clang LTO to inline    */
+/*  away, just like dev_ifconf was (see the Hook 2 comment below).    */
+/*  register_kretprobe("devinet_ioctl") succeeds either way — kallsyms*/
+/*  can retain a dead stub even when nothing calls it — so a hook     */
+/*  there can silently never fire. inet_ioctl() cannot be inlined     */
+/*  away: it's assigned to the .ioctl member of inet_stream_ops /     */
+/*  inet_dgram_ops (struct proto_ops), so it is referenced by address */
+/*  and must remain a standalone symbol on every kernel version.      */
+/*                                                                    */
+/*  Only the four GET commands that leak identity/config are          */
+/*  filtered; inet_ioctl() also dispatches SIOCADDRT/SIOCDARP/etc.,   */
+/*  which are left untouched (entry handler checks cmd explicitly).   */
+/*                                                                    */
+/*  inet_ioctl() on GKI 6.1:                                          */
+/*    int inet_ioctl(struct socket *sock, unsigned int cmd,           */
+/*                   unsigned long arg)                                */
+/*  arm64: x0=sock, x1=cmd, x2=arg (__user pointer, not yet copied)   */
 /* ================================================================== */
 
-struct devinet_ioctl_data {
+struct inet_ioctl_data {
 	unsigned int cmd;
 	void __user *uarg; /* x2: still points to the user's ifreq */
 };
 
-static int devinet_ioctl_entry(struct kretprobe_instance *ri,
-				struct pt_regs *regs)
+static int inet_ioctl_entry(struct kretprobe_instance *ri,
+			     struct pt_regs *regs)
 {
-	struct devinet_ioctl_data *data;
+	struct inet_ioctl_data *data;
+	unsigned int cmd = (unsigned int)regs->regs[1];
+
+	switch (cmd) {
+	case SIOCGIFADDR:
+	case SIOCGIFDSTADDR:
+	case SIOCGIFBRDADDR:
+	case SIOCGIFNETMASK:
+		break;
+	default:
+		return 1;
+	}
+
 	if (!is_hook_active(HOOK_DEV_IOCTL, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
@@ -776,17 +803,17 @@ static int devinet_ioctl_entry(struct kretprobe_instance *ri,
 		return 1;
 
 	data = (void *)ri->data;
-	data->cmd = (unsigned int)regs->regs[1];
+	data->cmd = cmd;
 	data->uarg = (void __user *)regs->regs[2];
 
-	vpnhide_dbg("devinet_ioctl_entry: uid=%u cmd=0x%x\n",
+	vpnhide_dbg("inet_ioctl_entry: uid=%u cmd=0x%x\n",
 		    from_kuid(&init_user_ns, current_uid()), data->cmd);
 	return 0;
 }
 
-static int devinet_ioctl_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+static int inet_ioctl_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct devinet_ioctl_data *data = (void *)ri->data;
+	struct inet_ioctl_data *data = (void *)ri->data;
 	char name[IFNAMSIZ];
 
 	if (regs_return_value(regs) != 0)
@@ -794,21 +821,22 @@ static int devinet_ioctl_ret(struct kretprobe_instance *ri, struct pt_regs *regs
 
 	/*
 	 * arg (x2) is a __user pointer to an ifreq that devinet_ioctl
-	 * has already processed (copy_from_user'd, modified, copy_to_user'd).
-	 * Read the interface name by copy_from_user, since we're in a return
-	 * handler at a point where the operation succeeded.
+	 * (called from inet_ioctl) has already processed (copy_from_user'd,
+	 * modified, copy_to_user'd). Read the interface name by
+	 * copy_from_user, since we're in a return handler running in the
+	 * calling task's context at a point where the operation succeeded.
 	 */
 	if (!data->uarg)
 		return 0;
 
 	if (copy_from_user(name, data->uarg, IFNAMSIZ)) {
-		vpnhide_dbg("devinet_ioctl_ret: copy_from_user failed\n");
+		vpnhide_dbg("inet_ioctl_ret: copy_from_user failed\n");
 		return 0;
 	}
 	name[IFNAMSIZ - 1] = '\0';
 
 	if (is_vpn_ifname(name)) {
-		vpnhide_dbg("devinet_ioctl_ret: hiding iface=%s cmd=0x%x\n", name,
+		vpnhide_dbg("inet_ioctl_ret: hiding iface=%s cmd=0x%x\n", name,
 			    data->cmd);
 		record_kmod_intercept(from_kuid(&init_user_ns, current_uid()),
 				      0);
@@ -818,12 +846,12 @@ static int devinet_ioctl_ret(struct kretprobe_instance *ri, struct pt_regs *regs
 	return 0;
 }
 
-static struct kretprobe devinet_ioctl_krp = {
-	.handler = devinet_ioctl_ret,
-	.entry_handler = devinet_ioctl_entry,
-	.data_size = sizeof(struct devinet_ioctl_data),
+static struct kretprobe inet_ioctl_krp = {
+	.handler = inet_ioctl_ret,
+	.entry_handler = inet_ioctl_entry,
+	.data_size = sizeof(struct inet_ioctl_data),
 	.maxactive = VPNHIDE_KRETPROBE_MAXACTIVE,
-	.kp.symbol_name = "devinet_ioctl",
+	.kp.symbol_name = "inet_ioctl",
 };
 
 /* ================================================================== */
@@ -5695,7 +5723,7 @@ static struct kretprobe sock_ioctl_krp = {
 
 static struct kretprobe_reg probes[] = {
 	{ &dev_ioctl_krp, "dev_ioctl", NULL, false, -1 },
-	{ &devinet_ioctl_krp, "devinet_ioctl", NULL, false, -1 },
+	{ &inet_ioctl_krp, "inet_ioctl", NULL, false, -1 },
 	{ &sock_ioctl_krp, "sock_ioctl", NULL, false, -1 },
 	{ &rtnl_fill_krp, "rtnl_fill_ifinfo", NULL, false, -1 },
 	{ &inet6_fill_krp, "inet6_fill_ifaddr", NULL, false, -1 },
