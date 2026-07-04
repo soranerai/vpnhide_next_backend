@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   build-native:
-    name: Build Rust native library
+    name: Build Rust native library (via Gradle + Gobley)
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/soranerai/vpnhide_next/ci:latest
@@ -35,16 +35,24 @@ jobs:
           key: cargo-${{ runner.os }}-native-${{ hashFiles('lsposed/native/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-native-
 
-      - name: Build libvpnhide_checks.so (aarch64)
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Build native lib via Gradle (Gobley cargo plugin)
         run: |
-          cd lsposed/native
-          cargo ndk -t arm64-v8a build --release
+          cd lsposed
+          ./gradlew :app:generateFromNativeLib
+
+      - name: Copy .so to artifacts
+        run: |
+          mkdir -p artifacts
+          find lsposed/native/target/aarch64-linux-android/release -name 'libvpnhide_checks.so' -exec cp {} artifacts/ \;
 
       - name: Upload .so as artifact
         uses: actions/upload-artifact@v4
         with:
           name: libvpnhide_checks.so
-          path: lsposed/native/target/aarch64-linux-android/release/libvpnhide_checks.so
+          path: artifacts/libvpnhide_checks.so
           retention-days: 30
           if-no-files-found: error
 
