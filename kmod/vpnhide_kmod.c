@@ -569,8 +569,9 @@ static DEFINE_SPINLOCK(kmod_stats_lock);
 static void record_kmod_intercept(uid_t uid, int type) {
   int i;
   unsigned long flags;
-  u64 now_bucket = ktime_get_real_seconds() / atomic_read(&stats_bucket_secs);
-  int idx = (int)(now_bucket % BUCKETS_COUNT);
+  u32 duration = atomic_read(&stats_bucket_secs);
+  u64 now_secs = ktime_get_real_seconds();
+  int idx = (int)((now_secs / duration) % BUCKETS_COUNT);
 
   if (uid == 0 || uid == 1000)
     return;
@@ -578,7 +579,11 @@ static void record_kmod_intercept(uid_t uid, int type) {
   spin_lock_irqsave(&kmod_stats_lock, flags);
   for (i = 0; i < kmod_stats_count; i++) {
     if (kmod_stats[i].uid == uid) {
-      if (kmod_stats[i].bucket_times[idx] != now_bucket) {
+      /* Compare quantum numbers under the *current* duration, not a
+       * value stored under a possibly different duration — this way
+       * switching the retention period never misinterprets existing
+       * data as a completely different bucket generation. */
+      if (kmod_stats[i].bucket_times[idx] / duration != now_secs / duration) {
         kmod_stats[i].ioctl_counts[idx] = 0;
         kmod_stats[i].netlink_counts[idx] = 0;
         kmod_stats[i].proc_counts[idx] = 0;
@@ -586,7 +591,7 @@ static void record_kmod_intercept(uid_t uid, int type) {
         kmod_stats[i].connect_counts[idx] = 0;
         kmod_stats[i].getname_counts[idx] = 0;
         kmod_stats[i].port_counts[idx] = 0;
-        kmod_stats[i].bucket_times[idx] = now_bucket;
+        kmod_stats[i].bucket_times[idx] = now_secs;
       }
       if (type == 0)
         kmod_stats[i].ioctl_counts[idx]++;
@@ -626,7 +631,7 @@ static void record_kmod_intercept(uid_t uid, int type) {
     memset(kmod_stats[kmod_stats_count].bucket_times, 0,
            sizeof(kmod_stats[kmod_stats_count].bucket_times));
 
-    kmod_stats[kmod_stats_count].bucket_times[idx] = now_bucket;
+    kmod_stats[kmod_stats_count].bucket_times[idx] = now_secs;
     if (type == 0)
       kmod_stats[kmod_stats_count].ioctl_counts[idx] = 1;
     else if (type == 1)
@@ -3130,7 +3135,9 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
   case VH_GET_STATS: {
     struct vpnhide_kmod_stats_data *sdata;
     unsigned long flags;
-    u64 now_bucket = ktime_get_real_seconds() / atomic_read(&stats_bucket_secs);
+    u32 duration = atomic_read(&stats_bucket_secs);
+    u64 now_secs = ktime_get_real_seconds();
+    u64 window_secs = (u64)BUCKETS_COUNT * duration;
     int i, b, active_count = 0;
 
     sdata = kvzalloc(sizeof(*sdata), GFP_KERNEL);
@@ -3142,7 +3149,10 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
       u32 ioctl_sum = 0, netlink_sum = 0, proc_sum = 0, sockopt_sum = 0,
           connect_sum = 0, getname_sum = 0, port_sum = 0;
       for (b = 0; b < BUCKETS_COUNT; b++) {
-        if (now_bucket - kmod_stats[i].bucket_times[b] < BUCKETS_COUNT) {
+        /* Real-elapsed-time check (not quantized bucket numbers), so
+         * a retention-period change immediately reflects the new
+         * window against existing data instead of discarding it. */
+        if (now_secs - kmod_stats[i].bucket_times[b] < window_secs) {
           ioctl_sum += kmod_stats[i].ioctl_counts[b];
           netlink_sum += kmod_stats[i].netlink_counts[b];
           proc_sum += kmod_stats[i].proc_counts[b];
@@ -3187,24 +3197,19 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
   }
   case VH_SET_STATS_WINDOW: {
     unsigned int secs;
-    unsigned long flags;
 
     if (copy_from_user(&secs, (void __user *)arg, sizeof(secs)))
       return -EFAULT;
     if (secs == 0)
       return -EINVAL;
 
-    /* DatabaseSync re-sends this on every settings sync (app
-     * toggles, port rules, etc.), not just on an actual period
-     * change — only clear stats when the value truly changes,
-     * otherwise routine syncs would wipe rolling stats every
-     * few seconds. */
+    /* record_kmod_intercept()/VH_GET_STATS compare quantum numbers
+     * and elapsed real time using whatever duration is current, so
+     * existing rolling stats stay valid across a duration change —
+     * no clearing needed here, whether this is a real period change
+     * or DatabaseSync re-sending the same value on an unrelated
+     * settings sync. */
     if (atomic_xchg(&stats_bucket_secs, secs) != secs) {
-      spin_lock_irqsave(&kmod_stats_lock, flags);
-      kmod_stats_count = 0;
-      memset(kmod_stats, 0, sizeof(kmod_stats));
-      spin_unlock_irqrestore(&kmod_stats_lock, flags);
-
       atomic_inc(&vpnhide_config_generation);
       wake_up_interruptible(&vpnhide_config_wait);
     }
