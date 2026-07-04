@@ -7,42 +7,6 @@ use crate::generated::iface_lists::matches_vpn;
 
 uniffi::setup_scaffolding!();
 
-// ── Direct ARM64 syscall for faccessat (bypass PLT/GOT Frida hooking) ──
-
-#[inline(always)]
-unsafe fn sys_faccessat(path: *const libc::c_char) -> libc::c_int {
-    #[cfg(target_arch = "aarch64")]
-    {
-        let sys_num: u64 = 48; // __NR_faccessat
-        let dfd: i64 = -100;   // AT_FDCWD
-        let mode: u64 = 0;     // F_OK
-        let flags: u64 = 0;
-        let mut ret: i64;
-        unsafe {
-            std::arch::asm!(
-                "svc #0",
-                in("x8") sys_num,
-                in("x0") dfd,
-                in("x1") path,
-                in("x2") mode,
-                in("x3") flags,
-                lateout("x0") ret,
-                options(nostack, preserves_flags)
-            );
-        }
-        ret as libc::c_int
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        let ret = libc::faccessat(-100, path, 0, 0);
-        if ret < 0 {
-            -std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
-        } else {
-            0
-        }
-    }
-}
-
 // ── Polymorphic XOR string encryption using compilation-time calculations ──
 //
 // Each call to xor_str!("...") generates a unique pseudo-random key based on
