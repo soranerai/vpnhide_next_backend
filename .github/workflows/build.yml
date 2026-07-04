@@ -61,8 +61,35 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+      # vpnhide-ctl/vpnhide-daemon must be static aarch64 Android (Bionic)
+      # binaries — built with the Android NDK's aarch64-linux-android clang,
+      # not the ddk-min container's plain gcc (that container only carries a
+      # kernel cross-toolchain, its native gcc targets the container's own
+      # arch and produces a binary that won't exec on an aarch64 phone or in
+      # the aarch64 QEMU test guest). ci:latest already has ANDROID_NDK_ROOT
+      # baked in, so build them here instead of in build-kmod.
+      - name: Build vpnhide-ctl-host and vpnhide-daemon-host (NDK, aarch64)
+        run: |
+          NDK_CLANG="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang"
+          NDK_STRIP="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          cd kmod
+          "$NDK_CLANG" -O2 -Wall -static vpnhide_ctl.c parson.c -o vpnhide-ctl-host
+          "$NDK_CLANG" -O2 -Wall -static vpnhide_daemon.c -o vpnhide-daemon-host
+          "$NDK_STRIP" vpnhide-ctl-host vpnhide-daemon-host
+
+      - name: Upload host binaries as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vpnhide-host-binaries
+          path: |
+            kmod/vpnhide-ctl-host
+            kmod/vpnhide-daemon-host
+          retention-days: 30
+          if-no-files-found: error
+
   build-kmod:
     name: Build kernel module (${{ matrix.kmi }})
+    needs: build-native
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -80,14 +107,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Build host binaries (ctl, daemon)
-        run: |
-          cd kmod
-          gcc -O2 -Wall -static vpnhide_ctl.c parson.c -o vpnhide-ctl
-          gcc -O2 -Wall -static vpnhide_daemon.c -o vpnhide-daemon
-          llvm-strip vpnhide-ctl vpnhide-daemon
-          # Place in module root for inclusion in zip
-          cp vpnhide-ctl vpnhide-daemon module/
+      - name: Download host binaries (ctl, daemon) from build-native
+        uses: actions/download-artifact@v4
+        with:
+          name: vpnhide-host-binaries
+          path: kmod
 
       - name: Build kernel module
         run: |
