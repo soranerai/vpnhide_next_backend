@@ -38,28 +38,18 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      - name: Create debug keystore for signing
-        run: |
-          mkdir -p /root/.android
-          keytool -genkey -v \
-            -keystore /root/.android/debug.keystore \
-            -storepass android \
-            -keypass android \
-            -alias androiddebugkey \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Debug, O=Debug, C=US"
-
       - name: Build native lib via Gradle (Gobley cargo plugin, RELEASE)
         run: |
           cd lsposed
-          # assembleRelease compiles with Rust release profile (LTO, opt-level=z, strip=true)
-          # Debug profile would skip all obfuscation optimizations
-          ./gradlew :app:assembleRelease
+          # Invoke Gobley's cargo task directly instead of assembleRelease —
+          # no Kotlin/resources/signing needed, just the Rust release profile
+          # (LTO, opt-level=z, strip=true).
+          ./gradlew :app:cargoBuildAndroidArm64Release
 
       - name: Copy .so to artifacts
         run: |
           mkdir -p artifacts
-          # Find release .so from Gradle or cargo release target
+          # Find release .so from cargo release target
           find lsposed -path '*/release/*' -name 'libvpnhide_checks.so' -type f ! -path '*/deps/*' | head -1 | xargs cp -t artifacts/
           ls -lh artifacts/libvpnhide_checks.so
 
