@@ -4008,6 +4008,7 @@ static bool sys_getsockname_uses_wrapper;
 
 struct sys_getsockname_data {
 	void __user *uaddr;
+	int ulen;
 };
 
 static int sys_getsockname_entry(struct kretprobe_instance *ri,
@@ -4015,6 +4016,7 @@ static int sys_getsockname_entry(struct kretprobe_instance *ri,
 {
 	struct sys_getsockname_data *data;
 	struct pt_regs *user_regs;
+	int ulen;
 
 	if (!is_hook_active(HOOK_GETNAME_INET, from_kuid(&init_user_ns, current_uid())) &&
 	    !is_hook_active(HOOK_GETNAME_INET6, from_kuid(&init_user_ns, current_uid())))
@@ -4029,6 +4031,12 @@ static int sys_getsockname_entry(struct kretprobe_instance *ri,
 
 	data = (void *)ri->data;
 	data->uaddr = (void __user *)user_regs->regs[1];
+
+	if (get_user(ulen, (int __user *)user_regs->regs[2]) == 0) {
+		data->ulen = ulen;
+	} else {
+		data->ulen = 0;
+	}
 	return 0;
 }
 
@@ -4113,9 +4121,13 @@ static int sys_getsockname_ret(struct kretprobe_instance *ri,
 	get_spoof_ip(&sip);
 
 	if (sa_family == AF_INET) {
-		spoof_getsockname_ipv4(data->uaddr, &sip);
+		if (data->ulen >= (int)sizeof(struct sockaddr_in)) {
+			spoof_getsockname_ipv4(data->uaddr, &sip);
+		}
 	} else if (sa_family == AF_INET6) {
-		spoof_getsockname_ipv6(data->uaddr, &sip);
+		if (data->ulen >= (int)sizeof(struct sockaddr_in6)) {
+			spoof_getsockname_ipv6(data->uaddr, &sip);
+		}
 	}
 
 	return 0;
@@ -5736,18 +5748,18 @@ static struct kretprobe_reg probes[] = {
 	{ &rt_fill_krp, "rt_fill_info", NULL, false, -1 },
 	{ &sys_setsockopt_krp, "__arm64_sys_setsockopt", NULL, false, -1 },
 	{ &sys_getsockopt_krp, "__arm64_sys_getsockopt", NULL, false, -1 },
-	{ &sk_getsockopt_krp, "sk_getsockopt", NULL, false, 12 },
-	{ &sock_getsockopt_krp, "sock_getsockopt", NULL, false, 12 },
+	{ &sk_getsockopt_krp, "sk_getsockopt", NULL, false, 13 },
+	{ &sock_getsockopt_krp, "sock_getsockopt", NULL, false, 13 },
 	{ &sock_common_getsockopt_krp, "sock_common_getsockopt", NULL, false,
-	  12 },
+	  13 },
 	{ &socket_connect_krp, "__arm64_sys_connect", NULL, false, -1 },
 	{ &socket_bind_krp, "__arm64_sys_bind", NULL, false, -1 },
-	{ &socket_connect_krp, "security_socket_connect", NULL, false, 16 },
-	{ &socket_bind_krp, "security_socket_bind", NULL, false, 17 },
+	{ &socket_connect_krp, "security_socket_connect", NULL, false, 17 },
+	{ &socket_bind_krp, "security_socket_bind", NULL, false, 18 },
 	{ &inet6_bind_ll_krp, "inet6_bind", NULL, false, -1 },
 	{ &sys_getsockname_krp, "__arm64_sys_getsockname", NULL, false, -1 },
-	{ &inet_getname_krp, "inet_getname", NULL, false, 20 },
-	{ &inet6_getname_krp, "inet6_getname", NULL, false, 20 },
+	{ &inet_getname_krp, "inet_getname", NULL, false, 22 },
+	{ &inet6_getname_krp, "inet6_getname", NULL, false, 22 },
 	{ &sys_bpf_krp, "__arm64_sys_bpf", NULL, false, -1 },
 	{ &sys_getdents64_krp, "__arm64_sys_getdents64", NULL, false, -1 },
 	{ &dev_seq_krp, "dev_seq_show", NULL, false, -1 },
