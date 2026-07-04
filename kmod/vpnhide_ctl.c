@@ -14,11 +14,13 @@
 void print_usage(const char *prog)
 {
 	fprintf(stderr,
-		"Usage: %s <load|targets|port_targets|lsposed_targets|port_rules|iface_prefixes|set_spoof_ip|debug|active_hooks|java_hooks|stats> [args...]\n",
+		"Usage: %s <load|targets|port_targets|lsposed_targets|port_rules|iface_prefixes|set_spoof_ip|debug|active_hooks|java_hooks|app_hooks|stats> [args...]\n",
 		prog);
 	fprintf(stderr, "  load format: <json_path> [self_uid]\n");
 	fprintf(stderr,
 		"  port_rules format: <uid> <rule_count> <start> <end> <proto> ...\n");
+	fprintf(stderr,
+		"  app_hooks format: <uid> <has_kernel:0|1> <kernel_mask> <has_java:0|1> <java_mask> ...\n");
 	fprintf(stderr, "  proto: 0=TCP, 1=UDP, 2=BOTH\n");
 	fprintf(stderr, "  set_spoof_ip format: <ipv4|none> <ipv6|none>\n");
 }
@@ -116,8 +118,10 @@ int main(int argc, char **argv)
 		JSON_Array *apps = json_object_get_array(root, "apps");
 		struct vpnhide_ioctl_data targets;
 		struct vpnhide_ioctl_data lsposed;
+		struct vpnhide_app_hook_ioctl_data app_hook_masks;
 		memset(&targets, 0, sizeof(targets));
 		memset(&lsposed, 0, sizeof(lsposed));
+		memset(&app_hook_masks, 0, sizeof(app_hook_masks));
 
 		if (apps) {
 			size_t apps_count = json_array_get_count(apps);
@@ -136,7 +140,30 @@ int main(int argc, char **argv)
 				if (lsp && uid != 0) {
 					add_uid_distinct(lsposed.uids, &lsposed.count, uid);
 				}
+
+				if (uid != 0 &&
+				    app_hook_masks.count < MAX_TARGET_UIDS) {
+					int has_kernel = json_object_has_value(app, "kernelHookMask");
+					int has_java = json_object_has_value(app, "javaHookMask");
+
+					if (has_kernel || has_java) {
+						struct vpnhide_app_hook_mask *m =
+							&app_hook_masks.masks[app_hook_masks.count];
+						m->uid = uid;
+						m->has_kernel_override = has_kernel ? 1 : 0;
+						m->kernel_mask = has_kernel ?
+							(unsigned int)json_object_get_number(app, "kernelHookMask") : 0;
+						m->has_java_override = has_java ? 1 : 0;
+						m->java_mask = has_java ?
+							(unsigned int)json_object_get_number(app, "javaHookMask") : 0;
+						app_hook_masks.count++;
+					}
+				}
 			}
+		}
+
+		if (ioctl(fd, VH_SET_APP_HOOK_MASKS, &app_hook_masks) < 0) {
+			perror("VH_SET_APP_HOOK_MASKS");
 		}
 		if (self_uid != 0) {
 			add_uid_distinct(targets.uids, &targets.count, self_uid);
@@ -435,6 +462,28 @@ int main(int argc, char **argv)
 				close(fd);
 				return 1;
 			}
+		}
+	} else if (strcmp(argv[1], "app_hooks") == 0) {
+		struct vpnhide_app_hook_ioctl_data adata;
+		int arg_idx = 2;
+
+		memset(&adata, 0, sizeof(adata));
+
+		while (arg_idx + 4 < argc && adata.count < MAX_TARGET_UIDS) {
+			struct vpnhide_app_hook_mask *m = &adata.masks[adata.count];
+
+			m->uid = (uid_t)atoi(argv[arg_idx++]);
+			m->has_kernel_override = (unsigned char)atoi(argv[arg_idx++]);
+			m->kernel_mask = (unsigned int)strtoul(argv[arg_idx++], NULL, 0);
+			m->has_java_override = (unsigned char)atoi(argv[arg_idx++]);
+			m->java_mask = (unsigned int)strtoul(argv[arg_idx++], NULL, 0);
+			adata.count++;
+		}
+
+		if (ioctl(fd, VH_SET_APP_HOOK_MASKS, &adata) < 0) {
+			perror("VH_SET_APP_HOOK_MASKS");
+			close(fd);
+			return 1;
 		}
 	} else if (strcmp(argv[1], "hook_status") == 0) {
 		char buf[256];

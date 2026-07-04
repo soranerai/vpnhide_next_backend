@@ -118,4 +118,24 @@ struct vpnhide_vpn_ifindexes {
 #define VH_GET_JAVA_STATS _IOR(VH_IOCTL_MAGIC, 0x19, char[4096])
 #define VH_GET_HOOK_STATUS _IOR(VH_IOCTL_MAGIC, 0x1A, char[256])
 
+/* Per-app hook mask overrides: when set for a uid, take priority over the
+ * global active_hooks_mask / java_hooks_mask for that uid only. */
+struct vpnhide_app_hook_mask {
+	uid_t uid;
+	unsigned int kernel_mask;
+	unsigned int java_mask;
+	unsigned char has_kernel_override;
+	unsigned char has_java_override;
+};
+
+struct vpnhide_app_hook_ioctl_data {
+	int count;
+	struct vpnhide_app_hook_mask masks[MAX_TARGET_UIDS];
+};
+
+#define VH_SET_APP_HOOK_MASKS \
+	_IOW(VH_IOCTL_MAGIC, 0x1B, struct vpnhide_app_hook_ioctl_data)
+#define VH_GET_APP_HOOK_MASKS \
+	_IOR(VH_IOCTL_MAGIC, 0x1C, struct vpnhide_app_hook_ioctl_data)
+
 #endif /* _VPNHIDE_H */
