@@ -232,8 +232,49 @@ enum vpnhide_hook_idx {
 	HOOK_TC_FILL_QDISC = 31,
 };
 
-static inline bool is_hook_active(enum vpnhide_hook_idx index)
+struct vpnhide_app_hook_masks {
+	int count;
+	struct vpnhide_app_hook_mask masks[MAX_TARGET_UIDS];
+	struct rcu_head rcu;
+};
+
+static struct vpnhide_app_hook_masks __rcu *global_app_hook_masks;
+static DEFINE_SPINLOCK(app_hook_masks_update_lock);
+
+static bool lookup_app_kernel_mask(uid_t uid, unsigned int *out)
 {
+	struct vpnhide_app_hook_masks *t;
+	bool found = false;
+	int i;
+
+	rcu_read_lock();
+	t = rcu_dereference(global_app_hook_masks);
+	if (t) {
+		for (i = 0; i < t->count; i++) {
+			if (t->masks[i].uid == uid &&
+			    t->masks[i].has_kernel_override) {
+				*out = t->masks[i].kernel_mask;
+				found = true;
+				break;
+			}
+		}
+	}
+	rcu_read_unlock();
+	return found;
+}
+
+/*
+ * `uid` is the caller's uid, passed in by the caller (typically already
+ * resolved for the adjacent is_target_uid() check) so this doesn't force
+ * every call site to add its own from_kuid()/current_uid() boilerplate.
+ */
+static inline bool is_hook_active(enum vpnhide_hook_idx index, uid_t uid)
+{
+	unsigned int mask;
+
+	if (lookup_app_kernel_mask(uid, &mask))
+		return (mask & (1u << index)) != 0;
+
 	return (READ_ONCE(active_hooks_mask) & (1u << index)) != 0;
 }
 
@@ -635,7 +676,7 @@ struct dev_ioctl_data {
 static int dev_ioctl_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct dev_ioctl_data *data;
-	if (!is_hook_active(HOOK_DEV_IOCTL))
+	if (!is_hook_active(HOOK_DEV_IOCTL, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (!is_target_uid())
@@ -872,7 +913,7 @@ static int sys_setsockopt_entry(struct kretprobe_instance *ri,
 	void __user *optval_ptr;
 	char name[IFNAMSIZ];
 
-	if (!is_hook_active(HOOK_SETSOCKOPT))
+	if (!is_hook_active(HOOK_SETSOCKOPT, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	sdata = (void *)ri->data;
@@ -1138,7 +1179,7 @@ static int sock_getsockopt_entry(struct kretprobe_instance *ri,
 	int level = (int)regs->regs[1];
 	int optname = (int)regs->regs[2];
 
-	if (!is_hook_active(HOOK_GETSOCKOPT))
+	if (!is_hook_active(HOOK_GETSOCKOPT, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (level != SOL_SOCKET && level != IPPROTO_IP &&
@@ -1405,7 +1446,7 @@ static int sys_getsockopt_entry(struct kretprobe_instance *ri,
 	void __user *optval;
 	int __user *optlen;
 
-	if (!is_hook_active(HOOK_GETSOCKOPT))
+	if (!is_hook_active(HOOK_GETSOCKOPT, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (sys_getsockopt_uses_wrapper) {
@@ -1471,7 +1512,7 @@ static int sk_getsockopt_entry(struct kretprobe_instance *ri,
 	int level = (int)regs->regs[1];
 	int optname = (int)regs->regs[2];
 
-	if (!is_hook_active(HOOK_GETSOCKOPT))
+	if (!is_hook_active(HOOK_GETSOCKOPT, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (is_kernel)
@@ -1553,7 +1594,7 @@ static int rtnl_fill_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	struct rtnl_fill_data *data;
 	struct net_device *dev;
 
-	if (!is_hook_active(HOOK_RTNL_FILL))
+	if (!is_hook_active(HOOK_RTNL_FILL, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (!is_target_uid())
@@ -1628,7 +1669,7 @@ static int inet6_fill_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	struct inet6_fill_data *data;
 	struct inet6_ifaddr *ifa;
 
-	if (!is_hook_active(HOOK_INET6_FILL))
+	if (!is_hook_active(HOOK_INET6_FILL, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (!is_target_uid())
@@ -1704,7 +1745,7 @@ static int inet_fill_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	struct inet_fill_data *data;
 	struct in_ifaddr *ifa;
 
-	if (!is_hook_active(HOOK_INET_FILL))
+	if (!is_hook_active(HOOK_INET_FILL, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (!is_target_uid())
@@ -1777,7 +1818,7 @@ struct fib_route_data {
 static int fib_route_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct fib_route_data *data;
-	if (!is_hook_active(HOOK_FIB_ROUTE))
+	if (!is_hook_active(HOOK_FIB_ROUTE, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (!is_target_uid())
@@ -1961,7 +2002,7 @@ static int fib_dump_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	struct fib_rt_info fri_copy;
 	struct net_device *dev = NULL;
 
-	if (!is_hook_active(HOOK_FIB_DUMP))
+	if (!is_hook_active(HOOK_FIB_DUMP, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (!is_target_uid())
@@ -2049,7 +2090,7 @@ static int fib_rule_fill_entry(struct kretprobe_instance *ri,
 	uid_t my_uid;
 	bool filter = false;
 
-	if (!is_hook_active(HOOK_FIB_RULE_FILL))
+	if (!is_hook_active(HOOK_FIB_RULE_FILL, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (!is_target_uid())
@@ -2159,7 +2200,7 @@ static int rt6_fill_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	bool is_vpn = false;
 	const char *ifname = NULL;
 
-	if (!is_hook_active(HOOK_RT6_FILL))
+	if (!is_hook_active(HOOK_RT6_FILL, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (!is_target_uid())
@@ -2239,7 +2280,7 @@ static struct kretprobe rt6_fill_krp = {
 static int ipv6_route_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct fib_route_data *data;
-	if (!is_hook_active(HOOK_IPV6_ROUTE))
+	if (!is_hook_active(HOOK_IPV6_ROUTE, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (!is_target_uid())
@@ -2361,7 +2402,7 @@ static int rt_fill_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	unsigned int temp_len = 0;
 	bool is_vpn = false;
 
-	if (!is_hook_active(HOOK_RT_FILL))
+	if (!is_hook_active(HOOK_RT_FILL, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (!is_target_uid())
@@ -2459,6 +2500,35 @@ static int update_port_rules(struct vpnhide_uid_port_rules *rules, int count)
 	}
 
 	vpnhide_dbg("Port rules updated: %d UIDs\n", count);
+	return 0;
+}
+
+static int update_app_hook_masks(struct vpnhide_app_hook_mask *masks, int count)
+{
+	struct vpnhide_app_hook_masks *new_t, *old_t;
+
+	new_t = kvzalloc(sizeof(*new_t), GFP_KERNEL);
+	if (!new_t)
+		return -ENOMEM;
+
+	new_t->count = count;
+	if (count > 0)
+		memcpy(new_t->masks, masks,
+		       count * sizeof(struct vpnhide_app_hook_mask));
+
+	spin_lock(&app_hook_masks_update_lock);
+	old_t = rcu_dereference_protected(
+		global_app_hook_masks,
+		lockdep_is_held(&app_hook_masks_update_lock));
+	rcu_assign_pointer(global_app_hook_masks, new_t);
+	spin_unlock(&app_hook_masks_update_lock);
+
+	if (old_t) {
+		synchronize_rcu();
+		kvfree(old_t);
+	}
+
+	vpnhide_dbg("App hook masks updated: %d UIDs\n", count);
 	return 0;
 }
 
@@ -2594,6 +2664,7 @@ static ssize_t vpnhide_dev_read(struct file *file, char __user *buf,
 			int offset = 0;
 			struct vpnhide_targets *lt;
 			struct vpnhide_iface_prefixes *ip;
+			struct vpnhide_app_hook_masks *ahm;
 			int i;
 
 			offset += scnprintf(reader->buf + offset,
@@ -2635,6 +2706,24 @@ static ssize_t vpnhide_dev_read(struct file *file, char __user *buf,
 						scnprintf(reader->buf + offset,
 							  65536 - offset, " %s",
 							  ip->prefixes[i]);
+				}
+			}
+			offset += scnprintf(reader->buf + offset,
+					    65536 - offset, "\n");
+
+			ahm = rcu_dereference(global_app_hook_masks);
+			offset += scnprintf(reader->buf + offset,
+					    65536 - offset,
+					    "app_java_hook_mask:");
+			if (ahm) {
+				for (i = 0; i < ahm->count; i++) {
+					if (!ahm->masks[i].has_java_override)
+						continue;
+					offset += scnprintf(
+						reader->buf + offset,
+						65536 - offset, " %u:%u",
+						ahm->masks[i].uid,
+						ahm->masks[i].java_mask);
 				}
 			}
 			offset += scnprintf(reader->buf + offset,
@@ -3012,6 +3101,58 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg)
 		ret = 0;
 		break;
 
+	case VH_SET_APP_HOOK_MASKS: {
+		struct vpnhide_app_hook_ioctl_data *adata;
+
+		adata = kvzalloc(sizeof(*adata), GFP_KERNEL);
+		if (!adata)
+			return -ENOMEM;
+
+		if (copy_from_user(adata, (void __user *)arg, sizeof(*adata))) {
+			kvfree(adata);
+			return -EFAULT;
+		}
+
+		if (adata->count < 0 || adata->count > MAX_TARGET_UIDS) {
+			kvfree(adata);
+			return -EINVAL;
+		}
+
+		ret = update_app_hook_masks(adata->masks, adata->count);
+		kvfree(adata);
+		if (ret == 0) {
+			atomic_inc(&vpnhide_config_generation);
+			wake_up_interruptible(&vpnhide_config_wait);
+		}
+		break;
+	}
+
+	case VH_GET_APP_HOOK_MASKS: {
+		struct vpnhide_app_hook_ioctl_data *adata;
+		struct vpnhide_app_hook_masks *t;
+
+		adata = kvzalloc(sizeof(*adata), GFP_KERNEL);
+		if (!adata)
+			return -ENOMEM;
+
+		rcu_read_lock();
+		t = rcu_dereference(global_app_hook_masks);
+		if (t) {
+			adata->count = t->count;
+			memcpy(adata->masks, t->masks, sizeof(t->masks));
+		}
+		rcu_read_unlock();
+
+		if (copy_to_user((void __user *)arg, adata, sizeof(*adata))) {
+			kvfree(adata);
+			return -EFAULT;
+		}
+
+		kvfree(adata);
+		ret = 0;
+		break;
+	}
+
 	case VH_GET_STATS: {
 		struct vpnhide_kmod_stats_data *sdata;
 		unsigned long flags;
@@ -3234,7 +3375,7 @@ static int socket_connect_entry(struct kretprobe_instance *ri,
 	bool put_needed = false;
 	int i;
 
-	if (!is_hook_active(HOOK_CONNECT))
+	if (!is_hook_active(HOOK_CONNECT, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	data = (void *)ri->data;
@@ -3410,7 +3551,7 @@ static int socket_bind_entry(struct kretprobe_instance *ri,
 	bool put_needed = false;
 	int i;
 
-	if (!is_hook_active(HOOK_BIND))
+	if (!is_hook_active(HOOK_BIND, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	sock = resolve_sock_addr(regs, sys_bind_uses_wrapper,
@@ -3578,7 +3719,7 @@ static int inet6_bind_ll_entry(struct kretprobe_instance *ri,
 	struct inet6_bind_ll_data *data;
 	struct sockaddr_in6 sin6;
 
-	if (!is_hook_active(HOOK_INET6_BIND_LL))
+	if (!is_hook_active(HOOK_INET6_BIND_LL, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (!is_target_uid())
@@ -3657,7 +3798,7 @@ static int udpv6_sendmsg_ll_entry(struct kretprobe_instance *ri,
 	struct msghdr *msg;
 	struct sockaddr_in6 sin6;
 
-	if (!is_hook_active(HOOK_UDPV6_SENDMSG))
+	if (!is_hook_active(HOOK_UDPV6_SENDMSG, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (!is_target_uid())
@@ -3750,8 +3891,8 @@ static int sys_getsockname_entry(struct kretprobe_instance *ri,
 	struct sys_getsockname_data *data;
 	struct pt_regs *user_regs;
 
-	if (!is_hook_active(HOOK_GETNAME_INET) &&
-	    !is_hook_active(HOOK_GETNAME_INET6))
+	if (!is_hook_active(HOOK_GETNAME_INET, from_kuid(&init_user_ns, current_uid())) &&
+	    !is_hook_active(HOOK_GETNAME_INET6, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (!is_target_uid())
@@ -3874,7 +4015,7 @@ static int inet_getname_entry(struct kretprobe_instance *ri,
 	struct getname_data *data;
 	int peer = (int)regs->regs[2];
 
-	if (!is_hook_active(HOOK_GETNAME_INET))
+	if (!is_hook_active(HOOK_GETNAME_INET, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (peer != 0 || !is_target_uid())
@@ -3923,7 +4064,7 @@ static int inet6_getname_entry(struct kretprobe_instance *ri,
 	struct getname_data *data;
 	int peer = (int)regs->regs[2];
 
-	if (!is_hook_active(HOOK_GETNAME_INET6))
+	if (!is_hook_active(HOOK_GETNAME_INET6, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (peer != 0 || !is_target_uid())
@@ -3999,7 +4140,7 @@ static int sock_ioctl_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	unsigned int cmd = (unsigned int)regs->regs[1];
 	unsigned long arg = (unsigned long)regs->regs[2];
 
-	if (!is_hook_active(HOOK_SOCK_IOCTL))
+	if (!is_hook_active(HOOK_SOCK_IOCTL, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (cmd != SIOCGIFCONF)
@@ -4118,7 +4259,7 @@ static int sys_bpf_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	union bpf_attr __user *uattr;
 	unsigned int size;
 
-	if (!is_hook_active(HOOK_BPF) || is_target_uid()) {
+	if (!is_hook_active(HOOK_BPF, from_kuid(&init_user_ns, current_uid())) || is_target_uid()) {
 		data->uattr = NULL;
 		return 1;
 	}
@@ -4570,7 +4711,7 @@ static int sys_getdents64_entry(struct kretprobe_instance *ri,
 	char path_buf[256];
 	bool is_guarded = false;
 
-	if (!is_hook_active(HOOK_GETDENTS64))
+	if (!is_hook_active(HOOK_GETDENTS64, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (!is_target_uid())
@@ -4683,7 +4824,7 @@ static struct kretprobe sys_getdents64_krp = {
 static int dev_seq_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct fib_route_data *data;
-	if (!is_hook_active(HOOK_DEV_SEQ))
+	if (!is_hook_active(HOOK_DEV_SEQ, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (!is_target_uid())
@@ -4764,7 +4905,7 @@ static struct kretprobe dev_seq_krp = {
 static int if6_seq_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct fib_route_data *data;
-	if (!is_hook_active(HOOK_IF6_SEQ))
+	if (!is_hook_active(HOOK_IF6_SEQ, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (!is_target_uid())
@@ -4955,7 +5096,7 @@ static int path_oracle_entry(struct kretprobe_instance *ri,
 	char path_buf[512];
 	bool uses_wrapper = false;
 
-	if (!is_hook_active(hook_idx))
+	if (!is_hook_active(hook_idx, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	if (!is_target_uid())
@@ -5218,7 +5359,7 @@ static int udp_sendmsg_entry(struct kretprobe_instance *ri,
 	struct msghdr *msg;
 	uid_t uid;
 
-	if (!is_hook_active(HOOK_UDP_SENDMSG))
+	if (!is_hook_active(HOOK_UDP_SENDMSG, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 
 	uid = from_kuid(&init_user_ns, current_uid());
@@ -5285,7 +5426,7 @@ static int fib_trie_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct fib_trie_data *data;
 
-	if (!is_hook_active(HOOK_FIB_TRIE))
+	if (!is_hook_active(HOOK_FIB_TRIE, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 	if (!is_target_uid())
 		return 1;
@@ -5385,7 +5526,7 @@ static int tc_fill_qdisc_entry(struct kretprobe_instance *ri,
 	struct tc_fill_qdisc_data *data;
 	struct sk_buff *skb;
 
-	if (!is_hook_active(HOOK_TC_FILL_QDISC))
+	if (!is_hook_active(HOOK_TC_FILL_QDISC, from_kuid(&init_user_ns, current_uid())))
 		return 1;
 	if (!is_target_uid())
 		return 1;

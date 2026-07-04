@@ -42,6 +42,6 @@ kmod/*log.txt
 *.log
 /tmp/
 /*.zip
-scripts/__pycache__/
+scripts/__pycache__
 release.jks
 lsposed/.kotlin/sessions/kotlin-compiler*
