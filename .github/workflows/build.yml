@@ -117,7 +117,6 @@ jobs:
     name: Create GitHub Release
     needs: [build-native, build-kmod]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
