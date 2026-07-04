@@ -1,12 +1,237 @@
-Run softprops/action-gh-release@v2
-  with:
-    files: dist/libvpnhide_checks.so/libvpnhide_checks.so
-  dist/vpnhide-kmod-*/vpnhide-kmod-*.zip
-  
-    draft: false
-    generate_release_notes: true
-    overwrite_files: true
-    token: ***
-  env:
-    GITHUB_TOKEN: ***
-Error: ⚠️ GitHub Releases requires a tag
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  build-native:
+    name: Build Rust native library (via Gradle + Gobley)
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/soranerai/vpnhide_next/ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Mark workspace safe
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+            lsposed/native/target
+          key: cargo-${{ runner.os }}-native-${{ hashFiles('lsposed/native/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-native-
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Build native lib via Gradle (Gobley cargo plugin, RELEASE)
+        run: |
+          cd lsposed
+          # Invoke Gobley's cargo task directly instead of assembleRelease —
+          # no Kotlin/resources/signing needed, just the Rust release profile
+          # (LTO, opt-level=z, strip=true).
+          ./gradlew :app:cargoBuildAndroidArm64Release
+
+      - name: Copy .so to artifacts
+        run: |
+          mkdir -p artifacts
+          # Find release .so from cargo release target
+          find lsposed -path '*/release/*' -name 'libvpnhide_checks.so' -type f ! -path '*/deps/*' | head -1 | xargs cp -t artifacts/
+          ls -lh artifacts/libvpnhide_checks.so
+
+      - name: Upload .so as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libvpnhide_checks.so
+          path: artifacts/libvpnhide_checks.so
+          retention-days: 30
+          if-no-files-found: error
+
+      # vpnhide-ctl/vpnhide-daemon must be static aarch64 Android (Bionic)
+      # binaries — built with the Android NDK's aarch64-linux-android clang,
+      # not the ddk-min container's plain gcc (that container only carries a
+      # kernel cross-toolchain, its native gcc targets the container's own
+      # arch and produces a binary that won't exec on an aarch64 phone or in
+      # the aarch64 QEMU test guest). ci:latest already has ANDROID_NDK_ROOT
+      # baked in, so build them here instead of in build-kmod.
+      - name: Build vpnhide-ctl-host and vpnhide-daemon-host (NDK, aarch64)
+        run: |
+          NDK_CLANG="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang"
+          NDK_STRIP="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          cd kmod
+          "$NDK_CLANG" -O2 -Wall -static vpnhide_ctl.c parson.c -o vpnhide-ctl-host
+          "$NDK_CLANG" -O2 -Wall -static vpnhide_daemon.c -o vpnhide-daemon-host
+          "$NDK_STRIP" vpnhide-ctl-host vpnhide-daemon-host
+
+      - name: Upload host binaries as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vpnhide-host-binaries
+          path: |
+            kmod/vpnhide-ctl-host
+            kmod/vpnhide-daemon-host
+          retention-days: 30
+          if-no-files-found: error
+
+  build-kmod:
+    name: Build kernel module (${{ matrix.kmi }})
+    needs: build-native
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        kmi:
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+    # DDK image from public ylarod — doesn't depend on our repo
+    container:
+      image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-20260313
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download host binaries (ctl, daemon) from build-native
+        uses: actions/download-artifact@v4
+        with:
+          name: vpnhide-host-binaries
+          path: kmod
+
+      - name: Build kernel module
+        run: |
+          cd kmod
+          python3 build.py --kmi ${{ matrix.kmi }} --inside-container
+
+      - name: Upload module zip as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vpnhide-kmod-${{ matrix.kmi }}
+          path: vpnhide-kmod-${{ matrix.kmi }}.zip
+          retention-days: 30
+          if-no-files-found: error
+
+  # Runtime gate: boot a real GKI kernel for each KMI in QEMU and assert the
+  # module actually hides VPN state (per-vector A/B), not just that it
+  # compiled. Catches register/inlining bugs that source + build checks
+  # can't (e.g. the static-function rt_fill_info register issue). Runs in
+  # the per-KMI ddk-qemu image (built by vpnhide_next's qemu-image.yml)
+  # which bakes a bootable kernel + its build tree; the module is built
+  # here against that exact tree so it matches the kernel — building
+  # against the general ddk-min GKI kdir (like build-kmod does) mismatches
+  # CFI/vermagic/struct layouts and panics on stricter KMIs (e.g. 6.12).
+  # QEMU runs under TCG (no KVM on hosted runners) — slow but fine.
+  # See kmod/test/.
+  #
+  # Moved here from the public repo's CI: this job needs kmod/vpnhide_kmod.c,
+  # which now only lives in this repo, so it can build directly instead of
+  # sparse-cloning itself from across repos.
+  kmod-qemu:
+    name: QEMU runtime test (${{ matrix.kmi }})
+    needs: build-native
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi:
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+    container:
+      # Built by vpnhide_next's (public repo) qemu-image.yml. Cross-repo
+      # GHCR pulls aren't automatic on plain GITHUB_TOKEN — this package
+      # needs "Manage Actions access" granting read to this repo.
+      image: ghcr.io/soranerai/vpnhide_next/ddk-qemu:${{ matrix.kmi }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      KMI: ${{ matrix.kmi }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Mark workspace safe
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Download ctl/daemon host binaries from build-native
+        uses: actions/download-artifact@v4
+        with:
+          name: vpnhide-host-binaries
+          path: kmod
+
+      - name: Build module against baked kernel tree + run QEMU test
+        # Build against the BAKED kernel tree (VPNHIDE_QEMU_KSRC) so
+        # CFI/vermagic/struct layouts match the kernel run.sh boots.
+        # run.sh boots the baked kernel (VPNHIDE_QEMU_IMAGE/ROOTFS from ENV).
+        run: |
+          chmod +x kmod/vpnhide-ctl-host kmod/vpnhide-daemon-host
+          CLANG_BIN="$(ls -d /opt/ddk/clang/*/bin | head -1)"
+          make -C kmod KERNEL_SRC="$VPNHIDE_QEMU_KSRC" CLANG_DIR="$CLANG_BIN"
+          VPNHIDE_QEMU_KO="$PWD/kmod/vpnhide_kmod.ko" kmod/test/run.sh "$KMI"
+
+  release:
+    name: Create GitHub Release
+    needs: [build-native, build-kmod]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Publish to GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          REF="${{ github.ref }}"
+
+          if [[ "$REF" == refs/tags/* ]]; then
+            TAG="${REF#refs/tags/}"
+            echo "📌 Tag push detected: $TAG"
+            gh release create "$TAG" \
+              dist/libvpnhide_checks.so/libvpnhide_checks.so \
+              'dist/vpnhide-kmod-*/vpnhide-kmod-*.zip' \
+              --repo "$REPO" \
+              --draft=false \
+              --generate-release-notes
+            echo "✅ Release created"
+          else
+            echo "📝 Branch push detected (no tag)"
+            LATEST_RELEASE=$(gh release list --repo "$REPO" --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "")
+            if [ -z "$LATEST_RELEASE" ]; then
+              echo "❌ No existing release. Create a tag first."
+              exit 1
+            fi
+            echo "Updating artifacts in: $LATEST_RELEASE"
+            gh release upload "$LATEST_RELEASE" \
+              dist/libvpnhide_checks.so/libvpnhide_checks.so \
+              'dist/vpnhide-kmod-*/vpnhide-kmod-*.zip' \
+              --repo "$REPO" \
+              --clobber
+            echo "✅ Artifacts updated"
+          fi
