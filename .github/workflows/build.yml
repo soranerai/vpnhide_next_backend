@@ -38,6 +38,17 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
+      - name: Create debug keystore for signing
+        run: |
+          mkdir -p /root/.android
+          keytool -genkey -v \
+            -keystore /root/.android/debug.keystore \
+            -storepass android \
+            -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Debug, O=Debug, C=US"
+
       - name: Build native lib via Gradle (Gobley cargo plugin, RELEASE)
         run: |
           cd lsposed
