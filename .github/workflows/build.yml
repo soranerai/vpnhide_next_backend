@@ -90,6 +90,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Build host binaries (ctl, daemon)
+        run: |
+          cd kmod
+          gcc -O2 -Wall -static vpnhide_ctl.c parson.c -o vpnhide-ctl
+          gcc -O2 -Wall -static vpnhide_daemon.c -o vpnhide-daemon
+          llvm-strip vpnhide-ctl vpnhide-daemon
+          # Place in module/system/app/ for inclusion in zip
+          mkdir -p module/system/app
+          cp vpnhide-ctl vpnhide-daemon module/system/app/
+
       - name: Build kernel module
         run: |
           cd kmod
