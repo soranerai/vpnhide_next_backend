@@ -21,6 +21,8 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Mark workspace safe
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -106,6 +108,8 @@ jobs:
       image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-20260313
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Download host binaries (ctl, daemon) from build-native
         uses: actions/download-artifact@v4
@@ -168,6 +172,8 @@ jobs:
       KMI: ${{ matrix.kmi }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Mark workspace safe
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -196,6 +202,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
