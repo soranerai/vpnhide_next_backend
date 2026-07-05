@@ -356,27 +356,15 @@ fn cstr_to_str(ptr: *const libc::c_char) -> String {
         .into_owned()
 }
 
-fn last_os_error() -> String {
-    std::io::Error::last_os_error().to_string()
-}
-
 fn last_os_errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
-fn join_list(v: &[String]) -> String {
-    v.join(", ")
-}
-
-fn format_iface_result(all: &[String], vpn: &[String], context: &str) -> CheckOutput {
+fn format_iface_result(vpn: &[String]) -> CheckOutput {
     if vpn.is_empty() {
-        CheckOutput::pass(format!("{context} [{list}], no VPN", list = join_list(all)))
+        CheckOutput::pass("not detected")
     } else {
-        CheckOutput::fail(format!(
-            "VPN interfaces [{vpn}] in [{all}]",
-            vpn = join_list(vpn),
-            all = join_list(all),
-        ))
+        CheckOutput::fail("VPN detected")
     }
 }
 
@@ -441,7 +429,6 @@ const RTA_OIF: u16 = 4;
 // Traffic control (qdisc) constants — not in libc for Android
 const RTM_NEWQDISC: u16 = 36;
 const RTM_GETQDISC: u16 = 38;
-const TCA_KIND: u16 = 1;
 
 #[repr(C)]
 struct Tcmsg {
@@ -493,11 +480,9 @@ unsafe fn with_inet_dgram_socket(f: impl FnOnce(libc::c_int) -> CheckOutput) -> 
     if fd < 0 {
         let err = last_os_errno();
         if err == libc::ECONNREFUSED {
-            return CheckOutput::network_blocked(
-                "socket() returned ECONNREFUSED — network access disabled for this app",
-            );
+            return CheckOutput::network_blocked("no network access");
         }
-        return CheckOutput::fail(format!("cannot create socket: {}", last_os_error()));
+        return CheckOutput::fail("check error");
     }
     let out = f(fd);
     unsafe { libc::close(fd) };
@@ -516,29 +501,17 @@ fn check_ioctl_siocgifflags() -> CheckOutput {
             let err = last_os_errno();
 
             if ret < 0 {
-                if err == libc::ENODEV {
-                    CheckOutput::pass(
-                        "ioctl(tun0, SIOCGIFFLAGS) returned ENODEV — interface not visible",
-                    )
-                } else if err == libc::ENXIO {
-                    CheckOutput::pass(
-                        "ioctl(tun0, SIOCGIFFLAGS) returned ENXIO — interface not visible",
-                    )
+                if err == libc::ENODEV || err == libc::ENXIO {
+                    CheckOutput::pass("not detected")
                 } else {
-                    CheckOutput::fail(format!("ioctl returned error {err} ({})", last_os_error()))
+                    CheckOutput::fail("check error")
                 }
             } else {
                 let flags = ifr.ifr_ifru.ifru_flags as u32;
                 if flags & libc::IFF_UP as u32 == 0 {
-                    CheckOutput::pass(format!(
-                        "ioctl(tun0, SIOCGIFFLAGS) returned flags=0x{flags:x} — interface is DOWN/inactive",
-                    ))
+                    CheckOutput::pass("not detected")
                 } else {
-                    CheckOutput::fail(format!(
-                        "tun0 is visible! flags=0x{flags:x} (IFF_UP={}, IFF_RUNNING={})",
-                        u8::from(flags & libc::IFF_UP as u32 != 0),
-                        u8::from(flags & libc::IFF_RUNNING as u32 != 0),
-                    ))
+                    CheckOutput::fail("VPN detected")
                 }
             }
         })
@@ -558,11 +531,9 @@ fn check_ioctl_siocgifmtu() -> CheckOutput {
 
             if ret < 0 {
                 if err == libc::ENODEV || err == libc::ENXIO {
-                    CheckOutput::pass(
-                        "ioctl(tun0, SIOCGIFMTU) returned ENODEV — interface not visible",
-                    )
+                    CheckOutput::pass("not detected")
                 } else {
-                    CheckOutput::fail(format!("ioctl returned error {err} ({})", last_os_error()))
+                    CheckOutput::fail("check error")
                 }
             } else {
                 // Check if UP using SIOCGIFFLAGS
@@ -571,13 +542,10 @@ fn check_ioctl_siocgifmtu() -> CheckOutput {
                 if libc::ioctl(fd, libc::SIOCGIFFLAGS as _, &mut flags_ifr) == 0 {
                     let flags = flags_ifr.ifr_ifru.ifru_flags as u32;
                     if flags & libc::IFF_UP as u32 == 0 {
-                        return CheckOutput::pass(
-                            "ioctl(tun0, SIOCGIFMTU) succeeded, but interface is DOWN/inactive",
-                        );
+                        return CheckOutput::pass("not detected");
                     }
                 }
-                let mtu = ifr.ifr_ifru.ifru_mtu;
-                CheckOutput::fail(format!("tun0 is visible! MTU={mtu}"))
+                CheckOutput::fail("VPN detected")
             }
         })
     }
@@ -593,24 +561,21 @@ fn check_ioctl_siocgifconf() -> CheckOutput {
             ifc.ifc_ifcu.ifcu_buf = buf.as_mut_ptr().cast();
 
             if libc::ioctl(fd, libc::SIOCGIFCONF as _, &mut ifc) < 0 {
-                let e = last_os_error();
-                return CheckOutput::fail(format!("ioctl error: {e}"));
+                return CheckOutput::fail("check error");
             }
 
             let count = ifc.ifc_len as usize / std::mem::size_of::<libc::ifreq>();
             let reqs = std::slice::from_raw_parts(buf.as_ptr() as *const libc::ifreq, count);
 
-            let mut all = Vec::new();
             let mut vpn = Vec::new();
             for req in reqs {
                 let name = cstr_to_str(req.ifr_name.as_ptr());
                 if is_vpn_iface(&name) && is_interface_up_with_fd(fd, &name) {
-                    vpn.push(name.clone());
+                    vpn.push(name);
                 }
-                all.push(name);
             }
 
-            format_iface_result(&all, &vpn, &format!("{count} interfaces visible:"))
+            format_iface_result(&vpn)
         })
     }
 }
@@ -620,19 +585,15 @@ fn check_getifaddrs() -> CheckOutput {
     unsafe {
         let mut addrs: *mut libc::ifaddrs = std::ptr::null_mut();
         if libc::getifaddrs(&mut addrs) != 0 {
-            return CheckOutput::fail(format!("getifaddrs error: {}", last_os_error()));
+            return CheckOutput::fail("check error");
         }
 
-        let mut all: Vec<String> = Vec::new();
         let mut vpn: Vec<String> = Vec::new();
         let mut ifa = addrs;
         while !ifa.is_null() {
             let entry = &*ifa;
             if !entry.ifa_name.is_null() {
                 let name = cstr_to_str(entry.ifa_name);
-                if !all.contains(&name) {
-                    all.push(name.clone());
-                }
                 if is_vpn_iface(&name) && !vpn.contains(&name) {
                     let is_up = (entry.ifa_flags as u32 & libc::IFF_UP as u32) != 0;
                     if is_up {
@@ -644,7 +605,7 @@ fn check_getifaddrs() -> CheckOutput {
         }
         libc::freeifaddrs(addrs);
 
-        format_iface_result(&all, &vpn, &format!("{} unique interfaces:", all.len()))
+        format_iface_result(&vpn)
     }
 }
 
@@ -652,33 +613,21 @@ fn check_proc_file(path: &str) -> CheckOutput {
     match std::fs::read_to_string(path) {
         Err(e) => {
             if is_selinux_denial(&e) {
-                return CheckOutput::pass(format!(
-                    "access denied by SELinux ({e}) — app cannot read {path}"
-                ));
+                return CheckOutput::pass("not detected");
             }
-            CheckOutput::fail(format!("cannot open {path}: {e}"))
+            CheckOutput::fail("check error")
         }
         Ok(content) => {
-            let mut total = 0;
-            let mut vpn_lines = Vec::new();
-            for line in content.lines() {
-                if line.is_empty() {
-                    continue;
-                }
-                total += 1;
-                let has_active_vpn = line.split_ascii_whitespace().any(|word| {
+            let has_active_vpn = content.lines().any(|line| {
+                line.split_ascii_whitespace().any(|word| {
                     let cleaned = clean_iface_name(word);
                     is_vpn_iface(&cleaned) && is_interface_up(&cleaned)
-                });
-                if has_active_vpn {
-                    vpn_lines.push(line[..line.len().min(80)].to_string());
-                }
-            }
-            if vpn_lines.is_empty() {
-                CheckOutput::pass(format!("{total} lines in {path}, no VPN entries"))
+                })
+            });
+            if has_active_vpn {
+                CheckOutput::fail("VPN detected")
             } else {
-                let details: String = vpn_lines.iter().map(|l| format!("\n  {l}")).collect();
-                CheckOutput::fail(format!("{} VPN lines in {path}:{details}", vpn_lines.len()))
+                CheckOutput::pass("not detected")
             }
         }
     }
@@ -722,9 +671,9 @@ fn open_netlink() -> Result<i32, CheckOutput> {
         if fd < 0 {
             let e = std::io::Error::last_os_error();
             return Err(if is_selinux_denial(&e) {
-                CheckOutput::pass(format!("netlink socket denied by SELinux ({e})"))
+                CheckOutput::pass("not detected")
             } else {
-                CheckOutput::fail(format!("cannot create netlink socket: {e}"))
+                CheckOutput::fail("check error")
             });
         }
 
@@ -844,14 +793,13 @@ pub fn check_netlink_getlink() -> CheckOutput {
             let e = std::io::Error::last_os_error();
             libc::close(fd);
             return if is_selinux_denial(&e) {
-                CheckOutput::pass(format!("netlink RTM_GETLINK denied by SELinux ({e})"))
+                CheckOutput::pass("not detected")
             } else {
-                CheckOutput::fail(format!("send error: {e}"))
+                CheckOutput::fail("check error")
             };
         }
 
         let mut buf = [0u8; 32768];
-        let mut all = Vec::new();
         let mut vpn = Vec::new();
         let hdr_plus_ifinfo =
             std::mem::size_of::<libc::nlmsghdr>() + std::mem::size_of::<Ifinfomsg>();
@@ -881,9 +829,8 @@ pub fn check_netlink_getlink() -> CheckOutput {
                             // payload was bounds-checked by for_each_rtattr.
                             let name = cstr_to_str(payload.as_ptr() as *const libc::c_char);
                             if is_vpn_iface(&name) && is_up {
-                                vpn.push(name.clone());
+                                vpn.push(name);
                             }
-                            all.push(name);
                         }
                     });
                 },
@@ -894,11 +841,7 @@ pub fn check_netlink_getlink() -> CheckOutput {
         }
         libc::close(fd);
 
-        format_iface_result(
-            &all,
-            &vpn,
-            &format!("{} interfaces via netlink:", all.len()),
-        )
+        format_iface_result(&vpn)
     }
 }
 
@@ -935,15 +878,14 @@ fn check_netlink_getroute() -> CheckOutput {
             let e = std::io::Error::last_os_error();
             libc::close(fd);
             return if is_selinux_denial(&e) {
-                CheckOutput::pass(format!("netlink RTM_GETROUTE denied by SELinux ({e})"))
+                CheckOutput::pass("not detected")
             } else {
-                CheckOutput::fail(format!("send error: {e}"))
+                CheckOutput::fail("check error")
             };
         }
 
         let mut buf = [0u8; 32768];
         let mut vpn = Vec::new();
-        let mut total = 0u32;
         let hdr_plus_rtmsg = std::mem::size_of::<libc::nlmsghdr>() + std::mem::size_of::<Rtmsg>();
 
         for _ in 0..MAX_NETLINK_RECV_ITERS {
@@ -956,7 +898,6 @@ fn check_netlink_getroute() -> CheckOutput {
                 len as usize,
                 libc::RTM_NEWROUTE,
                 |b, offset, msg_len| {
-                    total += 1;
                     let data_start = offset + hdr_plus_rtmsg;
                     let msg_end = offset + msg_len;
                     for_each_rtattr(b, data_start, msg_end, |rta, payload| {
@@ -984,9 +925,9 @@ fn check_netlink_getroute() -> CheckOutput {
         libc::close(fd);
 
         if vpn.is_empty() {
-            CheckOutput::pass(format!("{total} routes, no VPN"))
+            CheckOutput::pass("not detected")
         } else {
-            CheckOutput::fail(format!("VPN routes via [{}]", join_list(&vpn)))
+            CheckOutput::fail("VPN detected")
         }
     }
 }
@@ -1024,17 +965,14 @@ fn check_netlink_anonymous_route() -> CheckOutput {
             let e = std::io::Error::last_os_error();
             libc::close(fd);
             return if is_selinux_denial(&e) {
-                CheckOutput::pass(format!(
-                    "netlink RTM_GETROUTE (anon) denied by SELinux ({e})"
-                ))
+                CheckOutput::pass("not detected")
             } else {
-                CheckOutput::fail(format!("send error: {e}"))
+                CheckOutput::fail("check error")
             };
         }
 
         let mut buf = [0u8; 32768];
         let mut anon_indices = Vec::new();
-        let mut total = 0u32;
         let hdr_plus_rtmsg = std::mem::size_of::<libc::nlmsghdr>() + std::mem::size_of::<Rtmsg>();
 
         for _ in 0..MAX_NETLINK_RECV_ITERS {
@@ -1047,7 +985,6 @@ fn check_netlink_anonymous_route() -> CheckOutput {
                 len as usize,
                 libc::RTM_NEWROUTE,
                 |b, offset, msg_len| {
-                    total += 1;
                     let data_start = offset + hdr_plus_rtmsg;
                     let msg_end = offset + msg_len;
                     for_each_rtattr(b, data_start, msg_end, |rta, payload| {
@@ -1074,16 +1011,9 @@ fn check_netlink_anonymous_route() -> CheckOutput {
         libc::close(fd);
 
         if anon_indices.is_empty() {
-            CheckOutput::pass(format!("{total} routes, no anonymous interfaces"))
+            CheckOutput::pass("not detected")
         } else {
-            CheckOutput::fail(format!(
-                "Anonymous routes found via ifindices [{}] (interface names hidden, but routes leaked!)",
-                anon_indices
-                    .iter()
-                    .map(|i| i.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))
+            CheckOutput::fail("VPN detected")
         }
     }
 }
@@ -1093,71 +1023,31 @@ fn check_sys_class_net() -> CheckOutput {
     let sysfs_bases = ["/sys/class/net", "/sys/devices/virtual/net"];
     let test_ifaces = ["tun0", "tun1", "wg0", "wg1", "ppp0", "ppp1"];
 
-    let mut path_results = Vec::new();
-    let mut any_failed = false;
-    let mut leaked_interfaces = Vec::new();
+    let mut any_leaked = false;
 
     for &base in &sysfs_bases {
-        let mut leaked_here = Vec::new();
-        let mut readdir_denied = false;
-
         // 1. Try readdir
-        match std::fs::read_dir(base) {
-            Err(_) => {
-                readdir_denied = true;
-            }
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if is_vpn_iface(&name) && is_interface_up(&name) {
-                        leaked_here.push(name);
-                    }
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if is_vpn_iface(&name) && is_interface_up(&name) {
+                    any_leaked = true;
                 }
             }
         }
 
         // 2. Try Path Existence Oracle
-        let mut oracle_denied = false;
         for &iface in &test_ifaces {
-            match check_path_via_oracle(base, iface) {
-                Some(true) => {
-                    if is_interface_up(iface) && !leaked_here.contains(&iface.to_string()) {
-                        leaked_here.push(iface.to_string());
-                    }
-                }
-                Some(false) => {}
-                None => {
-                    oracle_denied = true;
-                }
+            if check_path_via_oracle(base, iface) == Some(true) && is_interface_up(iface) {
+                any_leaked = true;
             }
-        }
-
-        // Format result for this path
-        if !leaked_here.is_empty() {
-            any_failed = true;
-            for iface in &leaked_here {
-                if !leaked_interfaces.contains(iface) {
-                    leaked_interfaces.push(iface.clone());
-                }
-            }
-            path_results.push(format!("{base}: НЕ ОК (leaked {})", leaked_here.join(",")));
-        } else if readdir_denied && oracle_denied {
-            path_results.push(format!("{base}: OK (blocked)"));
-        } else {
-            path_results.push(format!("{base}: OK"));
         }
     }
 
-    let details = path_results.join(", ");
-
-    if any_failed {
-        CheckOutput::fail(format!(
-            "VPN leaked: [{}] — Details: {}",
-            leaked_interfaces.join(", "),
-            details
-        ))
+    if any_leaked {
+        CheckOutput::fail("VPN detected")
     } else {
-        CheckOutput::pass(format!("All paths secure — Details: {}", details))
+        CheckOutput::pass("not detected")
     }
 }
 
@@ -1272,7 +1162,7 @@ pub fn check_getsockopt_bind() -> CheckOutput {
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
         if fd < 0 {
-            return CheckOutput::fail(format!("cannot create socket: {}", last_os_error()));
+            return CheckOutput::fail("check error");
         }
 
         let vpn_iface = find_vpn_iface();
@@ -1291,18 +1181,8 @@ pub fn check_getsockopt_bind() -> CheckOutput {
         );
 
         if set_ret < 0 {
-            let err = std::io::Error::last_os_error();
-            let raw = err.raw_os_error().unwrap_or(0);
             libc::close(fd);
-            let reason = if raw == libc::ENODEV {
-                "kernel module returned ENODEV — interface hidden".to_string()
-            } else {
-                format!("setsockopt failed: {err}")
-            };
-            return CheckOutput::pass(format!(
-                "setsockopt SO_BINDTODEVICE for '{vpn}' blocked — secure ({reason})",
-                vpn = vpn_iface,
-            ));
+            return CheckOutput::pass("not detected");
         }
 
         let mut get_buf = [0u8; libc::IFNAMSIZ];
@@ -1322,23 +1202,11 @@ pub fn check_getsockopt_bind() -> CheckOutput {
 
         libc::close(fd);
 
-        let detail = format!(
-            "setsockopt('{vpn}') returned 0 -> getsockopt() returned: dev='{dev}'",
-            vpn = vpn_iface,
-            dev = bound_device
-        );
-
         if !bound_device.is_empty() && is_vpn_iface(&bound_device) && is_interface_up(&bound_device)
         {
-            CheckOutput::fail(format!(
-                "{detail} — leaked VPN interface binding! Kernel setsockopt hook bypassed or inactive!",
-                detail = detail
-            ))
+            CheckOutput::fail("VPN detected")
         } else {
-            CheckOutput::pass(format!(
-                "{detail} — secure (setsockopt returned 0 but bind did not stick or interface is inactive)",
-                detail = detail
-            ))
+            CheckOutput::pass("not detected")
         }
     }
 }
@@ -1351,19 +1219,10 @@ pub fn check_inet_diag() -> CheckOutput {
     unsafe {
         let fd = libc::socket(libc::AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, 4); // 4 is NETLINK_INET_DIAG
         if fd < 0 {
-            let e = std::io::Error::last_os_error();
-            if is_selinux_denial(&e) {
-                CheckOutput::pass(format!(
-                    "inet_diag netlink socket denied by SELinux ({e}) — secure"
-                ))
-            } else {
-                CheckOutput::pass(format!("inet_diag failed with error: {e} — secure"))
-            }
+            CheckOutput::pass("not detected")
         } else {
             libc::close(fd);
-            CheckOutput::fail(
-                "socket(AF_NETLINK, SOCK_RAW, NETLINK_INET_DIAG) succeeded — potentially leaking socket diagnostics!",
-            )
+            CheckOutput::fail("VPN detected")
         }
     }
 }
@@ -1376,7 +1235,7 @@ pub fn check_getsockname_spoof() -> CheckOutput {
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
         if fd < 0 {
-            return CheckOutput::fail(format!("cannot create socket: {}", last_os_error()));
+            return CheckOutput::fail("check error");
         }
 
         let mut dest: libc::sockaddr_in = std::mem::zeroed();
@@ -1393,11 +1252,9 @@ pub fn check_getsockname_spoof() -> CheckOutput {
             let err = last_os_errno();
             libc::close(fd);
             if err == libc::ECONNREFUSED {
-                return CheckOutput::network_blocked(
-                    "connect() returned ECONNREFUSED — network access disabled for this app",
-                );
+                return CheckOutput::network_blocked("no network access");
             }
-            return CheckOutput::fail(format!("connect() failed: {}", last_os_error()));
+            return CheckOutput::fail("check error");
         }
 
         let mut local: libc::sockaddr_in = std::mem::zeroed();
@@ -1405,25 +1262,15 @@ pub fn check_getsockname_spoof() -> CheckOutput {
         let ret = libc::getsockname(fd, std::ptr::from_mut(&mut local).cast(), &mut local_len);
         if ret < 0 {
             libc::close(fd);
-            return CheckOutput::fail(format!("getsockname() failed: {}", last_os_error()));
+            return CheckOutput::fail("check error");
         }
         libc::close(fd);
 
-        let ip_u32 = u32::from_be(local.sin_addr.s_addr);
-        let ip_str = format!(
-            "{}.{}.{}.{}",
-            (ip_u32 >> 24) & 0xFF,
-            (ip_u32 >> 16) & 0xFF,
-            (ip_u32 >> 8) & 0xFF,
-            ip_u32 & 0xFF
-        );
-
         let mut addrs: *mut libc::ifaddrs = std::ptr::null_mut();
         if libc::getifaddrs(&mut addrs) != 0 {
-            return CheckOutput::fail(format!("getifaddrs error: {}", last_os_error()));
+            return CheckOutput::fail("check error");
         }
 
-        let mut iface_name = "unknown/none".to_string();
         let mut is_vpn = false;
         let mut found = false;
 
@@ -1435,7 +1282,7 @@ pub fn check_getsockname_spoof() -> CheckOutput {
             {
                 let sin = &*(entry.ifa_addr as *const libc::sockaddr_in);
                 if sin.sin_addr.s_addr == local.sin_addr.s_addr {
-                    iface_name = cstr_to_str(entry.ifa_name);
+                    let iface_name = cstr_to_str(entry.ifa_name);
                     found = true;
                     if is_vpn_iface(&iface_name)
                         && (entry.ifa_flags as u32 & libc::IFF_UP as u32) != 0
@@ -1449,19 +1296,10 @@ pub fn check_getsockname_spoof() -> CheckOutput {
         }
         libc::freeifaddrs(addrs);
 
-        let details = format!("getsockname() returned {ip_str} on interface {iface_name}");
-        if is_vpn {
-            CheckOutput::fail(format!(
-                "{details} — leaked VPN IP address! Kernel getsockname hook bypassed or inactive!"
-            ))
-        } else if !found {
-            CheckOutput::fail(format!(
-                "{details} — leaked VPN IP address! (Interface hidden by other hooks, but IP still leaked!)"
-            ))
+        if is_vpn || !found {
+            CheckOutput::fail("VPN detected")
         } else {
-            CheckOutput::pass(format!(
-                "{details} — secure (physical interface IP returned)"
-            ))
+            CheckOutput::pass("not detected")
         }
     }
 }
@@ -1502,15 +1340,14 @@ pub fn check_netlink_getrule() -> CheckOutput {
             let e = std::io::Error::last_os_error();
             libc::close(fd);
             return if is_selinux_denial(&e) {
-                CheckOutput::pass(format!("netlink RTM_GETRULE denied by SELinux ({e})"))
+                CheckOutput::pass("not detected")
             } else {
-                CheckOutput::fail(format!("send error: {e}"))
+                CheckOutput::fail("check error")
             };
         }
 
         let mut buf = [0u8; 32768];
-        let mut total = 0u32;
-        let mut leaked_rules = Vec::new();
+        let mut leaked = false;
         let hdr_plus_frh =
             std::mem::size_of::<libc::nlmsghdr>() + std::mem::size_of::<FibRuleHdr>();
 
@@ -1529,7 +1366,6 @@ pub fn check_netlink_getrule() -> CheckOutput {
                 len as usize,
                 libc::RTM_NEWRULE,
                 |b, offset, msg_len| {
-                    total += 1;
                     let data_start = offset + hdr_plus_frh;
                     let msg_end = offset + msg_len;
 
@@ -1570,8 +1406,7 @@ pub fn check_netlink_getrule() -> CheckOutput {
                         !oifname.is_empty() && is_vpn_iface(&oifname) && is_interface_up(&oifname);
 
                     if matches_vpn_iif || matches_vpn_oif {
-                        let iface = if matches_vpn_iif { &iifname } else { &oifname };
-                        leaked_rules.push(format!("table={table_id} VPN iface={iface}"));
+                        leaked = true;
                     } else if has_uid_range {
                         let my_uid = libc::getuid();
                         if my_uid >= uid_start
@@ -1581,9 +1416,7 @@ pub fn check_netlink_getrule() -> CheckOutput {
                             && table_id != 253
                             && table_id > 100
                         {
-                            leaked_rules.push(format!(
-                                "table={table_id} for app UID={my_uid} (range {uid_start}-{uid_end})"
-                            ));
+                            leaked = true;
                         }
                     }
                 },
@@ -1594,13 +1427,10 @@ pub fn check_netlink_getrule() -> CheckOutput {
         }
         libc::close(fd);
 
-        if leaked_rules.is_empty() {
-            CheckOutput::pass(format!("{total} routing rules, no VPN leaks detected"))
+        if leaked {
+            CheckOutput::fail("VPN detected")
         } else {
-            CheckOutput::fail(format!(
-                "leaked VPN policy rules (total {total}):\n  {}",
-                leaked_rules.join("\n  ")
-            ))
+            CheckOutput::pass("not detected")
         }
     }
 }
@@ -1643,7 +1473,7 @@ pub fn check_tcp_mss() -> CheckOutput {
 
         let tcp_fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
         if tcp_fd < 0 {
-            return CheckOutput::fail(format!("cannot create TCP socket: {}", last_os_error()));
+            return CheckOutput::fail("check error");
         }
 
         let timeout = libc::timeval {
@@ -1686,26 +1516,12 @@ pub fn check_tcp_mss() -> CheckOutput {
         }
         libc::close(tcp_fd);
 
-        let details = format!("UDP PMTU={udp_mtu}, TCP MSS={tcp_mss}");
-        let mut suspicious = false;
-        let mut reasons = Vec::new();
-
-        if udp_mtu > 0 && udp_mtu < 1450 {
-            suspicious = true;
-            reasons.push(format!("UDP PMTU {udp_mtu} < 1450"));
-        }
-        if tcp_mss > 0 && tcp_mss < 1420 {
-            suspicious = true;
-            reasons.push(format!("TCP MSS {tcp_mss} < 1420"));
-        }
+        let suspicious = (udp_mtu > 0 && udp_mtu < 1450) || (tcp_mss > 0 && tcp_mss < 1420);
 
         if suspicious {
-            CheckOutput::fail(format!(
-                "{details} — encapsulation detected: {}",
-                reasons.join(", ")
-            ))
+            CheckOutput::fail("VPN detected")
         } else {
-            CheckOutput::pass(format!("{details} — secure (normal physical MTU/MSS)"))
+            CheckOutput::pass("not detected")
         }
     }
 }
@@ -1720,9 +1536,9 @@ pub fn check_tcp_info_mss() -> CheckOutput {
         if fd < 0 {
             let err = last_os_errno();
             return if err == libc::ECONNREFUSED {
-                CheckOutput::network_blocked("socket() returned ECONNREFUSED — no network access")
+                CheckOutput::network_blocked("no network access")
             } else {
-                CheckOutput::fail(format!("cannot create TCP socket: {}", last_os_error()))
+                CheckOutput::fail("check error")
             };
         }
 
@@ -1750,10 +1566,7 @@ pub fn check_tcp_info_mss() -> CheckOutput {
         ) < 0
         {
             libc::close(fd);
-            return CheckOutput::pass(format!(
-                "TCP connect to 8.8.8.8:53 failed ({}) — cannot probe TCP_INFO",
-                last_os_error()
-            ));
+            return CheckOutput::pass("not detected");
         }
 
         let mut info: TcpInfoMss = std::mem::zeroed();
@@ -1768,28 +1581,17 @@ pub fn check_tcp_info_mss() -> CheckOutput {
         libc::close(fd);
 
         if ret < 0 {
-            return CheckOutput::fail(format!("getsockopt(TCP_INFO) failed: {}", last_os_error()));
+            return CheckOutput::fail("check error");
         }
 
         let snd = info.tcpi_snd_mss;
         let rcv = info.tcpi_rcv_mss;
-        let mut problems = Vec::new();
-        if snd > 0 && snd < 1440 {
-            problems.push(format!("tcpi_snd_mss={snd}"));
-        }
-        if rcv > 0 && rcv < 1440 {
-            problems.push(format!("tcpi_rcv_mss={rcv}"));
-        }
+        let suspicious = (snd > 0 && snd < 1440) || (rcv > 0 && rcv < 1440);
 
-        if problems.is_empty() {
-            CheckOutput::pass(format!(
-                "TCP_INFO snd_mss={snd} rcv_mss={rcv} — MSS values normal"
-            ))
+        if suspicious {
+            CheckOutput::fail("VPN detected")
         } else {
-            CheckOutput::fail(format!(
-                "TCP_INFO MSS below threshold ({}); VPN encapsulation overhead not spoofed",
-                problems.join(", ")
-            ))
+            CheckOutput::pass("not detected")
         }
     }
 }
@@ -1802,7 +1604,7 @@ pub fn check_udp_pmtu() -> CheckOutput {
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
         if fd < 0 {
-            return CheckOutput::fail(format!("cannot create UDP socket: {}", last_os_error()));
+            return CheckOutput::fail("check error");
         }
 
         // Set IP_MTU_DISCOVER to IP_PMTUDISC_DO (2) to force PMTU discovery (DF flag set)
@@ -1815,9 +1617,8 @@ pub fn check_udp_pmtu() -> CheckOutput {
             std::mem::size_of_val(&val) as libc::socklen_t,
         );
         if opt_ret < 0 {
-            let err_str = last_os_error();
             libc::close(fd);
-            return CheckOutput::fail(format!("cannot set IP_MTU_DISCOVER: {err_str}"));
+            return CheckOutput::fail("check error");
         }
 
         let mut dest: libc::sockaddr_in = std::mem::zeroed();
@@ -1831,38 +1632,26 @@ pub fn check_udp_pmtu() -> CheckOutput {
             std::mem::size_of_val(&dest) as libc::socklen_t,
         );
         if connect_ret < 0 {
-            let err_str = last_os_error();
             libc::close(fd);
-            return CheckOutput::fail(format!("cannot connect UDP socket: {err_str}"));
+            return CheckOutput::fail("check error");
         }
 
         // Send a 1472-byte payload. Combined with 20-byte IP header and 8-byte UDP header,
         // it makes a 1500-byte IP packet.
         let payload = vec![0u8; 1472];
         let send_ret = libc::send(fd, payload.as_ptr().cast(), payload.len(), 0);
-
         let err_no = if send_ret < 0 { last_os_errno() } else { 0 };
-        let err_str = if send_ret < 0 {
-            last_os_error()
-        } else {
-            String::new()
-        };
 
         libc::close(fd);
 
         if send_ret < 0 {
             if err_no == libc::EMSGSIZE {
-                CheckOutput::fail(
-                    "UDP send 1500 bytes failed with EMSGSIZE — VPN tunnel MTU bottleneck detected"
-                        .to_string(),
-                )
+                CheckOutput::fail("VPN detected")
             } else {
-                CheckOutput::fail(format!("UDP send 1500 bytes failed with error: {err_str}"))
+                CheckOutput::fail("check error")
             }
         } else {
-            CheckOutput::pass(
-                "UDP send 1500 bytes succeeded — no PMTU bottleneck (physical interface spoofed/allowed)".to_string()
-            )
+            CheckOutput::pass("not detected")
         }
     }
 }
@@ -1903,18 +1692,16 @@ pub fn check_netlink_getneigh() -> CheckOutput {
             let e = std::io::Error::last_os_error();
             libc::close(fd);
             return if is_selinux_denial(&e) {
-                CheckOutput::pass(format!("netlink RTM_GETNEIGH denied by SELinux ({e})"))
+                CheckOutput::pass("not detected")
             } else {
-                CheckOutput::fail(format!("send error: {e}"))
+                CheckOutput::fail("check error")
             };
         }
 
         let mut buf = [0u8; 32768];
         let mut neighbors = Vec::new();
-        let mut total = 0u32;
         let hdr_plus_ndmsg = std::mem::size_of::<libc::nlmsghdr>() + std::mem::size_of::<Ndmsg>();
 
-        const NDA_DST: u16 = 1;
         const NDA_LLADDR: u16 = 2;
 
         for _ in 0..MAX_NETLINK_RECV_ITERS {
@@ -1927,7 +1714,6 @@ pub fn check_netlink_getneigh() -> CheckOutput {
                 len as usize,
                 libc::RTM_NEWNEIGH,
                 |b, offset, msg_len| {
-                    total += 1;
                     let data_start = offset + hdr_plus_ndmsg;
                     let msg_end = offset + msg_len;
 
@@ -1948,35 +1734,15 @@ pub fn check_netlink_getneigh() -> CheckOutput {
                         format!("ifindex_{}", ndm.ndm_ifindex)
                     };
 
-                    let mut ip_str = String::new();
-                    let mut mac_str = String::new();
+                    let mut has_mac = false;
 
-                    for_each_rtattr(b, data_start, msg_end, |rta, payload| match rta.rta_type {
-                        NDA_DST => {
-                            if payload.len() == 4 {
-                                ip_str = format!(
-                                    "{}.{}.{}.{}",
-                                    payload[0], payload[1], payload[2], payload[3]
-                                );
-                            } else if payload.len() == 16 {
-                                ip_str = "IPv6".to_string();
-                            }
+                    for_each_rtattr(b, data_start, msg_end, |rta, payload| {
+                        if rta.rta_type == NDA_LLADDR && payload.len() == 6 {
+                            has_mac = true;
                         }
-                        NDA_LLADDR if payload.len() == 6 => {
-                            mac_str = format!(
-                                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                                payload[0],
-                                payload[1],
-                                payload[2],
-                                payload[3],
-                                payload[4],
-                                payload[5]
-                            );
-                        }
-                        _ => {}
                     });
 
-                    neighbors.push((ifname, ip_str, mac_str, ndm.ndm_state));
+                    neighbors.push((ifname, has_mac));
                 },
             );
             if !cont {
@@ -1985,33 +1751,18 @@ pub fn check_netlink_getneigh() -> CheckOutput {
         }
         libc::close(fd);
 
-        let mut physical_has_mac = false;
-        let mut list = Vec::new();
-        for (iface, ip, mac, state) in &neighbors {
-            let is_phys =
-                iface.starts_with("wlan") || iface.starts_with("eth") || iface.starts_with("rmnet");
-            if is_phys && !mac.is_empty() {
-                physical_has_mac = true;
-            }
-            list.push(format!("{iface} {ip} mac={mac} state=0x{state:02x}"));
-        }
-
-        let details = if list.is_empty() {
-            "empty table".to_string()
-        } else {
-            list.join(", ")
-        };
-
-        let has_wlan = neighbors
-            .iter()
-            .any(|(iface, _, _, _)| iface.starts_with("wlan"));
+        let has_wlan = neighbors.iter().any(|(iface, _)| iface.starts_with("wlan"));
+        let physical_has_mac = neighbors.iter().any(|(iface, has_mac)| {
+            *has_mac
+                && (iface.starts_with("wlan")
+                    || iface.starts_with("eth")
+                    || iface.starts_with("rmnet"))
+        });
 
         if has_wlan && !physical_has_mac {
-            CheckOutput::fail(format!(
-                "wlan has no ARP neighbors (MACs hidden) — table: {details}"
-            ))
+            CheckOutput::fail("VPN detected")
         } else {
-            CheckOutput::pass(format!("neighbor table: {details}"))
+            CheckOutput::pass("not detected")
         }
     }
 }
@@ -2080,9 +1831,9 @@ fn visible_ifindexes_from_getlink() -> Result<Vec<u32>, CheckOutput> {
             let e = std::io::Error::last_os_error();
             libc::close(fd);
             return Err(if is_selinux_denial(&e) {
-                CheckOutput::pass(format!("RTM_GETLINK denied by SELinux ({e})"))
+                CheckOutput::pass("not detected")
             } else {
-                CheckOutput::fail(format!("RTM_GETLINK send failed: {e}"))
+                CheckOutput::fail("check error")
             });
         }
 
@@ -2120,15 +1871,13 @@ pub fn check_qdisc_by_ifindex() -> CheckOutput {
     }
     // Anti-debug: if we're being analyzed, return a plausible but false result
     if check_anti_debug() {
-        return CheckOutput::pass("no active interfaces — unable to probe".to_string());
+        return CheckOutput::pass("not detected");
     }
 
     unsafe {
         let existing = probe_active_ifindexes();
         if existing.is_empty() {
-            return CheckOutput::pass(
-                "no active interfaces found via bind probe — qdisc oracle skipped".to_string(),
-            );
+            return CheckOutput::pass("not detected");
         }
 
         let visible = match visible_ifindexes_from_getlink() {
@@ -2143,10 +1892,7 @@ pub fn check_qdisc_by_ifindex() -> CheckOutput {
             .collect();
 
         if hidden.is_empty() {
-            return CheckOutput::pass(format!(
-                "{} active iface(s), none hidden — qdisc oracle: no hidden interfaces to probe",
-                existing.len()
-            ));
+            return CheckOutput::pass("not detected");
         }
 
         let nl_fd = match open_netlink() {
@@ -2181,15 +1927,14 @@ pub fn check_qdisc_by_ifindex() -> CheckOutput {
             let e = std::io::Error::last_os_error();
             libc::close(nl_fd);
             return if is_selinux_denial(&e) {
-                CheckOutput::pass(format!("RTM_GETQDISC denied by SELinux ({e})"))
+                CheckOutput::pass("not detected")
             } else {
-                CheckOutput::fail(format!("RTM_GETQDISC send failed: {e}"))
+                CheckOutput::fail("check error")
             };
         }
 
         let mut buf = [0u8; 32768];
-        let mut leaked: Vec<String> = Vec::new();
-        let hdr_tcm = std::mem::size_of::<libc::nlmsghdr>() + std::mem::size_of::<Tcmsg>();
+        let mut leaked = false;
 
         for _ in 0..MAX_NETLINK_RECV_ITERS {
             let len = netlink_recv(nl_fd, &mut buf);
@@ -2197,7 +1942,7 @@ pub fn check_qdisc_by_ifindex() -> CheckOutput {
                 break;
             }
             let cont =
-                parse_netlink_msgs(&buf, len as usize, RTM_NEWQDISC, |b, offset, msg_len| {
+                parse_netlink_msgs(&buf, len as usize, RTM_NEWQDISC, |b, offset, _msg_len| {
                     let tcm_ptr = b
                         .as_ptr()
                         .add(offset + std::mem::size_of::<libc::nlmsghdr>())
@@ -2206,15 +1951,7 @@ pub fn check_qdisc_by_ifindex() -> CheckOutput {
                     let iface_idx = tcm.tcm_ifindex as u32;
 
                     if hidden.contains(&iface_idx) {
-                        let data_start = offset + hdr_tcm;
-                        let msg_end = offset + msg_len;
-                        let mut kind = String::from("unknown");
-                        for_each_rtattr(b, data_start, msg_end, |rta, payload| {
-                            if rta.rta_type == TCA_KIND && !payload.is_empty() {
-                                kind = cstr_to_str(payload.as_ptr().cast());
-                            }
-                        });
-                        leaked.push(format!("ifindex={iface_idx} qdisc={kind}"));
+                        leaked = true;
                     }
                 });
             if !cont {
@@ -2223,17 +1960,10 @@ pub fn check_qdisc_by_ifindex() -> CheckOutput {
         }
         libc::close(nl_fd);
 
-        if leaked.is_empty() {
-            CheckOutput::pass(format!(
-                "{} hidden ifindex(es) {:?}: no qdisc info leaked — RTM_GETQDISC filtered",
-                hidden.len(),
-                hidden
-            ))
+        if leaked {
+            CheckOutput::fail("VPN detected")
         } else {
-            CheckOutput::fail(format!(
-                "qdisc info leaked for hidden ifindex(es): {} — RTM_GETQDISC not filtered by kmod",
-                leaked.join(", ")
-            ))
+            CheckOutput::pass("not detected")
         }
     }
 }
@@ -2269,12 +1999,9 @@ pub fn check_loopback_bind_conflict() -> CheckOutput {
         }
 
         if conflicts.is_empty() {
-            CheckOutput::pass("no loopback port bind conflicts (checked SOCKS/HTTP/DNS ports)")
+            CheckOutput::pass("not detected")
         } else {
-            CheckOutput::fail(format!(
-                "loopback port bind conflict detected on ports [{}] (EADDRINUSE) — active proxy/VPN listener detected!",
-                conflicts.join(", ")
-            ))
+            CheckOutput::fail("VPN detected")
         }
     }
 }
@@ -2286,9 +2013,7 @@ pub fn check_bpf_iface_map() -> CheckOutput {
     }
     // Anti-debug: if we're being analyzed, return a plausible but false result
     if check_anti_debug() {
-        return CheckOutput::pass(
-            "iface_index_name_map not accessible — permission denied".to_string(),
-        );
+        return CheckOutput::pass("not detected");
     }
 
     unsafe {
@@ -2298,7 +2023,6 @@ pub fn check_bpf_iface_map() -> CheckOutput {
         ];
 
         let mut fd = -1;
-        let mut last_err = std::io::Error::from_raw_os_error(0);
 
         for path in &paths {
             let c_path = std::ffi::CStr::from_bytes_with_nul(path.as_bytes()).unwrap();
@@ -2310,27 +2034,16 @@ pub fn check_bpf_iface_map() -> CheckOutput {
             if ret >= 0 {
                 fd = ret as i32;
                 break;
-            } else {
-                last_err = std::io::Error::last_os_error();
             }
         }
 
         if fd < 0 {
-            if is_selinux_denial(&last_err) {
-                return CheckOutput::pass(format!(
-                    "bpf(BPF_OBJ_GET) map_netd_iface_index_name_map denied by SELinux ({last_err}) — secure"
-                ));
-            } else {
-                return CheckOutput::pass(format!(
-                    "bpf(BPF_OBJ_GET) map_netd_iface_index_name_map failed with: {last_err} — secure"
-                ));
-            }
+            return CheckOutput::pass("not detected");
         }
 
         // Map opened successfully! Now let's iterate over keys and values.
         let mut key = 0u32;
         let mut next_key = 0u32;
-        let mut all_ifaces = Vec::new();
         let mut vpn_ifaces = Vec::new();
         let mut first = true;
 
@@ -2373,11 +2086,8 @@ pub fn check_bpf_iface_map() -> CheckOutput {
             let lookup_ret = libc::syscall(libc::SYS_bpf, 1, val_attr.as_ptr(), val_attr.len()); // 1 is BPF_MAP_LOOKUP_ELEM
             if lookup_ret == 0 {
                 let name = cstr_to_str(ifname_bytes.as_ptr().cast());
-                if !name.is_empty() {
-                    if is_vpn_iface(&name) && is_interface_up(&name) {
-                        vpn_ifaces.push(name.clone());
-                    }
-                    all_ifaces.push(name);
+                if !name.is_empty() && is_vpn_iface(&name) && is_interface_up(&name) {
+                    vpn_ifaces.push(name);
                 }
             }
         }
@@ -2385,16 +2095,9 @@ pub fn check_bpf_iface_map() -> CheckOutput {
         libc::close(fd);
 
         if vpn_ifaces.is_empty() {
-            CheckOutput::pass(format!(
-                "BPF map read successfully, no VPN interfaces detected (interfaces: [{}])",
-                all_ifaces.join(", ")
-            ))
+            CheckOutput::pass("not detected")
         } else {
-            CheckOutput::fail(format!(
-                "leaked VPN interfaces via direct BPF map read: [{}] inside [{}]!",
-                vpn_ifaces.join(", "),
-                all_ifaces.join(", ")
-            ))
+            CheckOutput::fail("VPN detected")
         }
     }
 }
@@ -2430,7 +2133,7 @@ pub fn check_system_properties() -> CheckOutput {
             "net.interfaces.default.type",
             "net.interfaces.default.name",
         ];
-        let mut found = Vec::new();
+        let mut found = false;
         let mut value_buf = [0 as libc::c_char; 96]; // PROP_VALUE_MAX is 92
         for &key in &keys {
             let c_key = std::ffi::CString::new(key).unwrap();
@@ -2443,15 +2146,15 @@ pub fn check_system_properties() -> CheckOutput {
                         || key.contains("tun")
                         || key.contains("vpn");
                     if is_vpn_val {
-                        found.push(format!("{key}={val_str}"));
+                        found = true;
                     }
                 }
             }
         }
-        if found.is_empty() {
-            CheckOutput::pass("no VPN properties found via __system_property_get")
+        if found {
+            CheckOutput::fail("VPN detected")
         } else {
-            CheckOutput::fail(format!("VPN properties leaked: [{}]", found.join(", ")))
+            CheckOutput::pass("not detected")
         }
     }
 }
@@ -2471,71 +2174,31 @@ pub fn check_proc_sys_net_conf() -> CheckOutput {
     ];
     let test_ifaces = ["tun0", "tun1", "wg0", "wg1", "ppp0", "ppp1"];
 
-    let mut path_results = Vec::new();
-    let mut any_failed = false;
-    let mut leaked_interfaces = Vec::new();
+    let mut any_leaked = false;
 
     for path in &paths {
-        let mut leaked_here = Vec::new();
-        let mut readdir_denied = false;
-
         // 1. Try readdir
-        match std::fs::read_dir(path) {
-            Err(_) => {
-                readdir_denied = true;
-            }
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if is_vpn_iface(&name) && is_interface_up(&name) {
-                        leaked_here.push(name);
-                    }
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if is_vpn_iface(&name) && is_interface_up(&name) {
+                    any_leaked = true;
                 }
             }
         }
 
         // 2. Try Path Existence Oracle
-        let mut oracle_denied = false;
         for &iface in &test_ifaces {
-            match check_path_via_oracle(path, iface) {
-                Some(true) => {
-                    if is_interface_up(iface) && !leaked_here.contains(&iface.to_string()) {
-                        leaked_here.push(iface.to_string());
-                    }
-                }
-                Some(false) => {}
-                None => {
-                    oracle_denied = true;
-                }
+            if check_path_via_oracle(path, iface) == Some(true) && is_interface_up(iface) {
+                any_leaked = true;
             }
-        }
-
-        // Format result for this path
-        if !leaked_here.is_empty() {
-            any_failed = true;
-            for iface in &leaked_here {
-                if !leaked_interfaces.contains(iface) {
-                    leaked_interfaces.push(iface.clone());
-                }
-            }
-            path_results.push(format!("{path}: NOT OK (leaked {})", leaked_here.join(",")));
-        } else if readdir_denied && oracle_denied {
-            path_results.push(format!("{path}: OK (blocked)"));
-        } else {
-            path_results.push(format!("{path}: OK"));
         }
     }
 
-    let details = path_results.join(", ");
-
-    if any_failed {
-        CheckOutput::fail(format!(
-            "VPN leaked: [{}] — Details: {}",
-            leaked_interfaces.join(", "),
-            details
-        ))
+    if any_leaked {
+        CheckOutput::fail("VPN detected")
     } else {
-        CheckOutput::pass(format!("All paths secure — Details: {}", details))
+        CheckOutput::pass("not detected")
     }
 }
 
@@ -2557,82 +2220,59 @@ pub fn check_ioctl_alternative() -> CheckOutput {
                 optlen,
             );
 
-            let mut leaked = Vec::new();
+            let mut leaked = false;
 
             // 1. SIOCGIFINDEX
             if libc::ioctl(fd, libc::SIOCGIFINDEX as _, &ifr) == 0 {
                 let index = *(std::ptr::from_ref(&ifr.ifr_ifru) as *const libc::c_int);
                 if index > 0 && is_interface_up(&vpn_iface) {
-                    leaked.push(format!("SIOCGIFINDEX={index}"));
+                    leaked = true;
                 }
             }
 
             // Helper to extract IPv4 from sockaddr inside union
-            let get_ip_from_union = |ifr_ifru: &libc::__c_anonymous_ifr_ifru| -> Option<String> {
+            let has_ip_in_union = |ifr_ifru: &libc::__c_anonymous_ifr_ifru| -> bool {
                 let addr_ptr = std::ptr::from_ref(ifr_ifru) as *const libc::sockaddr;
-                if (*addr_ptr).sa_family == libc::AF_INET as libc::sa_family_t {
-                    let sin = &*(addr_ptr as *const libc::sockaddr_in);
-                    let ip = u32::from_be(sin.sin_addr.s_addr);
-                    Some(format!(
-                        "{}.{}.{}.{}",
-                        (ip >> 24) & 0xff,
-                        (ip >> 16) & 0xff,
-                        (ip >> 8) & 0xff,
-                        ip & 0xff
-                    ))
-                } else {
-                    None
-                }
+                (*addr_ptr).sa_family == libc::AF_INET as libc::sa_family_t
             };
 
             // 2. SIOCGIFADDR
             std::ptr::write_bytes(&mut ifr.ifr_ifru, 0, 1);
-            if libc::ioctl(fd, libc::SIOCGIFADDR as _, &ifr) == 0 && is_interface_up(&vpn_iface) {
-                if let Some(ip) = get_ip_from_union(&ifr.ifr_ifru) {
-                    leaked.push(format!("SIOCGIFADDR={ip}"));
-                }
+            if libc::ioctl(fd, libc::SIOCGIFADDR as _, &ifr) == 0
+                && is_interface_up(&vpn_iface)
+                && has_ip_in_union(&ifr.ifr_ifru)
+            {
+                leaked = true;
             }
 
             // 3. SIOCGIFDSTADDR
             std::ptr::write_bytes(&mut ifr.ifr_ifru, 0, 1);
-            if libc::ioctl(fd, libc::SIOCGIFDSTADDR as _, &ifr) == 0 && is_interface_up(&vpn_iface)
+            if libc::ioctl(fd, libc::SIOCGIFDSTADDR as _, &ifr) == 0
+                && is_interface_up(&vpn_iface)
+                && has_ip_in_union(&ifr.ifr_ifru)
             {
-                if let Some(ip) = get_ip_from_union(&ifr.ifr_ifru) {
-                    leaked.push(format!("SIOCGIFDSTADDR={ip}"));
-                }
+                leaked = true;
             }
 
             // 4. SIOCGIFNETMASK
             std::ptr::write_bytes(&mut ifr.ifr_ifru, 0, 1);
-            if libc::ioctl(fd, libc::SIOCGIFNETMASK as _, &ifr) == 0 && is_interface_up(&vpn_iface)
+            if libc::ioctl(fd, libc::SIOCGIFNETMASK as _, &ifr) == 0
+                && is_interface_up(&vpn_iface)
+                && has_ip_in_union(&ifr.ifr_ifru)
             {
-                if let Some(ip) = get_ip_from_union(&ifr.ifr_ifru) {
-                    leaked.push(format!("SIOCGIFNETMASK={ip}"));
-                }
+                leaked = true;
             }
 
             // 5. SIOCGIFHWADDR
             std::ptr::write_bytes(&mut ifr.ifr_ifru, 0, 1);
             if libc::ioctl(fd, libc::SIOCGIFHWADDR as _, &ifr) == 0 && is_interface_up(&vpn_iface) {
-                let hwaddr_ptr = std::ptr::from_ref(&ifr.ifr_ifru) as *const libc::sockaddr;
-                let hw = &(*hwaddr_ptr).sa_data;
-                let mac = format!(
-                    "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                    hw[0] as u8, hw[1] as u8, hw[2] as u8, hw[3] as u8, hw[4] as u8, hw[5] as u8
-                );
-                leaked.push(format!("SIOCGIFHWADDR={mac}"));
+                leaked = true;
             }
 
-            if leaked.is_empty() {
-                CheckOutput::pass(format!(
-                    "alternative ioctl checks for '{vpn_iface}' passed",
-                    vpn_iface = vpn_iface
-                ))
+            if leaked {
+                CheckOutput::fail("VPN detected")
             } else {
-                CheckOutput::fail(format!(
-                    "alternative ioctl leaked '{vpn_iface}' details: [{}]",
-                    leaked.join(", ")
-                ))
+                CheckOutput::pass("not detected")
             }
         })
     }
@@ -2648,11 +2288,9 @@ pub fn check_direct_syscall() -> CheckOutput {
         if fd < 0 {
             let e = std::io::Error::last_os_error();
             if is_selinux_denial(&e) {
-                return CheckOutput::pass(format!(
-                    "direct SYS_socket denied by SELinux ({e}) — secure"
-                ));
+                return CheckOutput::pass("not detected");
             } else {
-                return CheckOutput::fail(format!("direct SYS_socket failed: {e}"));
+                return CheckOutput::fail("check error");
             }
         }
         let fd = fd as libc::c_int;
@@ -2678,28 +2316,17 @@ pub fn check_direct_syscall() -> CheckOutput {
 
         if ret < 0 {
             if err == libc::ENODEV || err == libc::ENXIO {
-                CheckOutput::pass(format!(
-                    "direct SYS_ioctl for '{vpn}' returned ENODEV/ENXIO — interface hidden",
-                    vpn = vpn_iface
-                ))
+                CheckOutput::pass("not detected")
             } else {
-                CheckOutput::fail(format!(
-                    "direct SYS_ioctl returned error {err} ({})",
-                    last_os_error()
-                ))
+                CheckOutput::fail("check error")
             }
         } else {
             let flags_ptr = std::ptr::from_ref(&ifr.ifr_ifru) as *const libc::c_short;
             let flags = *flags_ptr as u32;
             if flags & libc::IFF_UP as u32 == 0 {
-                CheckOutput::pass(format!(
-                    "direct SYS_ioctl returned flags=0x{flags:x} — interface is DOWN/inactive"
-                ))
+                CheckOutput::pass("not detected")
             } else {
-                CheckOutput::fail(format!(
-                    "direct SYS_ioctl: '{vpn}' is visible! flags=0x{flags:x}",
-                    vpn = vpn_iface
-                ))
+                CheckOutput::fail("VPN detected")
             }
         }
     }
@@ -2713,7 +2340,7 @@ pub fn check_traceroute_rtt() -> CheckOutput {
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
         if fd < 0 {
-            return CheckOutput::fail(format!("cannot create UDP socket: {}", last_os_error()));
+            return CheckOutput::fail("check error");
         }
 
         let on: libc::c_int = 1;
@@ -2725,11 +2352,8 @@ pub fn check_traceroute_rtt() -> CheckOutput {
             std::mem::size_of_val(&on) as libc::socklen_t,
         ) < 0
         {
-            let err = last_os_error();
             libc::close(fd);
-            return CheckOutput::pass(format!(
-                "setsockopt(IP_RECVERR) not supported or denied: {err}"
-            ));
+            return CheckOutput::pass("not detected");
         }
 
         let ttl: libc::c_int = 1;
@@ -2752,16 +2376,14 @@ pub fn check_traceroute_rtt() -> CheckOutput {
             std::mem::size_of_val(&dest) as libc::socklen_t,
         ) < 0
         {
-            let err = last_os_error();
             libc::close(fd);
-            return CheckOutput::fail(format!("connect() failed: {err}"));
+            return CheckOutput::fail("check error");
         }
 
-        let start = std::time::Instant::now();
         let payload = b"ping";
         if libc::send(fd, payload.as_ptr().cast(), payload.len(), 0) < 0 {
             libc::close(fd);
-            return CheckOutput::pass("UDP send failed (normal if no internet connection)");
+            return CheckOutput::pass("not detected");
         }
 
         let mut fds = libc::pollfd {
@@ -2770,11 +2392,10 @@ pub fn check_traceroute_rtt() -> CheckOutput {
             revents: 0,
         };
         let poll_ret = libc::poll(&mut fds, 1, 100); // 100ms timeout
-        let rtt = start.elapsed();
 
         if poll_ret <= 0 {
             libc::close(fd);
-            return CheckOutput::pass("no traceroute response within 100ms (timeout)");
+            return CheckOutput::pass("not detected");
         }
 
         let mut msg: libc::msghdr = std::mem::zeroed();
@@ -2796,10 +2417,7 @@ pub fn check_traceroute_rtt() -> CheckOutput {
         libc::close(fd);
 
         if recv_ret < 0 {
-            return CheckOutput::pass(format!(
-                "poll triggered but recvmsg(MSG_ERRQUEUE) failed: {}",
-                last_os_error()
-            ));
+            return CheckOutput::pass("not detected");
         }
 
         let mut gateway_ip = String::new();
@@ -2853,10 +2471,7 @@ pub fn check_traceroute_rtt() -> CheckOutput {
         }
 
         if gateway_ip.is_empty() {
-            return CheckOutput::pass(format!(
-                "traceroute hop 1 RTT={:?}, but gateway IP not found in CMSG",
-                rtt
-            ));
+            return CheckOutput::pass("not detected");
         }
 
         let is_suspicious = gateway_ip.starts_with("10.8.")
@@ -2864,13 +2479,10 @@ pub fn check_traceroute_rtt() -> CheckOutput {
             || gateway_ip.starts_with("172.16.")
             || gateway_ip == "127.0.0.1";
 
-        let details = format!("traceroute hop 1: gateway={gateway_ip} RTT={:?}", rtt);
         if is_suspicious {
-            CheckOutput::fail(format!(
-                "{details} — suspicious first hop (VPN gateway-like IP)"
-            ))
+            CheckOutput::fail("VPN detected")
         } else {
-            CheckOutput::pass(format!("{details} — secure (normal first hop gateway)"))
+            CheckOutput::pass("not detected")
         }
     }
 }
@@ -2899,7 +2511,7 @@ pub fn check_arm_timing() -> CheckOutput {
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_NONBLOCK, 0);
         if fd < 0 {
-            return CheckOutput::fail(format!("cannot create UDP socket: {}", last_os_error()));
+            return CheckOutput::fail("check error");
         }
 
         let mut dest: libc::sockaddr_in = std::mem::zeroed();
@@ -2908,15 +2520,11 @@ pub fn check_arm_timing() -> CheckOutput {
         dest.sin_addr.s_addr = 0x08080808; // 8.8.8.8
 
         let payload = [0u8; 32];
-        let mut min_cycles = u64::MAX;
-        let mut max_cycles = 0;
-        let mut sum_cycles = 0u64;
         let iterations = 100;
-        let mut success_count = 0;
 
         for _ in 0..iterations {
-            let start = read_cntvct();
-            let ret = libc::sendto(
+            let _ = read_cntvct();
+            libc::sendto(
                 fd,
                 payload.as_ptr().cast(),
                 payload.len(),
@@ -2924,32 +2532,13 @@ pub fn check_arm_timing() -> CheckOutput {
                 std::ptr::from_ref(&dest).cast(),
                 std::mem::size_of_val(&dest) as libc::socklen_t,
             );
-            let end = read_cntvct();
-
-            if ret >= 0 {
-                let diff = end.saturating_sub(start);
-                if diff < min_cycles {
-                    min_cycles = diff;
-                }
-                if diff > max_cycles {
-                    max_cycles = diff;
-                }
-                sum_cycles += diff;
-                success_count += 1;
-            }
+            let _ = read_cntvct();
         }
 
         libc::close(fd);
 
-        if success_count == 0 {
-            return CheckOutput::pass("UDP sendto failed (normal if no network route)");
-        }
-
-        let avg_cycles = sum_cycles / success_count;
-        CheckOutput::pass(format!(
-            "ARM CNTVCT cycles for sendto: min={}, max={}, avg={}",
-            min_cycles, max_cycles, avg_cycles
-        ))
+        // Timing-only probe — informational, not a pass/fail signal on its own.
+        CheckOutput::pass("not detected")
     }
 }
 
@@ -2961,7 +2550,7 @@ pub fn check_udp_queue_pressure() -> CheckOutput {
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_NONBLOCK, 0);
         if fd < 0 {
-            return CheckOutput::fail(format!("cannot create UDP socket: {}", last_os_error()));
+            return CheckOutput::fail("check error");
         }
 
         let mut dest: libc::sockaddr_in = std::mem::zeroed();
@@ -3000,17 +2589,12 @@ pub fn check_udp_queue_pressure() -> CheckOutput {
 
         libc::close(fd);
 
-        let elapsed_ms = start_time.elapsed().as_millis();
-        let details = format!("Sent {}/1000 packets in {} ms", success_count, elapsed_ms);
-
         if success_count == 1000 {
             // High packet sending rate achieved -> Rate limiter is not active -> VPN is not hidden
-            CheckOutput::fail(format!("VPN detected (high transmission rate): {details}"))
+            CheckOutput::fail("VPN detected")
         } else {
             // Hitting rate limit -> Rate limiter active (either simulated by kmod, or slow network) -> Pass
-            CheckOutput::pass(format!(
-                "No VPN detected (transmission rate limited): {details}"
-            ))
+            CheckOutput::pass("not detected")
         }
     }
 }
@@ -3112,7 +2696,7 @@ pub fn check_gso_asymmetry() -> CheckOutput {
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
         if fd < 0 {
-            return CheckOutput::fail(format!("cannot create socket: {}", last_os_error()));
+            return CheckOutput::fail("check error");
         }
 
         let gso_size: libc::c_int = 1200;
@@ -3125,18 +2709,8 @@ pub fn check_gso_asymmetry() -> CheckOutput {
         );
 
         if opt_ret < 0 {
-            let err_no = last_os_errno();
             libc::close(fd);
-            if err_no == libc::ENOPROTOOPT || err_no == libc::EOPNOTSUPP {
-                return CheckOutput::fail(
-                    "UDP_SEGMENT GSO offload option not supported by the kernel/socket — VPN/virtual interface asymmetry detected".to_string()
-                );
-            } else {
-                return CheckOutput::fail(format!(
-                    "setsockopt UDP_SEGMENT failed: {}",
-                    last_os_error()
-                ));
-            }
+            return CheckOutput::fail("VPN detected");
         }
 
         let mut dest: libc::sockaddr_in = std::mem::zeroed();
@@ -3150,43 +2724,18 @@ pub fn check_gso_asymmetry() -> CheckOutput {
             std::mem::size_of_val(&dest) as libc::socklen_t,
         ) < 0
         {
-            let err = last_os_error();
             libc::close(fd);
-            return CheckOutput::fail(format!("connect failed: {}", err));
+            return CheckOutput::fail("check error");
         }
 
         let large_buffer = vec![0u8; 10000];
-
-        let start = std::time::Instant::now();
         let send_ret = libc::send(fd, large_buffer.as_ptr().cast(), large_buffer.len(), 0);
-        let duration = start.elapsed();
-
-        let err_no = if send_ret < 0 { last_os_errno() } else { 0 };
-        let err_str = if send_ret < 0 {
-            last_os_error()
-        } else {
-            String::new()
-        };
         libc::close(fd);
 
         if send_ret < 0 {
-            if err_no == libc::EOPNOTSUPP
-                || err_no == libc::EIO
-                || err_no == libc::EMSGSIZE
-                || err_no == libc::EINVAL
-            {
-                CheckOutput::fail(format!(
-                    "GSO large send failed: {err_str} (errno {err_no}) — Virtual interface GSO unsupported / VPN detected"
-                ))
-            } else {
-                CheckOutput::fail(format!("GSO send failed with error: {err_str}"))
-            }
+            CheckOutput::fail("VPN detected")
         } else {
-            let duration_us = duration.as_micros();
-            CheckOutput::pass(format!(
-                "GSO send succeeded with hardware offload latency ({} us) — physical interface",
-                duration_us
-            ))
+            CheckOutput::pass("not detected")
         }
     }
 }
@@ -3201,9 +2750,9 @@ pub fn check_timestamping_hw() -> CheckOutput {
         if fd < 0 {
             let err = last_os_errno();
             return if err == libc::ECONNREFUSED {
-                CheckOutput::network_blocked("socket() ECONNREFUSED — no network access")
+                CheckOutput::network_blocked("no network access")
             } else {
-                CheckOutput::fail(format!("cannot create UDP socket: {}", last_os_error()))
+                CheckOutput::fail("check error")
             };
         }
 
@@ -3222,10 +2771,7 @@ pub fn check_timestamping_hw() -> CheckOutput {
         ) < 0
         {
             libc::close(fd);
-            return CheckOutput::pass(format!(
-                "SO_TIMESTAMPING setsockopt unsupported: {}",
-                last_os_error()
-            ));
+            return CheckOutput::pass("not detected");
         }
 
         // Read back flags — kmod strips HW bits before the kernel sets sk_tsflags
@@ -3240,19 +2786,14 @@ pub fn check_timestamping_hw() -> CheckOutput {
         ) < 0
         {
             libc::close(fd);
-            return CheckOutput::pass(format!(
-                "SO_TIMESTAMPING getsockopt failed: {}",
-                last_os_error()
-            ));
+            return CheckOutput::pass("not detected");
         }
 
         let hw_bits = SOF_TIMESTAMPING_TX_HARDWARE | SOF_TIMESTAMPING_RAW_HARDWARE;
         if (actual_flags & hw_bits) == 0 {
             // kmod stripped hardware bits before the kernel could store them
             libc::close(fd);
-            return CheckOutput::pass(format!(
-                "SO_TIMESTAMPING hw bits stripped (req=0x{ts_flags:x} got=0x{actual_flags:x}) — kmod hiding hardware timestamp capability"
-            ));
+            return CheckOutput::pass("not detected");
         }
 
         // Hardware bits survived — send a packet and check actual timestamps
@@ -3268,18 +2809,13 @@ pub fn check_timestamping_hw() -> CheckOutput {
         ) < 0
         {
             libc::close(fd);
-            return CheckOutput::pass(format!(
-                "hw bits present (0x{actual_flags:x}) but connect failed — cannot verify actual timestamps"
-            ));
+            return CheckOutput::pass("not detected");
         }
 
         let data = [0u8; 1];
         if libc::send(fd, data.as_ptr().cast(), 1, 0) < 0 {
             libc::close(fd);
-            return CheckOutput::pass(format!(
-                "hw bits present but send failed: {}",
-                last_os_error()
-            ));
+            return CheckOutput::pass("not detected");
         }
 
         // Wait up to 150 ms for the TX timestamp via MSG_ERRQUEUE
@@ -3311,9 +2847,7 @@ pub fn check_timestamping_hw() -> CheckOutput {
         libc::close(fd);
 
         if recv_ret < 0 {
-            return CheckOutput::pass(format!(
-                "hw bits present (0x{actual_flags:x}) but MSG_ERRQUEUE timed out — cannot determine hw ts availability"
-            ));
+            return CheckOutput::pass("not detected");
         }
 
         // Parse cmsghdr for SCM_TIMESTAMPING
@@ -3339,27 +2873,18 @@ pub fn check_timestamping_hw() -> CheckOutput {
         }
 
         if !found {
-            return CheckOutput::pass(format!(
-                "hw bits present (0x{actual_flags:x}) but no SCM_TIMESTAMPING in MSG_ERRQUEUE"
-            ));
+            return CheckOutput::pass("not detected");
         }
 
         let has_hw = hw_sec != 0 || hw_nsec != 0;
         let has_sw = sw_sec != 0 || sw_nsec != 0;
 
         if has_hw {
-            CheckOutput::pass(format!(
-                "hardware timestamp received (ts[2]={hw_sec}.{hw_nsec:09}ns) — physical NIC"
-            ))
+            CheckOutput::pass("not detected")
         } else if has_sw {
-            CheckOutput::fail(format!(
-                "SO_TIMESTAMPING: hw bits 0x{actual_flags:x} set but ts[2]=0; sw ts[0]={sw_sec}.{sw_nsec:09}ns — software-only path (virtual interface / VPN)"
-            ))
+            CheckOutput::fail("VPN detected")
         } else {
-            CheckOutput::pass(
-                "hw bits present but no timestamps in SCM_TIMESTAMPING — NIC lacks hw ts support"
-                    .to_string(),
-            )
+            CheckOutput::pass("not detected")
         }
     }
 }
@@ -3487,9 +3012,6 @@ pub fn check_ipv6_link_local_bruteforce() -> CheckOutput {
         } else {
             &fallback_indices
         };
-        // In fallback mode ENODEV on IPV6_ADD_MEMBERSHIP just means "no interface at this
-        // index", not "no IFF_MULTICAST" — most fallback indices have no interface at all.
-        let fallback_mode = !fallback_indices.is_empty();
 
         // Pass 3: NDP Timeout Oracle (3.5 s per candidate, at most 2 anonymous indices).
         // On a physical interface the kernel sends NDP "who has fe80::dead:beef:cafe:1234?" and
@@ -3616,47 +3138,14 @@ pub fn check_ipv6_link_local_bruteforce() -> CheckOutput {
             }
         }
 
-        let fallback_note = if fallback_mode {
-            format!("; fallback probed {:?}", fallback_indices)
+        if !named_vpn.is_empty()
+            || !ndp_tunnel.is_empty()
+            || !qdisc_tunnel.is_empty()
+            || !probably_tunnel_indices.is_empty()
+        {
+            CheckOutput::fail("VPN detected")
         } else {
-            String::new()
-        };
-        let details = format!(
-            "{} active {:?}; probably_tunnel {:?}{}; \
-            ndp_tunnel {:?}; qdisc_tunnel {:?}",
-            active_indices.len(),
-            active_indices,
-            probably_tunnel_indices,
-            fallback_note,
-            ndp_tunnel,
-            qdisc_tunnel,
-        );
-
-        if !named_vpn.is_empty() {
-            CheckOutput::fail(format!(
-                "VPN interfaces exposed via if_indextoname: [{}] — {}",
-                named_vpn.join(", "),
-                details,
-            ))
-        } else if !ndp_tunnel.is_empty() {
-            let mode = if fallback_mode { " [fallback]" } else { "" };
-            CheckOutput::fail(format!(
-                "Hidden VPN tunnel detected by NDP timeout oracle{} (NOARP on {:?}) — {}",
-                mode, ndp_tunnel, details,
-            ))
-        } else if !qdisc_tunnel.is_empty() {
-            let mode = if fallback_mode { " [fallback]" } else { "" };
-            CheckOutput::fail(format!(
-                "Hidden VPN tunnel detected by hardware qdisc flood{} (deep queue on {:?}) — {}",
-                mode, qdisc_tunnel, details,
-            ))
-        } else if !probably_tunnel_indices.is_empty() {
-            CheckOutput::fail(format!(
-                "VPN interfaces exposed via anonymous index leak: {:?} — {}",
-                probably_tunnel_indices, details,
-            ))
-        } else {
-            CheckOutput::pass(format!("No VPN detected — {}", details))
+            CheckOutput::pass("not detected")
         }
     }
 }
@@ -3697,18 +3186,17 @@ pub fn check_uid_route_rules_leak() -> CheckOutput {
             let e = std::io::Error::last_os_error();
             libc::close(fd);
             return if is_selinux_denial(&e) {
-                CheckOutput::pass(format!("netlink RTM_GETRULE denied by SELinux ({e})"))
+                CheckOutput::pass("not detected")
             } else {
-                CheckOutput::fail(format!("send error: {e}"))
+                CheckOutput::fail("check error")
             };
         }
 
         let mut buf = [0u8; 32768];
-        let mut uid_rules = Vec::new();
+        let mut leaked = false;
         let hdr_plus_frh =
             std::mem::size_of::<libc::nlmsghdr>() + std::mem::size_of::<FibRuleHdr>();
 
-        const FRA_TABLE: u16 = 15;
         const FRA_UID_RANGE: u16 = 20;
 
         for _ in 0..MAX_NETLINK_RECV_ITERS {
@@ -3724,27 +3212,16 @@ pub fn check_uid_route_rules_leak() -> CheckOutput {
                     let data_start = offset + hdr_plus_frh;
                     let msg_end = offset + msg_len;
 
-                    let frh_ptr = b
-                        .as_ptr()
-                        .add(offset + std::mem::size_of::<libc::nlmsghdr>())
-                        as *const FibRuleHdr;
-                    let frh = &*frh_ptr;
-                    let mut table_id = frh.table as u32;
-
                     let mut has_uid_range = false;
                     let mut uid_start = 0u32;
                     let mut uid_end = 0u32;
 
-                    for_each_rtattr(b, data_start, msg_end, |rta, payload| match rta.rta_type {
-                        FRA_TABLE if payload.len() >= 4 => {
-                            table_id = u32::from_ne_bytes(payload[..4].try_into().unwrap());
-                        }
-                        FRA_UID_RANGE if payload.len() >= 8 => {
+                    for_each_rtattr(b, data_start, msg_end, |rta, payload| {
+                        if rta.rta_type == FRA_UID_RANGE && payload.len() >= 8 {
                             uid_start = u32::from_ne_bytes(payload[..4].try_into().unwrap());
                             uid_end = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
                             has_uid_range = true;
                         }
-                        _ => {}
                     });
 
                     if has_uid_range
@@ -3752,7 +3229,7 @@ pub fn check_uid_route_rules_leak() -> CheckOutput {
                         && uid_end != u32::MAX
                         && (uid_end - uid_start > 0)
                     {
-                        uid_rules.push(format!("table={table_id} range={uid_start}-{uid_end}"));
+                        leaked = true;
                     }
                 },
             );
@@ -3762,16 +3239,10 @@ pub fn check_uid_route_rules_leak() -> CheckOutput {
         }
         libc::close(fd);
 
-        if uid_rules.is_empty() {
-            CheckOutput::pass(
-                "No dynamic UID split routing rules found — physical network behavior".to_string(),
-            )
+        if leaked {
+            CheckOutput::fail("VPN detected")
         } else {
-            CheckOutput::fail(format!(
-                "Split Tunneling routing rules detected (found {} UID range rules): {:?}",
-                uid_rules.len(),
-                uid_rules
-            ))
+            CheckOutput::pass("not detected")
         }
     }
 }
@@ -3784,7 +3255,7 @@ pub fn check_pmtu_cache_poisoning() -> CheckOutput {
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
         if fd < 0 {
-            return CheckOutput::fail(format!("cannot create socket: {}", last_os_error()));
+            return CheckOutput::fail("check error");
         }
 
         let mut dest: libc::sockaddr_in = std::mem::zeroed();
@@ -3798,9 +3269,8 @@ pub fn check_pmtu_cache_poisoning() -> CheckOutput {
             std::mem::size_of_val(&dest) as libc::socklen_t,
         ) < 0
         {
-            let err = last_os_error();
             libc::close(fd);
-            return CheckOutput::fail(format!("connect to 8.8.8.8 failed: {}", err));
+            return CheckOutput::fail("check error");
         }
 
         let mut mtu: libc::c_int = 0;
@@ -3817,16 +3287,13 @@ pub fn check_pmtu_cache_poisoning() -> CheckOutput {
         libc::close(fd);
 
         if ret < 0 {
-            return CheckOutput::fail(format!("getsockopt IP_MTU failed: {}", last_os_error()));
+            return CheckOutput::fail("check error");
         }
 
         if mtu > 0 && mtu < 1450 {
-            CheckOutput::fail(format!(
-                "Path MTU cache leak detected: MTU to 8.8.8.8 is reduced to {} (expected >= 1480) — VPN detected",
-                mtu
-            ))
+            CheckOutput::fail("VPN detected")
         } else {
-            CheckOutput::pass(format!("Normal Path MTU: {} bytes", mtu))
+            CheckOutput::pass("not detected")
         }
     }
 }
@@ -3840,21 +3307,12 @@ pub fn check_underlay_port_conflict() -> CheckOutput {
         let ip = match find_active_physical_ip_and_mask() {
             Some((ip, _)) => ip,
             None => {
-                return CheckOutput::pass(
-                    "No active physical IPv4 interface found to scan".to_string(),
-                );
+                return CheckOutput::pass("not detected");
             }
         };
 
-        let ip_be = ip.to_be();
-        let ip_bytes = ip_be.to_ne_bytes();
-        let ip_str = format!(
-            "{}.{}.{}.{}",
-            ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]
-        );
-
         let ports: [u16; 5] = [500, 4500, 1194, 1701, 51820];
-        let mut conflicted_ports = Vec::new();
+        let mut any_conflict = false;
 
         for &port in &ports {
             let sock = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
@@ -3876,22 +3334,16 @@ pub fn check_underlay_port_conflict() -> CheckOutput {
             if ret < 0 {
                 let err_no = last_os_errno();
                 if err_no == libc::EADDRINUSE {
-                    conflicted_ports.push(port);
+                    any_conflict = true;
                 }
             }
             libc::close(sock);
         }
 
-        if conflicted_ports.is_empty() {
-            CheckOutput::pass(format!(
-                "No UDP port conflicts on physical interface IP {} (checked ports: {:?})",
-                ip_str, ports
-            ))
+        if any_conflict {
+            CheckOutput::fail("VPN detected")
         } else {
-            CheckOutput::fail(format!(
-                "UDP Port exhaustion leak: ports {:?} are already bound on physical IP {} — active VPN tunnel underlay socket detected",
-                conflicted_ports, ip_str
-            ))
+            CheckOutput::pass("not detected")
         }
     }
 }
@@ -3903,9 +3355,7 @@ pub fn check_rtm_getlink_trim_oracle() -> CheckOutput {
     }
     let existing = probe_active_ifindexes();
     if existing.is_empty() {
-        return CheckOutput::pass(
-            "no active interfaces found via bind probe — trim oracle skipped".to_string(),
-        );
+        return CheckOutput::pass("not detected");
     }
 
     let visible = match visible_ifindexes_from_getlink() {
@@ -3913,23 +3363,12 @@ pub fn check_rtm_getlink_trim_oracle() -> CheckOutput {
         Err(out) => return out,
     };
 
-    let hidden: Vec<u32> = existing
-        .iter()
-        .filter(|&&idx| !visible.contains(&idx))
-        .copied()
-        .collect();
+    let hidden = existing.iter().any(|idx| !visible.contains(idx));
 
-    if hidden.is_empty() {
-        CheckOutput::pass(format!(
-            "{} active iface(s) via bind probe, all visible in RTM_GETLINK — no trim-oracle discrepancy",
-            existing.len()
-        ))
+    if hidden {
+        CheckOutput::fail("VPN detected")
     } else {
-        CheckOutput::fail(format!(
-            "{} hidden interface(s): ifindex(es) {:?} exist (bind probe) but absent from RTM_GETLINK dump — VPN interface actively hidden (confirms kmod trim)",
-            hidden.len(),
-            hidden
-        ))
+        CheckOutput::pass("not detected")
     }
 }
 
