@@ -7,6 +7,7 @@ internal object IfaceLists {
     fun isVpnIface(name: String): Boolean {
         if (name.isEmpty()) return false
         val n = name.lowercase()
+        if (n == "gre0" || n == "gretap0") return false
         // OpenVPN, WireGuard userspace, Tailscale, generic tunneling
         if (n.startsWith("tun") && !n.startsWith("tunl")) return true
         // OpenVPN bridged

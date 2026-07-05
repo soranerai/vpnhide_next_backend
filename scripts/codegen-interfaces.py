@@ -28,7 +28,6 @@ TOML_PATH = REPO_ROOT / "data" / "interfaces.toml"
 # import paths stay short and obvious.
 OUT_KMOD = REPO_ROOT / "kmod" / "generated" / "iface_lists.h"
 OUT_KMOD_TEST = REPO_ROOT / "kmod" / "test_iface_lists.c"
-OUT_ZYGISK = REPO_ROOT / "zygisk" / "src" / "generated" / "iface_lists.rs"
 OUT_LSP_NATIVE = (
     REPO_ROOT / "lsposed" / "native" / "src" / "generated" / "iface_lists.rs"
 )
@@ -299,9 +298,17 @@ def emit_kmod(rules: list[Rule]) -> str:
     lines.append("\treturn false;")
     lines.append("}")
     lines.append("")
+    lines.append("static inline bool vpnhide_is_gre_or_gretap(const char *name)")
+    lines.append("{")
+    lines.append('\treturn vpnhide_iface_equals_ci(name, "gre0") ||')
+    lines.append('\t       vpnhide_iface_equals_ci(name, "gretap0");')
+    lines.append("}")
+    lines.append("")
     lines.append("static inline bool vpnhide_iface_is_vpn(const char *name)")
     lines.append("{")
     lines.append("\tif (!name || !name[0])")
+    lines.append("\t\treturn false;")
+    lines.append("\tif (vpnhide_is_gre_or_gretap(name))")
     lines.append("\t\treturn false;")
     for r in rules:
         if r.note:
@@ -451,6 +458,9 @@ def emit_rust(rules: list[Rule], tests: list[TestVector]) -> str:
     lines.append("    if name.is_empty() {")
     lines.append("        return false;")
     lines.append("    }")
+    lines.append('    if equals_ci(name, b"gre0") || equals_ci(name, b"gretap0") {')
+    lines.append("        return false;")
+    lines.append("    }")
     for r in rules:
         if r.note:
             lines.append(f"    // {r.note}")
@@ -518,6 +528,7 @@ def emit_kotlin(rules: list[Rule]) -> str:
     lines.append("    fun isVpnIface(name: String): Boolean {")
     lines.append("        if (name.isEmpty()) return false")
     lines.append("        val n = name.lowercase()")
+    lines.append('        if (n == "gre0" || n == "gretap0") return false')
     for r in rules:
         if r.note:
             lines.append(f"        // {r.note}")
@@ -590,7 +601,6 @@ def main() -> int:
     outputs = {
         OUT_KMOD: emit_kmod(rules),
         OUT_KMOD_TEST: emit_kmod_test(tests),
-        OUT_ZYGISK: rust_body,
         OUT_LSP_NATIVE: rust_body,
         OUT_LSP_KT: emit_kotlin(rules),
         OUT_LSP_KT_TEST: emit_kotlin_test(tests),

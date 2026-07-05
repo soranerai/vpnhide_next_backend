@@ -77,9 +77,17 @@ static inline bool vpnhide_iface_contains_ci(
 	return false;
 }
 
+static inline bool vpnhide_is_gre_or_gretap(const char *name)
+{
+	return vpnhide_iface_equals_ci(name, "gre0") ||
+	       vpnhide_iface_equals_ci(name, "gretap0");
+}
+
 static inline bool vpnhide_iface_is_vpn(const char *name)
 {
 	if (!name || !name[0])
+		return false;
+	if (vpnhide_is_gre_or_gretap(name))
 		return false;
 	/* OpenVPN, WireGuard userspace, Tailscale, generic tunneling */
 	if (vpnhide_iface_starts_with_ci(name, "tun") &&

@@ -56,6 +56,9 @@ pub fn matches_vpn(name: &[u8]) -> bool {
     if name.is_empty() {
         return false;
     }
+    if equals_ci(name, b"gre0") || equals_ci(name, b"gretap0") {
+        return false;
+    }
     // OpenVPN, WireGuard userspace, Tailscale, generic tunneling
     if starts_with_ci(name, b"tun") && !starts_with_ci(name, b"tunl") {
         return true;
