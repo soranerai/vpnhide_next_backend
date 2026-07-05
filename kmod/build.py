@@ -231,7 +231,7 @@ def native_build_one(
         )
     else:
         content = content.rstrip() + f"\ngkiVariant={kmi}\n"
-    update_json_url = f"https://raw.githubusercontent.com/soranerai/vpnhide/main/update-json/update-kmod-{kmi}.json"
+    update_json_url = f"https://raw.githubusercontent.com/soranerai/vpnhide_next/main/update-json/update-kmod-{kmi}.json"
     if re.search(r"^updateJson=", content, flags=re.MULTILINE):
         content = re.sub(
             r"^updateJson=.*",
