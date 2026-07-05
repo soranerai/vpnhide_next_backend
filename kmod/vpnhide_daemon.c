@@ -179,8 +179,15 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6)
 			continue;
 
 		char *name = ifa->ifa_name;
+		bool is_vpn = false;
 
-		if (daemon_is_vpn_ifname(name, &prefixes)) {
+		if (ifa->ifa_flags & IFF_POINTOPOINT) {
+			is_vpn = true;
+		} else {
+			is_vpn = daemon_is_vpn_ifname(name, &prefixes);
+		}
+
+		if (is_vpn) {
 			unsigned int vpn_idx = if_nametoindex(name);
 			if (vpn_idx > 0) {
 				bool dup = false;
