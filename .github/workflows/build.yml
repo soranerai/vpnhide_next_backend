@@ -218,7 +218,7 @@ jobs:
               'dist/vpnhide-kmod-*/vpnhide-kmod-*.zip' \
               --repo "$REPO" \
               --draft=false \
-              --generate-release-notes
+              --generate-notes
             echo "✅ Release created"
           else
             echo "📝 Branch push detected (no tag)"
