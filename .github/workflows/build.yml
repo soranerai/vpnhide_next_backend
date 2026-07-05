@@ -190,7 +190,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [build-native, build-kmod]
+    needs: [build-native, build-kmod, kmod-qemu]
     runs-on: ubuntu-latest
     permissions:
       contents: write
