@@ -5013,6 +5013,22 @@ static int path_oracle_entry(struct kretprobe_instance *ri,
     dfd = (int)regs->regs[dfd_idx];
     filename = (const char __user *)regs->regs[filename_idx];
   }
+  /* Fast prefix filter for newfstatat: guarded paths via this hook are only
+   * /sys/class/net and /proc/net/dev_snmp6 subtrees.
+   * /proc/sys/net/ipv paths are handled by proc_sys_getattr_krp instead,
+   * so they do NOT generate overhead here.
+   * Read 10 bytes - enough to distinguish all cases. */
+  if (hook_idx == HOOK_NEWFSTATAT) {
+    char head[11];
+    long n = strncpy_from_user(head, filename, 10);
+    if (n <= 0)
+      return 1;
+    head[n < 10 ? (size_t)n : 10] = '\0';
+    // pass /sys/* (5) or /proc/net/ (10)
+    if (!((n >= 5 && memcmp(head, "/sys/", 5) == 0) ||
+          (n >= 10 && memcmp(head, "/proc/net/", 10) == 0)))
+      return 1;
+  }
 
   if (get_path_from_dfd_and_name(dfd, filename, path_buf, sizeof(path_buf)) ==
       0) {
@@ -5114,6 +5130,71 @@ static struct kretprobe sys_newfstatat_krp = {
     .data_size = sizeof(struct path_oracle_data),
     .maxactive = VPNHIDE_KRETPROBE_MAXACTIVE,
     .kp.symbol_name = "__arm64_sys_newfstatat",
+};
+
+/* ================================================================== */
+/*  Hook: proc_sys_lookup — denies VPN iface names in /proc/sys/net/  */
+/*  Intercepts at the LOOKUP level: returning ERR_PTR(-ENOENT) here    */
+/*  gives timing identical to a genuinely missing entry — the path    */
+/*  resolution fails at the same depth as for non-existent names.     */
+/* ================================================================== */
+
+struct proc_sys_lookup_data {
+  bool should_deny;
+};
+
+static int proc_sys_lookup_entry(struct kretprobe_instance *ri,
+                                 struct pt_regs *regs) {
+  struct proc_sys_lookup_data *data = (void *)ri->data;
+  struct dentry *dentry;
+  const unsigned char *name;
+  unsigned int name_len;
+
+  data->should_deny = false;
+
+  if (!is_hook_active(HOOK_NEWFSTATAT, from_kuid(&init_user_ns, current_uid())))
+    return 1;
+  if (!is_target_uid())
+    return 1;
+
+  /* proc_sys_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
+   * ARM64: dentry is at regs[1] */
+  dentry = (struct dentry *)(uintptr_t)regs->regs[1];
+  if (!dentry)
+    return 1;
+
+  name = dentry->d_name.name;
+  name_len = dentry->d_name.len;
+  if (!name || name_len == 0 || name_len >= IFNAMSIZ)
+    return 1;
+
+  if (vh_is_vpn_name_cached((const char *)name, (size_t)name_len)) {
+    data->should_deny = true;
+    vpnhide_dbg("proc_sys_lookup: denying VPN iface '%.*s' in sysctl\n",
+                (int)name_len, name);
+    return 0;
+  }
+
+  return 1;
+}
+
+static int proc_sys_lookup_ret(struct kretprobe_instance *ri,
+                               struct pt_regs *regs) {
+  struct proc_sys_lookup_data *data = (void *)ri->data;
+  if (data->should_deny) {
+    /* ERR_PTR(-ENOENT): dentry lookup failed, as if the name doesn't exist */
+    regs_set_return_value(regs, (u64)(unsigned long)ERR_PTR(-ENOENT));
+    record_kmod_intercept(from_kuid(&init_user_ns, current_uid()), 2);
+  }
+  return 0;
+}
+
+static struct kretprobe proc_sys_lookup_krp = {
+    .entry_handler = proc_sys_lookup_entry,
+    .handler = proc_sys_lookup_ret,
+    .data_size = sizeof(struct proc_sys_lookup_data),
+    .maxactive = VPNHIDE_KRETPROBE_MAXACTIVE,
+    .kp.symbol_name = "proc_sys_lookup",
 };
 
 static int sys_readlinkat_entry(struct kretprobe_instance *ri,
@@ -5472,7 +5553,12 @@ static struct kretprobe_reg probes[] = {
     {&sys_openat2_krp, "__arm64_sys_openat2", NULL, false, -1},
     {&sys_faccessat_krp, "__arm64_sys_faccessat", NULL, false, -1},
     {&sys_faccessat2_krp, "__arm64_sys_faccessat2", NULL, false, -1},
-    {&sys_newfstatat_krp, "__arm64_sys_newfstatat", NULL, false, -1},
+    /* sys_newfstatat_krp intentionally not registered: its brk at
+     * __arm64_sys_newfstatat adds measurable overhead on every newfstatat
+     * call, including timing-baseline paths used by detectors. /proc/sys/
+     * paths are now handled by proc_sys_lookup_krp; /sys/class/net paths
+     * are covered by sys_getdents64_krp (directory listing suppression). */
+    {&proc_sys_lookup_krp, "proc_sys_lookup", NULL, false, -1},
     {&sys_readlinkat_krp, "__arm64_sys_readlinkat", NULL, false, -1},
     {&udp_sendmsg_krp, "udp_sendmsg", NULL, false, -1},
     {&udpv6_sendmsg_ll_krp, "udpv6_sendmsg", NULL, false, -1},
