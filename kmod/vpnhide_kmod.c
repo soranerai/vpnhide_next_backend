@@ -5157,8 +5157,8 @@ static int proc_sys_lookup_entry(struct kretprobe_instance *ri,
   if (!is_target_uid())
     return 1;
 
-  /* proc_sys_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
-   * ARM64: dentry is at regs[1] */
+  /* proc_sys_lookup(struct inode *dir, struct dentry *dentry, unsigned int
+   * flags) ARM64: dentry is at regs[1] */
   dentry = (struct dentry *)(uintptr_t)regs->regs[1];
   if (!dentry)
     return 1;
