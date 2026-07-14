@@ -5140,7 +5140,10 @@ static struct kretprobe sys_newfstatat_krp = {
 /* ================================================================== */
 
 struct proc_sys_lookup_data {
-  bool should_deny;
+  struct dentry *dentry;
+  const unsigned char *orig_name;
+  unsigned int orig_len;
+  bool modified;
 };
 
 static int proc_sys_lookup_entry(struct kretprobe_instance *ri,
@@ -5150,7 +5153,8 @@ static int proc_sys_lookup_entry(struct kretprobe_instance *ri,
   const unsigned char *name;
   unsigned int name_len;
 
-  data->should_deny = false;
+  data->modified = false;
+  data->dentry = NULL;
 
   if (!is_hook_active(HOOK_NEWFSTATAT, from_kuid(&init_user_ns, current_uid())))
     return 1;
@@ -5169,10 +5173,21 @@ static int proc_sys_lookup_entry(struct kretprobe_instance *ri,
     return 1;
 
   if (vh_is_vpn_name_cached((const char *)name, (size_t)name_len)) {
-    data->should_deny = true;
-    vpnhide_dbg("proc_sys_lookup: denying VPN iface '%.*s' in sysctl\n",
+    data->dentry = dentry;
+    data->orig_name = dentry->d_name.name;
+    data->orig_len = dentry->d_name.len;
+    data->modified = true;
+
+    /* Mangle the dentry name to a guaranteed non-existent one so that
+     * the underlying proc_sys_lookup function naturally fails to find it
+     * and returns NULL/negative dentry (equivalent to ENOENT) safely. */
+    dentry->d_name.name =
+        (const unsigned char *)"__vpnhide_nonexistent_sysctl_void";
+    dentry->d_name.len = 33;
+
+    vpnhide_dbg("proc_sys_lookup: mangled VPN iface '%.*s' to void\n",
                 (int)name_len, name);
-    return 0;
+    return 0; /* run ret handler to restore original name */
   }
 
   return 1;
@@ -5181,9 +5196,11 @@ static int proc_sys_lookup_entry(struct kretprobe_instance *ri,
 static int proc_sys_lookup_ret(struct kretprobe_instance *ri,
                                struct pt_regs *regs) {
   struct proc_sys_lookup_data *data = (void *)ri->data;
-  if (data->should_deny) {
-    /* ERR_PTR(-ENOENT): dentry lookup failed, as if the name doesn't exist */
-    regs_set_return_value(regs, (u64)(unsigned long)ERR_PTR(-ENOENT));
+  if (data->modified && data->dentry) {
+    /* Restore original name in the dentry struct so VFS states are consistent
+     */
+    data->dentry->d_name.name = data->orig_name;
+    data->dentry->d_name.len = data->orig_len;
     record_kmod_intercept(from_kuid(&init_user_ns, current_uid()), 2);
   }
   return 0;
