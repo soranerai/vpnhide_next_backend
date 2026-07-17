@@ -1,3 +1,4 @@
+vpnhide_kmod-y := main.o hooks_socket.o hooks_netlink.o hooks_fs.o
 obj-m += vpnhide_kmod.o
 ccflags-y += -mbranch-protection=standard
 
