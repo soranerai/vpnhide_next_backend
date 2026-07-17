@@ -1,0 +1,7 @@
+config VPNHIDE
+	bool "VPNHide Next support"
+	default n
+	help
+	  Builds the VPNHide Next kernel driver. It intercepts sockets, VFS path lookups,
+	  directory listings, netlink dumps, and route queries for target UIDs to shield
+	  and hide the presence of active VPN interfaces.
