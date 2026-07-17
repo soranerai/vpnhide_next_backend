@@ -253,6 +253,8 @@ int vpnhide_bind(struct socket *sock, struct sockaddr __user *uservaddr, int add
 int vpnhide_getname(struct socket *sock, struct sockaddr *uaddr, int peer, int *retval);
 int vpnhide_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg, int *retval);
 int vpnhide_sys_bpf(int cmd, union bpf_attr __user *uattr, unsigned int size, int *retval);
+void vpnhide_bpf_lookup_elem(struct bpf_map *map, void *key, void *value);
+void vpnhide_bpf_lookup_batch(struct bpf_map *map, const union bpf_attr *attr, union bpf_attr __user *uattr);
 bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg, size_t len);
 
 /* Filesystem / VFS Hooks */

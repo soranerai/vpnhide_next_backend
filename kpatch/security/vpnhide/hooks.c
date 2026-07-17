@@ -872,3 +872,226 @@ bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg, size_t len) {
   }
   return false;
 }
+
+static inline bool is_stats_or_uid_map(const char *name) {
+  if (!name || name[0] == '\0')
+    return false;
+
+  switch (name[0]) {
+  case 'a':
+    return strncmp(name, "app_uid_stats", 13) == 0;
+  case 's':
+    return strncmp(name, "stats_map_", 10) == 0;
+  case 'i':
+    return strncmp(name, "iface_stats", 11) == 0;
+  case 'u':
+    return strncmp(name, "uid_stats", 9) == 0;
+  case 't':
+    return strncmp(name, "tether_stats", 12) == 0;
+  case 'm':
+    return (strncmp(name, "map_netd_app_ui", 15) == 0 ||
+            strncmp(name, "map_netd_stats", 14) == 0 ||
+            strncmp(name, "map_netd_iface_", 15) == 0 ||
+            strncmp(name, "map_netd_uid_st", 15) == 0);
+  default:
+    return false;
+  }
+}
+
+static bool is_key_vpn_or_target_uid(struct bpf_map *map, void *key) {
+  if (!map || !key)
+    return false;
+
+  if (strncmp(map->name, "stats_map_", 10) == 0 ||
+      strncmp(map->name, "map_netd_stats", 14) == 0) {
+    struct vh_stats_key *sk = (struct vh_stats_key *)key;
+
+    vpnhide_dbg("key_check stats_map '%s': uid=%u index=%u\n", map->name,
+                sk->uid, sk->ifaceIndex);
+
+    if (is_active_vpn_ifindex(sk->ifaceIndex) || is_target_uid_val(sk->uid)) {
+      vpnhide_dbg("BPF Match stats_map '%s': uid=%u index=%u -> SPOOFING ZERO STATS\n",
+                  map->name, sk->uid, sk->ifaceIndex);
+      return true;
+    }
+  } else if (strncmp(map->name, "iface_stats", 11) == 0 ||
+             strncmp(map->name, "map_netd_iface_", 15) == 0 ||
+             strncmp(map->name, "tether_stats", 12) == 0) {
+    u32 ifaceIndex = *(u32 *)key;
+
+    vpnhide_dbg("key_check iface/tether '%s': index=%u\n", map->name,
+                ifaceIndex);
+
+    if (is_active_vpn_ifindex(ifaceIndex)) {
+      vpnhide_dbg("BPF Match iface/tether stats '%s': index=%u -> SPOOFING ZERO STATS\n",
+                  map->name, ifaceIndex);
+      return true;
+    }
+  }
+  return false;
+}
+
+static void collect_vpn_traffic_sum(struct bpf_map *map,
+                                    struct vh_stats_value *vpn_sum) {
+  struct vpnhide_active_vpns *vpns;
+  rcu_read_lock();
+  vpns = rcu_dereference(global_active_vpns);
+  if (vpns) {
+    int idx;
+    for (idx = 0; idx < vpns->count; idx++) {
+      u32 vpn_idx = vpns->vpns[idx].ifindex;
+      void *map_val = map->ops->map_lookup_elem(map, &vpn_idx);
+      if (map_val) {
+        struct vh_stats_value *sv = (struct vh_stats_value *)map_val;
+        sv_add(vpn_sum, sv);
+      }
+    }
+  }
+  rcu_read_unlock();
+}
+
+static void bpf_batch_zero_iface(struct bpf_map *map, void __user *usr_keys,
+                                 void __user *usr_vals, u32 count, u32 key_size,
+                                 u32 value_size, void *kbuf, void *vbuf) {
+  struct vh_stats_value vpn_sum = {0};
+  u32 cover_idx = (u32)atomic_read(&global_cover_ifindex);
+  u32 cover_pos = UINT_MAX;
+  u32 i;
+
+  for (i = 0; i < count; i++) {
+    u32 ifindex;
+
+    if (copy_from_user(kbuf, (char __user *)usr_keys + i * key_size, key_size))
+      continue;
+    ifindex = *(u32 *)kbuf;
+
+    if (is_active_vpn_ifindex(ifindex)) {
+      if (copy_from_user(vbuf, (char __user *)usr_vals + i * value_size,
+                         value_size) == 0) {
+        struct vh_stats_value *sv = (struct vh_stats_value *)vbuf;
+        sv_add(&vpn_sum, sv);
+      }
+      memset(vbuf, 0, value_size);
+      if (copy_to_user((char __user *)usr_vals + i * value_size, vbuf,
+                       value_size)) {
+        vpnhide_dbg("sys_bpf_ret: batch zeroing copy_to_user failed\n");
+      }
+    } else if (cover_idx && ifindex == cover_idx) {
+      cover_pos = i;
+    }
+  }
+
+  if (cover_pos != UINT_MAX &&
+      (sv_rx_bytes(&vpn_sum) || sv_tx_bytes(&vpn_sum))) {
+    if (copy_from_user(vbuf, (char __user *)usr_vals + cover_pos * value_size,
+                       value_size) == 0) {
+      struct vh_stats_value *sv = (struct vh_stats_value *)vbuf;
+      sv_add(sv, &vpn_sum);
+      if (copy_to_user((char __user *)usr_vals + cover_pos * value_size, vbuf,
+                       value_size)) {
+        vpnhide_dbg("sys_bpf_ret: batch cover update copy_to_user failed\n");
+      }
+    }
+  }
+}
+
+static void bpf_batch_zero_generic(struct bpf_map *map, void __user *usr_keys,
+                                   void __user *usr_vals, u32 count,
+                                   u32 key_size, u32 value_size, void *kbuf,
+                                   void *vbuf) {
+  u32 i;
+
+  for (i = 0; i < count; i++) {
+    if (copy_from_user(kbuf, (char __user *)usr_keys + i * key_size,
+                       key_size) == 0) {
+      if (is_key_vpn_or_target_uid(map, kbuf)) {
+        memset(vbuf, 0, value_size);
+        if (copy_to_user((char __user *)usr_vals + i * value_size, vbuf,
+                         value_size)) {
+          vpnhide_dbg("sys_bpf_ret: batch zeroing copy_to_user failed\n");
+        }
+      }
+    }
+  }
+}
+
+void vpnhide_bpf_lookup_elem(struct bpf_map *map, void *key, void *value) {
+  if (!map || !key || !value)
+    return;
+
+  if (!is_hook_active(HOOK_BPF, from_kuid(&init_user_ns, current_uid())))
+    return;
+
+  if (is_target_uid())
+    return;
+
+  if (is_stats_or_uid_map(map->name)) {
+    if (is_key_vpn_or_target_uid(map, key)) {
+      memset(value, 0, map->value_size);
+    } else if (strncmp(map->name, "iface_stats", 11) == 0 ||
+               strncmp(map->name, "map_netd_iface_", 15) == 0 ||
+               strncmp(map->name, "tether_stats", 12) == 0) {
+      u32 ifaceIndex = *(u32 *)key;
+      u32 cover_idx = (u32)atomic_read(&global_cover_ifindex);
+      if (cover_idx && ifaceIndex == cover_idx) {
+        struct vh_stats_value vpn_sum = {0};
+        collect_vpn_traffic_sum(map, &vpn_sum);
+        if (sv_rx_bytes(&vpn_sum) || sv_tx_bytes(&vpn_sum)) {
+          struct vh_stats_value *sv = (struct vh_stats_value *)value;
+          sv_add(sv, &vpn_sum);
+        }
+      }
+    }
+  }
+}
+
+void vpnhide_bpf_lookup_batch(struct bpf_map *map, const union bpf_attr *attr, union bpf_attr __user *uattr) {
+  u32 count = 0;
+  u32 key_size, value_size;
+  void __user *usr_keys;
+  void __user *usr_vals;
+
+  if (!map || !attr || !uattr)
+    return;
+
+  if (!is_hook_active(HOOK_BPF, from_kuid(&init_user_ns, current_uid())))
+    return;
+
+  if (is_target_uid())
+    return;
+
+  if (!is_stats_or_uid_map(map->name))
+    return;
+
+  if (get_user(count, &uattr->batch.count) != 0 || count == 0)
+    return;
+
+  usr_keys = (void __user *)(unsigned long)attr->batch.keys;
+  usr_vals = (void __user *)(unsigned long)attr->batch.values;
+  if (!usr_keys || !usr_vals)
+    return;
+
+  key_size = map->key_size;
+  value_size = map->value_size;
+
+  {
+    u8 kbuf_stack[64];
+    u8 vbuf_stack[256];
+    void *kbuf = (key_size <= sizeof(kbuf_stack)) ? kbuf_stack : kmalloc(key_size, GFP_KERNEL);
+    void *vbuf = (value_size <= sizeof(vbuf_stack)) ? vbuf_stack : kmalloc(value_size, GFP_KERNEL);
+
+    if (kbuf && vbuf) {
+      if (strncmp(map->name, "iface_stats", 11) == 0 ||
+          strncmp(map->name, "map_netd_iface_stats", 20) == 0) {
+        bpf_batch_zero_iface(map, usr_keys, usr_vals, count, key_size, value_size, kbuf, vbuf);
+      } else {
+        bpf_batch_zero_generic(map, usr_keys, usr_vals, count, key_size, value_size, kbuf, vbuf);
+      }
+    }
+
+    if (kbuf && kbuf != kbuf_stack)
+      kfree(kbuf);
+    if (vbuf && vbuf != vbuf_stack)
+      kfree(vbuf);
+  }
+}
