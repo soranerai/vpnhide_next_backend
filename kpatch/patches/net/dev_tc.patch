@@ -40,13 +40,9 @@ diff --git a/net/sched/sch_api.c b/net/sched/sch_api.c
  #include <net/sch_generic.h>
  #include <net/pkt_sched.h>
  #include <net/netlink.h>
-@@ -1185,6 +1188,9 @@ static int tc_fill_qdisc(struct sk_buff *skb, struct Qdisc *q, u32 clid,
+@@ -1185,2 +1185,5 @@ static int tc_fill_qdisc(struct sk_buff *skb, struct Qdisc *q, u32 clid,
  			  struct netlink_ext_ack *extack)
  {
- 	struct gnet_stats_basic_packed sb;
-+
 +	if (unlikely(vpnhide_skip_tc_qdisc(skb, q)))
 +		return 0;
 +
- 	struct tcmsg *tcm;
- 	struct nlmsghdr *nlh;

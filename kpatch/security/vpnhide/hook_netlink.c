@@ -297,3 +297,76 @@ void vpnhide_filter_seq_line(struct seq_file *seq, int saved_count)
 		seq->count = saved_count;
 }
 EXPORT_SYMBOL_GPL(vpnhide_filter_seq_line);
+
+/* ------------------------------------------------------------------ */
+/* ioctl hooks — SIOCG* per-interface and SIOCGIFCONF                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * vpnhide_ioctl_ifname_block — called before dev_ioctl dispatches a
+ * per-interface command.  Returns true (→ caller should return -ENODEV)
+ * when the named interface is an active VPN.
+ */
+bool vpnhide_ioctl_ifname_block(const char *ifname)
+{
+	uid_t uid = from_kuid(&init_user_ns, current_uid());
+
+	if (!is_hook_active(HOOK_DEV_IOCTL, uid))
+		return false;
+	if (!ifname || !ifname[0])
+		return false;
+	if (!is_active_vpn_ifname(ifname))
+		return false;
+
+	record_kmod_intercept(uid, HOOK_DEV_IOCTL);
+	return true;
+}
+EXPORT_SYMBOL_GPL(vpnhide_ioctl_ifname_block);
+
+/*
+ * vpnhide_filter_ifconf — post-filter for SIOCGIFCONF.
+ * data is the void __user * passed to dev_ifconf (points to struct ifconf).
+ * Compacts the ifreq array in-place, removing VPN entries, and updates
+ * ifc_len so the caller sees a shorter list.
+ */
+void vpnhide_filter_ifconf(void __user *data)
+{
+	struct ifconf __user *uifc = data;
+	struct ifconf ifc;
+	struct ifreq tmp;
+	int n, i, dst;
+	uid_t uid = from_kuid(&init_user_ns, current_uid());
+
+	if (!is_hook_active(HOOK_SOCK_IOCTL, uid))
+		return;
+	if (!is_target_uid_val(uid))
+		return;
+
+	if (copy_from_user(&ifc, uifc, sizeof(ifc)))
+		return;
+	if (!ifc.ifc_req || ifc.ifc_len <= 0)
+		return;
+
+	n = ifc.ifc_len / (int)sizeof(struct ifreq);
+	dst = 0;
+
+	for (i = 0; i < n; i++) {
+		if (copy_from_user(&tmp, &ifc.ifc_req[i], sizeof(tmp)))
+			return;
+		tmp.ifr_name[IFNAMSIZ - 1] = '\0';
+		if (is_active_vpn_ifname(tmp.ifr_name))
+			continue;
+		if (dst != i) {
+			if (copy_to_user(&ifc.ifc_req[dst], &tmp, sizeof(tmp)))
+				return;
+		}
+		dst++;
+	}
+
+	if (dst < n) {
+		int new_len = dst * (int)sizeof(struct ifreq);
+		put_user(new_len, &uifc->ifc_len);
+		record_kmod_intercept(uid, HOOK_SOCK_IOCTL);
+	}
+}
+EXPORT_SYMBOL_GPL(vpnhide_filter_ifconf);

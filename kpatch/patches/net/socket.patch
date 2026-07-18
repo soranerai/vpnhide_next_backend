@@ -79,3 +79,13 @@ diff --git a/net/socket.c b/net/socket.c
 
  	fput_light(sock->file, fput_needed);
  out:
+
+@@ -776,6 +776,11 @@ static int sock_do_ioctl(struct net *net, struct socket *sock,
+ 		rtnl_lock();
+ 		err = dev_ifconf(net, &ifc, sizeof(struct ifreq));
+ 		rtnl_unlock();
++		if (!err)
++			vpnhide_filter_ifconf(argp);
+ 		if (!err)
+ 			err = copy_to_user(argp, &ifc, sizeof(struct ifconf)) ?
+ 				-EFAULT : 0;

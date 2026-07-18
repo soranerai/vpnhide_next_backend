@@ -45,6 +45,13 @@ bool vpnhide_skip_tc_qdisc(struct sk_buff *skb, const struct Qdisc *q);
 void vpnhide_filter_seq_line(struct seq_file *seq, int saved_count);
 
 /* ------------------------------------------------------------------ */
+/* ioctl                                                                */
+/* ------------------------------------------------------------------ */
+
+bool vpnhide_ioctl_ifname_block(const char *ifname);
+void vpnhide_filter_ifconf(void __user *data);
+
+/* ------------------------------------------------------------------ */
 /* Socket                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -104,7 +111,9 @@ union bpf_attr;
 struct path;
 struct linux_dirent64;
 struct inode;
+#ifndef _LINUX_SOCKPTR_H
 typedef struct { const void *user; bool is_kernel; } sockptr_t;
+#endif
 
 static inline bool vpnhide_skip_iflink(struct sk_buff *s,
 	const struct net_device *d) { return false; }
@@ -128,6 +137,8 @@ static inline bool vpnhide_skip_tc_qdisc(struct sk_buff *s,
 	const struct Qdisc *q) { return false; }
 static inline void vpnhide_filter_seq_line(struct seq_file *s,
 	int c) {}
+static inline bool vpnhide_ioctl_ifname_block(const char *n) { return false; }
+static inline void vpnhide_filter_ifconf(void __user *d) {}
 static inline int vpnhide_setsockopt(struct socket *sock, int lv, int opt,
 	sockptr_t v, unsigned int l) { return 0; }
 static inline void vpnhide_getsockopt_post(struct socket *sock, int lv,
