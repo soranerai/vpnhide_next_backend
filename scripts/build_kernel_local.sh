@@ -109,9 +109,9 @@ cd ..
 
 # ----------------------------- Step 6: Copy VPNHide driver source -------------
 log "--- Copying VPNHide in-tree driver source ---"
-if [ ! -d "common/security/vpnhide" ]; then
-    cp -r "$VPNHIDE_PRIVATE/kpatch/security/vpnhide" common/security/
-fi
+rm -rf common/security/vpnhide
+cp -r "$VPNHIDE_PRIVATE/kpatch/security/vpnhide" common/security/
+cp "$VPNHIDE_PRIVATE/kpatch/include/linux/vpnhide.h" common/include/linux/vpnhide.h
 
 # ----------------------------- Step 7: Apply Python patcher -------------------
 if [ "$SKIP_PATCH_GEN" = false ]; then
