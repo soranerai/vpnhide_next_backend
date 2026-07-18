@@ -111,7 +111,6 @@ int vpnhide_getdents64(unsigned int fd,
 		       struct linux_dirent64 __user *dirent,
 		       unsigned int count, long retval)
 {
-	struct linux_dirent64 __user *pos, *end;
 	struct linux_dirent64 *kbuf, *cur, *prev;
 	uid_t uid = from_kuid(&init_user_ns, current_uid());
 	long bytes_left;

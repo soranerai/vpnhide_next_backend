@@ -69,7 +69,6 @@ int vpnhide_setsockopt(struct socket *sock, int level, int optname,
 		}
 		case SO_MARK: {
 			/* Force mark to 0 — prevents routing via VPN table */
-			u32 zero = 0;
 			if (sk->sk_mark != 0) {
 				sk->sk_mark = 0;
 				record_kmod_intercept(uid, HOOK_SETSOCKOPT);

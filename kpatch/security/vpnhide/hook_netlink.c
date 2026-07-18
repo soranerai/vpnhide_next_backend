@@ -11,6 +11,7 @@
 #include <linux/skbuff.h>
 #include <linux/seq_file.h>
 #include <linux/if_addr.h>
+#include <linux/inetdevice.h>
 #include <net/addrconf.h>
 #include <net/fib_rules.h>
 #include <net/ip_fib.h>
@@ -135,8 +136,8 @@ bool vpnhide_skip_fib_rule(struct sk_buff *skb, struct fib_rule *rule)
 	if (pt) {
 		for (i = 0; i < pt->count; i++) {
 			uid_t tuid = pt->targets[i].uid;
-			if (rule->uid_range.start <= tuid &&
-			    tuid <= rule->uid_range.end) {
+			if (rule->uid_range.start.val <= tuid &&
+			    tuid <= rule->uid_range.end.val) {
 				rcu_read_unlock();
 				record_kmod_intercept(uid, HOOK_FIB_RULE_FILL);
 				return true;
@@ -146,7 +147,7 @@ bool vpnhide_skip_fib_rule(struct sk_buff *skb, struct fib_rule *rule)
 	rcu_read_unlock();
 
 	/* Also check global target list */
-	if (is_target_uid_val(rule->uid_range.start)) {
+	if (is_target_uid_val(rule->uid_range.start.val)) {
 		record_kmod_intercept(uid, HOOK_FIB_RULE_FILL);
 		return true;
 	}
@@ -170,8 +171,7 @@ bool vpnhide_skip_rt6(struct sk_buff *skb, struct fib6_info *rt)
 	if (!is_hook_active(HOOK_RT6_FILL, uid))
 		return false;
 
-	if (rt->fib6_nh)
-		dev = rt->fib6_nh->fib_nh_dev;
+	dev = rt->fib6_nh->fib_nh_dev;
 
 	if (!dev)
 		return false;

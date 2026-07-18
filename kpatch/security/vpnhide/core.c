@@ -330,20 +330,30 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 	switch (cmd) {
 
 	case VH_SET_TARGETS: {
-		struct vpnhide_ioctl_data td;
+		struct vpnhide_ioctl_data *td;
 		struct vpnhide_targets *nt, *old;
 		int i;
 
-		if (copy_from_user(&td, uarg, sizeof(td)))
-			return -EFAULT;
-		if (td.count < 0 || td.count > MAX_TARGET_UIDS)
-			return -EINVAL;
-		nt = kzalloc(sizeof(*nt), GFP_KERNEL);
-		if (!nt)
+		td = kzalloc(sizeof(*td), GFP_KERNEL);
+		if (!td)
 			return -ENOMEM;
-		nt->count = td.count;
-		for (i = 0; i < td.count; i++)
-			nt->uids[i] = td.uids[i];
+		if (copy_from_user(td, uarg, sizeof(*td))) {
+			kfree(td);
+			return -EFAULT;
+		}
+		if (td->count < 0 || td->count > MAX_TARGET_UIDS) {
+			kfree(td);
+			return -EINVAL;
+		}
+		nt = kzalloc(sizeof(*nt), GFP_KERNEL);
+		if (!nt) {
+			kfree(td);
+			return -ENOMEM;
+		}
+		nt->count = td->count;
+		for (i = 0; i < td->count; i++)
+			nt->uids[i] = td->uids[i];
+		kfree(td);
 		sort(nt->uids, nt->count, sizeof(uid_t), uid_cmp, NULL);
 
 		spin_lock(&targets_update_lock);
@@ -358,38 +368,54 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 	}
 
 	case VH_GET_TARGETS: {
-		struct vpnhide_ioctl_data td = {};
+		struct vpnhide_ioctl_data *td;
 		struct vpnhide_targets *t;
 		int i;
 
+		td = kzalloc(sizeof(*td), GFP_KERNEL);
+		if (!td)
+			return -ENOMEM;
 		rcu_read_lock();
 		t = rcu_dereference(global_targets);
 		if (t) {
-			td.count = t->count;
+			td->count = t->count;
 			for (i = 0; i < t->count; i++)
-				td.uids[i] = t->uids[i];
+				td->uids[i] = t->uids[i];
 		}
 		rcu_read_unlock();
-		if (copy_to_user(uarg, &td, sizeof(td)))
+		if (copy_to_user(uarg, td, sizeof(*td))) {
+			kfree(td);
 			return -EFAULT;
+		}
+		kfree(td);
 		break;
 	}
 
 	case VH_SET_LSPOSED_TARGETS: {
-		struct vpnhide_ioctl_data td;
+		struct vpnhide_ioctl_data *td;
 		struct vpnhide_targets *nt, *old;
 		int i;
 
-		if (copy_from_user(&td, uarg, sizeof(td)))
-			return -EFAULT;
-		if (td.count < 0 || td.count > MAX_TARGET_UIDS)
-			return -EINVAL;
-		nt = kzalloc(sizeof(*nt), GFP_KERNEL);
-		if (!nt)
+		td = kzalloc(sizeof(*td), GFP_KERNEL);
+		if (!td)
 			return -ENOMEM;
-		nt->count = td.count;
-		for (i = 0; i < td.count; i++)
-			nt->uids[i] = td.uids[i];
+		if (copy_from_user(td, uarg, sizeof(*td))) {
+			kfree(td);
+			return -EFAULT;
+		}
+		if (td->count < 0 || td->count > MAX_TARGET_UIDS) {
+			kfree(td);
+			return -EINVAL;
+		}
+		nt = kzalloc(sizeof(*nt), GFP_KERNEL);
+		if (!nt) {
+			kfree(td);
+			return -ENOMEM;
+		}
+		nt->count = td->count;
+		for (i = 0; i < td->count; i++)
+			nt->uids[i] = td->uids[i];
+		kfree(td);
 		sort(nt->uids, nt->count, sizeof(uid_t), uid_cmp, NULL);
 
 		spin_lock(&lsposed_targets_update_lock);
@@ -402,19 +428,29 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 	}
 
 	case VH_SET_PORT_TARGETS: {
-		struct vpnhide_port_ioctl_data pd;
+		struct vpnhide_port_ioctl_data *pd;
 		struct vpnhide_port_targets *np, *old;
 
-		if (copy_from_user(&pd, uarg, sizeof(pd)))
-			return -EFAULT;
-		if (pd.count < 0 || pd.count > MAX_TARGET_UIDS)
-			return -EINVAL;
-		np = kzalloc(sizeof(*np), GFP_KERNEL);
-		if (!np)
+		pd = kzalloc(sizeof(*pd), GFP_KERNEL);
+		if (!pd)
 			return -ENOMEM;
-		np->count = pd.count;
-		memcpy(np->targets, pd.targets,
-		       pd.count * sizeof(np->targets[0]));
+		if (copy_from_user(pd, uarg, sizeof(*pd))) {
+			kfree(pd);
+			return -EFAULT;
+		}
+		if (pd->count < 0 || pd->count > MAX_TARGET_UIDS) {
+			kfree(pd);
+			return -EINVAL;
+		}
+		np = kzalloc(sizeof(*np), GFP_KERNEL);
+		if (!np) {
+			kfree(pd);
+			return -ENOMEM;
+		}
+		np->count = pd->count;
+		memcpy(np->targets, pd->targets,
+		       pd->count * sizeof(np->targets[0]));
+		kfree(pd);
 
 		spin_lock(&port_targets_update_lock);
 		old = rcu_dereference_protected(global_port_targets,
@@ -538,19 +574,29 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 	}
 
 	case VH_SET_APP_HOOK_MASKS: {
-		struct vpnhide_app_hook_ioctl_data amd;
+		struct vpnhide_app_hook_ioctl_data *amd;
 		struct vpnhide_app_hook_masks *nm, *old;
 
-		if (copy_from_user(&amd, uarg, sizeof(amd)))
-			return -EFAULT;
-		if (amd.count < 0 || amd.count > MAX_TARGET_UIDS)
-			return -EINVAL;
-		nm = kzalloc(sizeof(*nm), GFP_KERNEL);
-		if (!nm)
+		amd = kzalloc(sizeof(*amd), GFP_KERNEL);
+		if (!amd)
 			return -ENOMEM;
-		nm->count = amd.count;
-		memcpy(nm->masks, amd.masks,
-		       amd.count * sizeof(nm->masks[0]));
+		if (copy_from_user(amd, uarg, sizeof(*amd))) {
+			kfree(amd);
+			return -EFAULT;
+		}
+		if (amd->count < 0 || amd->count > MAX_TARGET_UIDS) {
+			kfree(amd);
+			return -EINVAL;
+		}
+		nm = kzalloc(sizeof(*nm), GFP_KERNEL);
+		if (!nm) {
+			kfree(amd);
+			return -ENOMEM;
+		}
+		nm->count = amd->count;
+		memcpy(nm->masks, amd->masks,
+		       amd->count * sizeof(nm->masks[0]));
+		kfree(amd);
 
 		spin_lock(&app_hook_masks_update_lock);
 		old = rcu_dereference_protected(global_app_hook_masks,
@@ -562,26 +608,35 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 	}
 
 	case VH_GET_APP_HOOK_MASKS: {
-		struct vpnhide_app_hook_ioctl_data amd = {};
+		struct vpnhide_app_hook_ioctl_data *amd;
 		struct vpnhide_app_hook_masks *am;
 
+		amd = kzalloc(sizeof(*amd), GFP_KERNEL);
+		if (!amd)
+			return -ENOMEM;
 		rcu_read_lock();
 		am = rcu_dereference(global_app_hook_masks);
 		if (am) {
-			amd.count = am->count;
-			memcpy(amd.masks, am->masks,
-			       am->count * sizeof(amd.masks[0]));
+			amd->count = am->count;
+			memcpy(amd->masks, am->masks,
+			       am->count * sizeof(amd->masks[0]));
 		}
 		rcu_read_unlock();
-		if (copy_to_user(uarg, &amd, sizeof(amd)))
+		if (copy_to_user(uarg, amd, sizeof(*amd))) {
+			kfree(amd);
 			return -EFAULT;
+		}
+		kfree(amd);
 		break;
 	}
 
 	case VH_GET_STATS: {
-		/* Aggregate intercept ring into per-UID stats */
-		struct vpnhide_kmod_stats_data sd = {};
+		struct vpnhide_kmod_stats_data *sd;
 		int i, j;
+
+		sd = kzalloc(sizeof(*sd), GFP_KERNEL);
+		if (!sd)
+			return -ENOMEM;
 
 		spin_lock(&intercept_ring.lock);
 		for (i = 0; i < BUCKETS_COUNT; i++) {
@@ -589,13 +644,13 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 
 			if (!r_uid)
 				continue;
-			for (j = 0; j < sd.count; j++) {
-				if (sd.stats[j].uid == r_uid)
+			for (j = 0; j < sd->count; j++) {
+				if (sd->stats[j].uid == r_uid)
 					goto found;
 			}
-			if (sd.count < MAX_STATS_UIDS) {
-				sd.stats[sd.count].uid = r_uid;
-				j = sd.count++;
+			if (sd->count < MAX_STATS_UIDS) {
+				sd->stats[sd->count].uid = r_uid;
+				j = sd->count++;
 			} else {
 				continue;
 			}
@@ -603,7 +658,7 @@ found:
 			switch (intercept_ring.type[i]) {
 			case HOOK_SETSOCKOPT:
 			case HOOK_GETSOCKOPT:
-				sd.stats[j].sockopt_count++;
+				sd->stats[j].sockopt_count++;
 				break;
 			case HOOK_RTNL_FILL:
 			case HOOK_INET6_FILL:
@@ -611,29 +666,32 @@ found:
 			case HOOK_FIB_DUMP:
 			case HOOK_RT6_FILL:
 			case HOOK_RT_FILL:
-				sd.stats[j].netlink_count++;
+				sd->stats[j].netlink_count++;
 				break;
 			case HOOK_GETDENTS64:
 			case HOOK_OPENAT ... HOOK_READLINKAT:
-				sd.stats[j].proc_count++;
+				sd->stats[j].proc_count++;
 				break;
 			case HOOK_CONNECT:
 			case HOOK_BIND:
-				sd.stats[j].connect_count++;
+				sd->stats[j].connect_count++;
 				break;
 			case HOOK_GETNAME_INET:
 			case HOOK_GETNAME_INET6:
-				sd.stats[j].getname_count++;
+				sd->stats[j].getname_count++;
 				break;
 			default:
-				sd.stats[j].ioctl_count++;
+				sd->stats[j].ioctl_count++;
 				break;
 			}
 		}
 		spin_unlock(&intercept_ring.lock);
 
-		if (copy_to_user(uarg, &sd, sizeof(sd)))
+		if (copy_to_user(uarg, sd, sizeof(*sd))) {
+			kfree(sd);
 			return -EFAULT;
+		}
+		kfree(sd);
 		break;
 	}
 

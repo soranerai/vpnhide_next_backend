@@ -3,7 +3,6 @@ config VPNHIDE
 	default n
 	depends on SECURITY && NET && INET && BPF_SYSCALL
 	depends on IPV6
-	select SORT_TESTING if !SORT_TESTING
 	help
 	  Builds the VPNHide Next kernel subsystem. Intercepts sockets, VFS
 	  path lookups, directory listings, netlink dumps, route queries, and
