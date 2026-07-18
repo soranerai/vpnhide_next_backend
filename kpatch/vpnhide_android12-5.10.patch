@@ -1,743 +1,579 @@
 diff --git a/fs/namei.c b/fs/namei.c
-index 83ef3d7ff7f3..0881626cddad 100644
+index 0881626cd..5ce843c49 100644
 --- a/fs/namei.c
 +++ b/fs/namei.c
-@@ -39,6 +39,9 @@
- #include <linux/bitops.h>
- #include <linux/init_task.h>
- #include <linux/uaccess.h>
-+#if defined(CONFIG_KSU_SUSFS_SUS_PATH) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
-+#include <linux/susfs_def.h>
-+#endif
- 
- #include "internal.h"
- #include "mount.h"
-@@ -46,6 +49,11 @@
- #define CREATE_TRACE_POINTS
- #include <trace/events/namei.h>
- 
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+extern bool susfs_is_inode_sus_path(struct inode *inode);
-+extern const struct qstr susfs_fake_qstr_name;
+@@ -24,6 +24,10 @@
+ #include <linux/pagemap.h>
+ #include <linux/fsnotify.h>
+ #include <linux/personality.h>
++#ifdef CONFIG_VPNHIDE
++#include "../security/vpnhide/vpnhide.h"
 +#endif
 +
- /* [Feb-1997 T. Schoebel-Theuer]
-  * Fundamental changes in the pathname lookup mechanisms (namei)
-  * were necessary because of omirr.  The reason is that omirr needs
-@@ -508,6 +516,9 @@ struct nameidata {
- 	struct path	root;
- 	struct inode	*inode; /* path.dentry.d_inode */
- 	unsigned int	flags;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	unsigned int	state;
+ #include <linux/security.h>
+ #include <linux/ima.h>
+ #include <linux/syscalls.h>
+@@ -2579,7 +2583,12 @@ int filename_lookup(int dfd, struct filename *name, unsigned flags,
+ 			    flags & LOOKUP_MOUNTPOINT ? AUDIT_INODE_NOEVAL : 0);
+ 	restore_nameidata();
+ 	putname(name);
+-	return retval;
++	
++#ifdef CONFIG_VPNHIDE
++	if (!retval)
++		vpnhide_filename_lookup(dfd, name, flags, path, &retval);
 +#endif
- 	unsigned	seq, m_seq, r_seq;
- 	int		last_type;
- 	unsigned	depth;
-@@ -537,6 +548,9 @@ static void set_nameidata(struct nameidata *p, int dfd, struct filename *name)
- 	p->total_link_count = old ? old->total_link_count : 0;
- 	p->saved = old;
- 	current->nameidata = p;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	p->state = 0;
-+#endif
++return retval;
  }
  
- static void restore_nameidata(void)
-@@ -1510,6 +1524,14 @@ static struct dentry *lookup_dcache(const struct qstr *name,
- 			return ERR_PTR(error);
- 		}
- 	}
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	if (dentry && !IS_ERR(dentry) && dentry->d_inode && susfs_is_inode_sus_path(dentry->d_inode)) {
-+		if (d_in_lookup(dentry))
-+			d_lookup_done(dentry);
-+		dput(dentry);
-+		return NULL;
-+	}
-+#endif
- 	return dentry;
- }
- 
-@@ -1526,6 +1548,9 @@ static struct dentry *__lookup_hash(const struct qstr *name,
- 	struct dentry *dentry = lookup_dcache(name, base, flags);
- 	struct dentry *old;
- 	struct inode *dir = base->d_inode;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	bool found_sus_path = false;
-+#endif
- 
- 	if (dentry)
- 		return dentry;
-@@ -1535,6 +1560,9 @@ static struct dentry *__lookup_hash(const struct qstr *name,
- 		return ERR_PTR(-ENOENT);
- 
- 	dentry = d_alloc(base, name);
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+retry:
-+#endif
- 	if (unlikely(!dentry))
- 		return ERR_PTR(-ENOMEM);
- 
-@@ -1543,6 +1571,24 @@ static struct dentry *__lookup_hash(const struct qstr *name,
- 		dput(dentry);
- 		dentry = old;
- 	}
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	if (unlikely(dentry) && !IS_ERR(dentry) && dentry->d_inode && !found_sus_path && susfs_is_inode_sus_path(dentry->d_inode)) {
-+		if (d_in_lookup(dentry))
-+			d_lookup_done(dentry);
-+		if (!(flags & LOOKUP_RCU))
-+			dput(dentry);
-+		// - Just in case if an user app has been granted full file access and
-+		//   it is trying to find the fuse sus path with the create flag, then
-+		//   at least we can prevent the fake qstr file from from being created,
-+		//   although it is futile to do this, it is better than doing nothing.
-+		if (dentry->d_inode->i_sb->s_magic == FUSE_SUPER_MAGIC &&
-+			(flags & (LOOKUP_CREATE | LOOKUP_EXCL)))
-+			return ERR_PTR(-EACCES);
-+		dentry = d_alloc(base, &susfs_fake_qstr_name);
-+		found_sus_path = true;
-+		goto retry;
-+	}
-+#endif
- 	return dentry;
- }
- 
-@@ -1552,6 +1598,9 @@ static struct dentry *lookup_fast(struct nameidata *nd,
- {
- 	struct dentry *dentry, *parent = nd->path.dentry;
- 	int status = 1;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	bool is_nd_state_lookup_last_and_open_last = (nd->state & (ND_STATE_LOOKUP_LAST | ND_STATE_OPEN_LAST));
-+#endif
- 
- 	/*
- 	 * Rename seqlock is not required here because in the off chance
-@@ -1561,6 +1610,16 @@ static struct dentry *lookup_fast(struct nameidata *nd,
- 	if (nd->flags & LOOKUP_RCU) {
- 		unsigned seq;
- 		dentry = __d_lookup_rcu(parent, &nd->last, &seq);
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+		if (is_nd_state_lookup_last_and_open_last && dentry && !IS_ERR(dentry) && dentry->d_inode &&
-+			susfs_is_inode_sus_path(dentry->d_inode))
-+		{
-+			if (d_in_lookup(dentry))
-+				d_lookup_done(dentry);
-+			// no dput() here, __d_lookup_rcu() does not take the dentry->d_lockref.count
-+			dentry = NULL;
-+		}
-+#endif
- 		if (unlikely(!dentry)) {
- 			if (!try_to_unlazy(nd))
- 				return ERR_PTR(-ECHILD);
-@@ -1596,6 +1655,16 @@ static struct dentry *lookup_fast(struct nameidata *nd,
- 			status = d_revalidate(dentry, nd->flags);
- 	} else {
- 		dentry = __d_lookup(parent, &nd->last);
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+		if (is_nd_state_lookup_last_and_open_last && dentry && !IS_ERR(dentry) && dentry->d_inode &&
-+			susfs_is_inode_sus_path(dentry->d_inode))
-+		{
-+			if (d_in_lookup(dentry))
-+				d_lookup_done(dentry);
-+			dput(dentry);
-+			dentry = NULL;
-+		}
-+#endif
- 		if (unlikely(!dentry))
- 			return NULL;
- 		status = d_revalidate(dentry, nd->flags);
-@@ -1617,12 +1686,19 @@ static struct dentry *__lookup_slow(const struct qstr *name,
- 	struct dentry *dentry, *old;
- 	struct inode *inode = dir->d_inode;
- 	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	bool found_sus_path = false;
-+	bool is_nd_flags_lookup_last = (flags & ND_FLAGS_LOOKUP_LAST);
-+#endif
- 
- 	/* Don't go there if it's already dead */
- 	if (unlikely(IS_DEADDIR(inode)))
- 		return ERR_PTR(-ENOENT);
- again:
- 	dentry = d_alloc_parallel(dir, name, &wq);
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+retry:
-+#endif
- 	if (IS_ERR(dentry))
- 		return dentry;
- 	if (unlikely(!d_in_lookup(dentry))) {
-@@ -1631,6 +1707,12 @@ static struct dentry *__lookup_slow(const struct qstr *name,
- 			if (!error) {
- 				d_invalidate(dentry);
- 				dput(dentry);
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+				if (found_sus_path) {
-+					dentry = d_alloc_parallel(dir, &susfs_fake_qstr_name, &wq);
-+					goto retry;
-+				}
-+#endif
- 				goto again;
- 			}
- 			dput(dentry);
-@@ -1644,6 +1726,19 @@ static struct dentry *__lookup_slow(const struct qstr *name,
- 			dentry = old;
- 		}
- 	}
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	if (is_nd_flags_lookup_last && !found_sus_path && dentry && !IS_ERR(dentry) && dentry->d_inode &&
-+		susfs_is_inode_sus_path(dentry->d_inode))
-+	{
-+		if (d_in_lookup(dentry))
-+			d_lookup_done(dentry);
-+		if (!(flags & LOOKUP_RCU))
-+			dput(dentry);
-+		dentry = d_alloc_parallel(dir, &susfs_fake_qstr_name, &wq);
-+		found_sus_path = true;
-+		goto retry;
-+	}
-+#endif
- 	return dentry;
- }
- 
-@@ -1949,6 +2044,11 @@ static const char *walk_component(struct nameidata *nd, int flags)
- 	if (IS_ERR(dentry))
- 		return ERR_CAST(dentry);
- 	if (unlikely(!dentry)) {
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+		if (nd->state & ND_STATE_LOOKUP_LAST) {
-+			nd->flags |= ND_FLAGS_LOOKUP_LAST;
-+		}
-+#endif
- 		dentry = lookup_slow(&nd->last, nd->path.dentry, nd->flags);
- 		if (IS_ERR(dentry))
- 			return ERR_CAST(dentry);
-@@ -2213,7 +2313,15 @@ static int link_path_walk(const char *name, struct nameidata *nd)
- 		const char *link;
- 		u64 hash_len;
- 		int type;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+		struct dentry *dentry = nd->path.dentry;
- 
-+		if (dentry->d_inode && susfs_is_inode_sus_path(dentry->d_inode)) {
-+			// - No need to dput() here
-+			// - return -ENOENT here since it is walking the sub path of sus path
-+			return -ENOENT;
-+		}
-+#endif
- 		err = may_lookup(nd);
- 		if (err)
- 			return err;
-@@ -2399,6 +2507,9 @@ static inline const char *lookup_last(struct nameidata *nd)
- {
- 	if (nd->last_type == LAST_NORM && nd->last.name[nd->last.len])
- 		nd->flags |= LOOKUP_FOLLOW | LOOKUP_DIRECTORY;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	nd->state |= ND_STATE_LOOKUP_LAST;
-+#endif
- 
- 	return walk_component(nd, WALK_TRAILING);
- }
-@@ -3170,15 +3281,39 @@ static struct dentry *lookup_open(struct nameidata *nd, struct file *file,
- 	int error, create_error = 0;
- 	umode_t mode = op->mode;
- 	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	bool found_sus_path = false;
-+	bool is_nd_state_open_last = (nd->state & ND_STATE_OPEN_LAST);
-+#endif
- 
- 	if (unlikely(IS_DEADDIR(dir_inode)))
- 		return ERR_PTR(-ENOENT);
- 
- 	file->f_mode &= ~FMODE_CREATED;
- 	dentry = d_lookup(dir, &nd->last);
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	if (is_nd_state_open_last && dentry && !IS_ERR(dentry) && dentry->d_inode &&
-+		susfs_is_inode_sus_path(dentry->d_inode))
-+	{
-+		if (d_in_lookup(dentry))
-+			d_lookup_done(dentry);
-+		dput(dentry);
-+		dentry = NULL;
-+		found_sus_path = true;
-+	}
-+#endif
- 	for (;;) {
- 		if (!dentry) {
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+			if (found_sus_path) {
-+				dentry = d_alloc_parallel(dir, &susfs_fake_qstr_name, &wq);
-+				goto skip_orig_flow;
-+			}
-+#endif
- 			dentry = d_alloc_parallel(dir, &nd->last, &wq);
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+skip_orig_flow:
-+#endif
- 			if (IS_ERR(dentry))
- 				return dentry;
- 		}
-@@ -3276,6 +3411,9 @@ static const char *open_last_lookups(struct nameidata *nd,
- 	struct inode *inode;
- 	struct dentry *dentry;
- 	const char *res;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	nd->state |= ND_STATE_OPEN_LAST;
-+#endif
- 
- 	nd->flags |= op->intent;
- 
-@@ -4682,6 +4820,11 @@ int readlink_copy(char __user *buffer, int buflen, const char *link)
-  *
-  * Does not call security hook.
-  */
-+
-+ #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-+extern int susfs_open_redirect_spoof_vfs_readlink(struct inode *inode, char __user *buffer, int buflen);
-+#endif
-+
- int vfs_readlink(struct dentry *dentry, char __user *buffer, int buflen)
- {
- 	struct inode *inode = d_inode(dentry);
-@@ -4691,7 +4834,18 @@ int vfs_readlink(struct dentry *dentry, char __user *buffer, int buflen)
- 
- 	if (unlikely(!(inode->i_opflags & IOP_DEFAULT_READLINK))) {
- 		if (unlikely(inode->i_op->readlink))
-+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-+		{
-+			if (SUSFS_IS_INODE_OPEN_REDIRECT(inode)) {
-+				res = susfs_open_redirect_spoof_vfs_readlink(inode, buffer, buflen);
-+				if (!res)
-+					return res;
-+			}
- 			return inode->i_op->readlink(dentry, buffer, buflen);
-+		}
-+#else
-+			return inode->i_op->readlink(dentry, buffer, buflen);
-+#endif
- 
- 		if (!d_is_symlink(dentry))
- 			return -EINVAL;
-@@ -4707,6 +4861,15 @@ int vfs_readlink(struct dentry *dentry, char __user *buffer, int buflen)
- 		if (IS_ERR(link))
- 			return PTR_ERR(link);
- 	}
-+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-+	if (SUSFS_IS_INODE_OPEN_REDIRECT(inode)) {
-+		res = susfs_open_redirect_spoof_vfs_readlink(inode, buffer, buflen);
-+		if (!res) {
-+			do_delayed_call(&done);
-+			return res;
-+		}
-+	}
-+#endif
- 	res = readlink_copy(buffer, buflen, link);
- 	do_delayed_call(&done);
- 	return res;
+ /* Returns 0 and nd will be valid on success; Retuns error, otherwise. */
 diff --git a/fs/readdir.c b/fs/readdir.c
-index 09e8ed7d4161..5813bc37e907 100644
+index 5813bc37e..6de3d5f32 100644
 --- a/fs/readdir.c
 +++ b/fs/readdir.c
-@@ -24,6 +24,11 @@
- 
- #include <asm/unaligned.h>
- 
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+#include <linux/susfs_def.h>
-+extern int susfs_get_data_path(struct path *path);
-+extern bool susfs_is_inode_sus_path(struct inode *inode);
+@@ -17,6 +17,10 @@
+ #include <linux/fsnotify.h>
+ #include <linux/dirent.h>
+ #include <linux/security.h>
++#ifdef CONFIG_VPNHIDE
++#include "../security/vpnhide/vpnhide.h"
 +#endif
- /*
-  * Note the "unsafe_put_user() semantics: we goto a
-  * label for errors.
-@@ -137,6 +142,9 @@ struct old_linux_dirent {
- struct readdir_callback {
- 	struct dir_context ctx;
- 	struct old_linux_dirent __user * dirent;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	struct super_block *sb;
-+#endif
- 	int result;
- };
- 
-@@ -147,6 +155,9 @@ static int fillonedir(struct dir_context *ctx, const char *name, int namlen,
- 		container_of(ctx, struct readdir_callback, ctx);
- 	struct old_linux_dirent __user * dirent;
- 	unsigned long d_ino;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	struct inode *inode;
-+#endif
- 
- 	if (buf->result)
- 		return -EINVAL;
-@@ -158,6 +169,18 @@ static int fillonedir(struct dir_context *ctx, const char *name, int namlen,
- 		buf->result = -EOVERFLOW;
- 		return -EOVERFLOW;
- 	}
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	inode = ilookup(buf->sb, ino);
-+	if (!inode) {
-+		goto orig_flow;
-+	}
-+	if (susfs_is_inode_sus_path(inode)) {
-+		iput(inode);
-+		return 0;
-+	}
-+	iput(inode);
-+orig_flow:
-+#endif
- 	buf->result++;
- 	dirent = buf->dirent;
- 	if (!user_write_access_begin(dirent,
-@@ -186,15 +209,35 @@ SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
- 		.ctx.actor = fillonedir,
- 		.dirent = dirent
- 	};
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	int path_err = -EINVAL;
-+	struct path path;
-+#endif
- 
- 	if (!f.file)
- 		return -EBADF;
- 
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	if (f.file->f_inode->i_sb->s_magic == FUSE_SUPER_MAGIC) {
-+		path_err = susfs_get_data_path(&path);
-+		if (!path_err) {
-+			buf.sb = path.dentry->d_inode->i_sb;
-+			goto orig_flow;
-+		}
-+	}
-+	buf.sb = f.file->f_inode->i_sb;
 +
-+orig_flow:
-+#endif
+ #include <linux/syscalls.h>
+ #include <linux/unistd.h>
+ #include <linux/compat.h>
+@@ -482,6 +486,14 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
+ orig_flow:
+ #endif
  	error = iterate_dir(f.file, &buf.ctx);
- 	if (buf.result)
- 		error = buf.result;
- 
- 	fdput_pos(f);
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	if (!path_err)
-+		path_put(&path);
++#ifdef CONFIG_VPNHIDE
++        {
++                int _g64 = error;
++                if (vpnhide_getdents64(fd, dirent, count, &_g64))
++                        error = _g64;
++        }
 +#endif
- 	return error;
- }
- 
-@@ -214,6 +257,9 @@ struct linux_dirent {
- struct getdents_callback {
- 	struct dir_context ctx;
- 	struct linux_dirent __user * current_dir;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	struct super_block *sb;
-+#endif
- 	int prev_reclen;
- 	int count;
- 	int error;
-@@ -229,6 +275,9 @@ static int filldir(struct dir_context *ctx, const char *name, int namlen,
- 	int reclen = ALIGN(offsetof(struct linux_dirent, d_name) + namlen + 2,
- 		sizeof(long));
- 	int prev_reclen;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	struct inode *inode;
-+#endif
- 
- 	buf->error = verify_dirent_name(name, namlen);
- 	if (unlikely(buf->error))
-@@ -244,6 +293,18 @@ static int filldir(struct dir_context *ctx, const char *name, int namlen,
- 	prev_reclen = buf->prev_reclen;
- 	if (prev_reclen && signal_pending(current))
- 		return -EINTR;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	inode = ilookup(buf->sb, ino);
-+	if (!inode) {
-+		goto orig_flow;
-+	}
-+	if (susfs_is_inode_sus_path(inode)) {
-+		iput(inode);
-+		return 0;
-+	}
-+	iput(inode);
-+orig_flow:
-+#endif
- 	dirent = buf->current_dir;
- 	prev = (void __user *) dirent - prev_reclen;
- 	if (!user_write_access_begin(prev, reclen + prev_reclen))
-@@ -278,11 +339,27 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
- 		.current_dir = dirent
- 	};
- 	int error;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	int path_err = -EINVAL;
-+	struct path path;
-+#endif
- 
- 	f = fdget_pos(fd);
- 	if (!f.file)
- 		return -EBADF;
- 
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	if (f.file->f_inode->i_sb->s_magic == FUSE_SUPER_MAGIC) {
-+		path_err = susfs_get_data_path(&path);
-+		if (!path_err) {
-+			buf.sb = path.dentry->d_inode->i_sb;
-+			goto orig_flow;
-+		}
-+	}
-+	buf.sb = f.file->f_inode->i_sb;
 +
-+orig_flow:
-+#endif
- 	error = iterate_dir(f.file, &buf.ctx);
  	if (error >= 0)
  		error = buf.error;
-@@ -296,12 +373,19 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
- 			error = count - buf.count;
- 	}
- 	fdput_pos(f);
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	if (!path_err)
-+		path_put(&path);
+ 	if (buf.prev_reclen) {
+diff --git a/kernel/bpf/syscall.c b/kernel/bpf/syscall.c
+index 589332936..c7035d736 100644
+--- a/kernel/bpf/syscall.c
++++ b/kernel/bpf/syscall.c
+@@ -5,6 +5,10 @@
+ #include <linux/bpf_trace.h>
+ #include <linux/bpf_lirc.h>
+ #include <linux/bpf_verifier.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
 +#endif
- 	return error;
++
+ #include <linux/btf.h>
+ #include <linux/syscalls.h>
+ #include <linux/slab.h>
+@@ -1059,6 +1063,9 @@ static int map_lookup_elem(union bpf_attr *attr)
+ 		goto free_key;
+ 
+ 	err = bpf_map_copy_value(map, key, value, attr->flags);
++#ifdef CONFIG_VPNHIDE
++	vpnhide_bpf_lookup_elem(map, key, value);
++#endif
+ 	if (err)
+ 		goto free_value;
+ 
+@@ -4032,6 +4039,11 @@ static int bpf_map_do_batch(const union bpf_attr *attr,
+ 		BPF_DO_BATCH(map->ops->map_update_batch);
+ 	else
+ 		BPF_DO_BATCH(map->ops->map_delete_batch);
++#ifdef CONFIG_VPNHIDE
++	vpnhide_bpf_lookup_batch(map, attr, uattr);
++#endif
++
++
+ err_put:
+ 	if (has_write)
+ 		bpf_map_write_active_dec(map);
+diff --git a/net/core/fib_rules.c b/net/core/fib_rules.c
+index a6159624e..1eb936007 100644
+--- a/net/core/fib_rules.c
++++ b/net/core/fib_rules.c
+@@ -13,6 +13,10 @@
+ #include <net/net_namespace.h>
+ #include <net/sock.h>
+ #include <net/fib_rules.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ #include <net/ip_tunnels.h>
+ #include <linux/indirect_call_wrapper.h>
+ 
+@@ -988,6 +992,10 @@ static int fib_nl_fill_rule(struct sk_buff *skb, struct fib_rule *rule,
+ 			    u32 pid, u32 seq, int type, int flags,
+ 			    struct fib_rules_ops *ops)
+ {
++#ifdef CONFIG_VPNHIDE
++	unsigned int _saved_len = skb->len;
++#endif
++
+ 	struct nlmsghdr *nlh;
+ 	struct fib_rule_hdr *frh;
+ 
+@@ -1058,6 +1066,12 @@ static int fib_nl_fill_rule(struct sk_buff *skb, struct fib_rule *rule,
+ 		goto nla_put_failure;
+ 
+ 	nlmsg_end(skb, nlh);
++#ifdef CONFIG_VPNHIDE
++	if (vpnhide_should_filter_rule(rule)) {
++		skb_trim(skb, _saved_len);
++		record_kmod_intercept(from_kuid(&init_user_ns, current_uid()), 1);
++	}
++#endif
+ 	return 0;
+ 
+ nla_put_failure:
+diff --git a/net/core/rtnetlink.c b/net/core/rtnetlink.c
+index 021dcfdae..e8e91c7c3 100644
+--- a/net/core/rtnetlink.c
++++ b/net/core/rtnetlink.c
+@@ -49,6 +49,10 @@
+ #include <net/udp.h>
+ #include <net/tcp.h>
+ #include <net/sock.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ #include <net/pkt_sched.h>
+ #include <net/fib_rules.h>
+ #include <net/rtnetlink.h>
+@@ -2127,6 +2131,11 @@ static int rtnl_dump_ifinfo(struct sk_buff *skb, struct netlink_callback *cb)
+ 		idx = 0;
+ 		head = &tgt_net->dev_index_head[h];
+ 		hlist_for_each_entry(dev, head, index_hlist) {
++#ifdef CONFIG_VPNHIDE
++			if (vpnhide_should_hide_dev(dev))
++				goto cont;
++#endif
++
+ 			if (link_dump_filtered(dev, master_idx, kind_ops))
+ 				goto cont;
+ 			if (idx < s_idx)
+diff --git a/net/ipv4/devinet.c b/net/ipv4/devinet.c
+index da1ca8081..88d63534b 100644
+--- a/net/ipv4/devinet.c
++++ b/net/ipv4/devinet.c
+@@ -58,6 +58,10 @@
+ #include <net/ip.h>
+ #include <net/route.h>
+ #include <net/ip_fib.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ #include <net/rtnetlink.h>
+ #include <net/net_namespace.h>
+ #include <net/addrconf.h>
+@@ -1852,6 +1856,11 @@ static int inet_dump_ifaddr(struct sk_buff *skb, struct netlink_callback *cb)
+ 		cb->seq = atomic_read(&tgt_net->ipv4.dev_addr_genid) ^
+ 			  tgt_net->dev_base_seq;
+ 		hlist_for_each_entry_rcu(dev, head, index_hlist) {
++#ifdef CONFIG_VPNHIDE
++			if (vpnhide_should_hide_dev(dev))
++				goto cont;
++#endif
++
+ 			if (idx < s_idx)
+ 				goto cont;
+ 			if (h > s_h || idx > s_idx)
+diff --git a/net/ipv4/fib_semantics.c b/net/ipv4/fib_semantics.c
+index 5f786cff2..08090c897 100644
+--- a/net/ipv4/fib_semantics.c
++++ b/net/ipv4/fib_semantics.c
+@@ -48,6 +48,10 @@
+ #include <net/addrconf.h>
+ 
+ #include "fib_lookup.h"
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ 
+ static DEFINE_SPINLOCK(fib_info_lock);
+ static struct hlist_head *fib_info_hash;
+@@ -1805,7 +1809,12 @@ int fib_dump_info(struct sk_buff *skb, u32 portid, u32 seq, int event,
+ 	struct nlmsghdr *nlh;
+ 	struct rtmsg *rtm;
+ 
+-	nlh = nlmsg_put(skb, portid, seq, event, sizeof(*rtm), flags);
++	#ifdef CONFIG_VPNHIDE
++	    if (fi && fi->fib_nh[0].fib_nh_dev &&
++	        vpnhide_should_hide_dev(fi->fib_nh[0].fib_nh_dev))
++		    return 0;
++#endif
++nlh = nlmsg_put(skb, portid, seq, event, sizeof(*rtm), flags);
+ 	if (!nlh)
+ 		return -EMSGSIZE;
+ 
+diff --git a/net/ipv4/fib_trie.c b/net/ipv4/fib_trie.c
+index 456240d2a..f70fda8d6 100644
+--- a/net/ipv4/fib_trie.c
++++ b/net/ipv4/fib_trie.c
+@@ -70,6 +70,10 @@
+ #include <net/fib_notifier.h>
+ #include <trace/events/fib.h>
+ #include "fib_lookup.h"
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ 
+ static int call_fib_entry_notifier(struct notifier_block *nb,
+ 				   enum fib_event_type event_type, u32 dst,
+@@ -2938,6 +2942,12 @@ static int fib_route_seq_show(struct seq_file *seq, void *v)
+ 		struct fib_info *fi = fa->fa_info;
+ 		__be32 mask = inet_make_mask(KEYLENGTH - fa->fa_slen);
+ 		unsigned int flags = fib_flag_trans(fa->fa_type, mask, fi);
++#ifdef CONFIG_VPNHIDE
++		if (fi && fi->fib_nh[0].fib_nh_dev &&
++		    vpnhide_should_hide_dev(fi->fib_nh[0].fib_nh_dev))
++			continue;
++#endif
++
+ 
+ 		if ((fa->fa_type == RTN_BROADCAST) ||
+ 		    (fa->fa_type == RTN_MULTICAST))
+diff --git a/net/ipv4/udp.c b/net/ipv4/udp.c
+index e1284a622..d62f5d606 100644
+--- a/net/ipv4/udp.c
++++ b/net/ipv4/udp.c
+@@ -117,6 +117,10 @@
+ #include <net/ipv6_stubs.h>
+ #endif
+ #include <trace/hooks/ipv4.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ 
+ struct udp_table udp_table __read_mostly;
+ EXPORT_SYMBOL(udp_table);
+@@ -1058,6 +1062,13 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
+ 	struct sk_buff *skb;
+ 	struct ip_options_data opt_copy;
+ 
++#ifdef CONFIG_VPNHIDE
++	{
++		int _err = 0;
++		if (vpnhide_udp_sendmsg_pre(sk, msg, len, &_err))
++			return _err;
++	}
++#endif
+ 	if (len > 0xFFFF)
+ 		return -EMSGSIZE;
+ 
+diff --git a/net/ipv6/addrconf.c b/net/ipv6/addrconf.c
+index 5d9752221..284b39bd8 100644
+--- a/net/ipv6/addrconf.c
++++ b/net/ipv6/addrconf.c
+@@ -91,6 +91,10 @@
+ #include <linux/export.h>
+ 
+ #include <trace/hooks/ipv6.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ 
+ #define	INFINITY_LIFE_TIME	0xFFFFFFFF
+ 
+@@ -5322,6 +5326,11 @@ static int inet6_dump_addr(struct sk_buff *skb, struct netlink_callback *cb,
+ 		idx = 0;
+ 		head = &tgt_net->dev_index_head[h];
+ 		hlist_for_each_entry_rcu(dev, head, index_hlist) {
++#ifdef CONFIG_VPNHIDE
++			if (vpnhide_should_hide_dev(dev))
++				goto cont;
++#endif
++
+ 			if (idx < s_idx)
+ 				goto cont;
+ 			if (h > s_h || idx > s_idx)
+diff --git a/net/ipv6/ip6_fib.c b/net/ipv6/ip6_fib.c
+index 608205c63..dfb3716e1 100644
+--- a/net/ipv6/ip6_fib.c
++++ b/net/ipv6/ip6_fib.c
+@@ -34,6 +34,10 @@
+ 
+ #include <net/ip6_fib.h>
+ #include <net/ip6_route.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ 
+ static struct kmem_cache *fib6_node_kmem __read_mostly;
+ 
+@@ -2498,6 +2502,11 @@ static int ipv6_route_native_seq_show(struct seq_file *seq, void *v)
+ 	}
+ 
+ 	dev = fib6_nh->fib_nh_dev;
++#ifdef CONFIG_VPNHIDE
++	if (dev && vpnhide_should_hide_dev(dev))
++		return 0;
++#endif
++
+ 	seq_printf(seq, " %08x %08x %08x %08x %8s\n",
+ 		   rt->fib6_metric, refcount_read(&rt->fib6_ref), 0,
+ 		   flags, dev ? dev->name : "");
+diff --git a/net/ipv6/route.c b/net/ipv6/route.c
+index 076dc0a2c..65d264f93 100644
+--- a/net/ipv6/route.c
++++ b/net/ipv6/route.c
+@@ -72,6 +72,10 @@ static int ip6_rt_type_to_error(u8 fib6_type);
+ 
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/fib6.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ EXPORT_TRACEPOINT_SYMBOL_GPL(fib6_table_lookup);
+ #undef CREATE_TRACE_POINTS
+ 
+@@ -5476,7 +5480,14 @@ static int rt6_fill_node(struct net *net, struct sk_buff *skb,
+ 	struct rtmsg *rtm;
+ 	long expires = 0;
+ 
+-	nlh = nlmsg_put(skb, portid, seq, type, sizeof(*rtm), flags);
++	#ifdef CONFIG_VPNHIDE
++	{
++		struct net_device *_dev = dst ? dst->dev : rt->fib6_nh->fib_nh_dev;
++		if (_dev && vpnhide_should_hide_dev(_dev))
++			return 0;
++	}
++#endif
++nlh = nlmsg_put(skb, portid, seq, type, sizeof(*rtm), flags);
+ 	if (!nlh)
+ 		return -EMSGSIZE;
+ 
+diff --git a/net/ipv6/udp.c b/net/ipv6/udp.c
+index 538503720..5f8729898 100644
+--- a/net/ipv6/udp.c
++++ b/net/ipv6/udp.c
+@@ -53,6 +53,10 @@
+ #include <linux/seq_file.h>
+ #include <trace/events/skb.h>
+ #include "udp_impl.h"
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ 
+ static void udpv6_destruct_sock(struct sock *sk)
+ {
+@@ -1316,6 +1320,13 @@ int udpv6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
+ 	int is_udplite = IS_UDPLITE(sk);
+ 	int (*getfrag)(void *, char *, int, int, int, struct sk_buff *);
+ 
++#ifdef CONFIG_VPNHIDE
++	{
++		int _err = 0;
++		if (vpnhide_udp_sendmsg_pre(sk, msg, len, &_err))
++			return _err;
++	}
++#endif
+ 	ipcm6_init(&ipc6);
+ 	ipc6.gso_size = READ_ONCE(up->gso_size);
+ 	ipc6.sockc.tsflags = sk->sk_tsflags;
+diff --git a/net/sched/sch_api.c b/net/sched/sch_api.c
+index 5c2d23079..a1737d01c 100644
+--- a/net/sched/sch_api.c
++++ b/net/sched/sch_api.c
+@@ -20,6 +20,10 @@
+ #include <linux/init.h>
+ #include <linux/proc_fs.h>
+ #include <linux/seq_file.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ #include <linux/kmod.h>
+ #include <linux/list.h>
+ #include <linux/hrtimer.h>
+@@ -894,6 +898,13 @@ static int tc_fill_qdisc(struct sk_buff *skb, struct Qdisc *q, u32 clid,
+ 	u32 block_index;
+ 	__u32 qlen;
+ 
++#ifdef CONFIG_VPNHIDE
++	{
++		struct net_device *_dev = qdisc_dev(q);
++		if (_dev && vpnhide_should_hide_dev(_dev))
++			return 0;
++	}
++#endif
+ 	cond_resched();
+ 	nlh = nlmsg_put(skb, portid, seq, event, sizeof(*tcm), flags);
+ 	if (!nlh)
+diff --git a/net/socket.c b/net/socket.c
+index 9b233861f..f9988c069 100644
+--- a/net/socket.c
++++ b/net/socket.c
+@@ -77,6 +77,10 @@
+ #include <linux/security.h>
+ #include <linux/syscalls.h>
+ #include <linux/compat.h>
++#ifdef CONFIG_VPNHIDE
++#include "../security/vpnhide/vpnhide.h"
++#endif
++
+ #include <linux/kmod.h>
+ #include <linux/audit.h>
+ #include <linux/wireless.h>
+@@ -1207,6 +1211,9 @@ static long sock_ioctl(struct file *file, unsigned cmd, unsigned long arg)
+ 			err = sock_do_ioctl(net, sock, cmd, arg);
+ 			break;
+ 		}
++#ifdef CONFIG_VPNHIDE
++	vpnhide_ioctl(sock, cmd, arg, &err);
++#endif
+ 	return err;
  }
  
- struct getdents_callback64 {
- 	struct dir_context ctx;
- 	struct linux_dirent64 __user * current_dir;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	struct super_block *sb;
+@@ -1661,10 +1668,14 @@ int __sys_bind(int fd, struct sockaddr __user *umyaddr, int addrlen)
+ 			err = security_socket_bind(sock,
+ 						   (struct sockaddr *)&address,
+ 						   addrlen);
+-			if (!err)
++			if (!err) {
++#ifdef CONFIG_VPNHIDE
++				vpnhide_bind(sock, umyaddr, addrlen);
 +#endif
- 	int prev_reclen;
- 	int count;
- 	int error;
-@@ -316,6 +400,9 @@ static int filldir64(struct dir_context *ctx, const char *name, int namlen,
- 	int reclen = ALIGN(offsetof(struct linux_dirent64, d_name) + namlen + 1,
- 		sizeof(u64));
- 	int prev_reclen;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	struct inode *inode;
-+#endif
+ 				err = sock->ops->bind(sock,
+ 						      (struct sockaddr *)
+ 						      &address, addrlen);
++			}
+ 		}
+ 		fput_light(sock->file, fput_needed);
+ 	}
+@@ -1874,6 +1885,23 @@ int __sys_connect(int fd, struct sockaddr __user *uservaddr, int addrlen)
+ 	int ret = -EBADF;
+ 	struct fd f;
  
- 	buf->error = verify_dirent_name(name, namlen);
- 	if (unlikely(buf->error))
-@@ -326,6 +413,18 @@ static int filldir64(struct dir_context *ctx, const char *name, int namlen,
- 	prev_reclen = buf->prev_reclen;
- 	if (prev_reclen && signal_pending(current))
- 		return -EINTR;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	inode = ilookup(buf->sb, ino);
-+	if (!inode) {
-+		goto orig_flow;
-+	}
-+	if (susfs_is_inode_sus_path(inode)) {
-+		iput(inode);
-+		return 0;
-+	}
-+	iput(inode);
-+orig_flow:
-+#endif
- 	dirent = buf->current_dir;
- 	prev = (void __user *)dirent - prev_reclen;
- 	if (!user_write_access_begin(prev, reclen + prev_reclen))
-@@ -361,11 +460,27 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
- 		.current_dir = dirent
- 	};
- 	int error;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	int path_err = -EINVAL;
-+	struct path path;
-+#endif
- 
- 	f = fdget_pos(fd);
- 	if (!f.file)
- 		return -EBADF;
- 
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	if (f.file->f_inode->i_sb->s_magic == FUSE_SUPER_MAGIC) {
-+		path_err = susfs_get_data_path(&path);
-+		if (!path_err) {
-+			buf.sb = path.dentry->d_inode->i_sb;
-+			goto orig_flow;
++#ifdef CONFIG_VPNHIDE
++	{
++		struct fd _f = fdget(fd);
++		if (_f.file) {
++			int _err = 0;
++			struct socket *_sock = sock_from_file(_f.file, &_err);
++			if (_sock) {
++				int _ret = 0;
++				if (vpnhide_connect(_sock, uservaddr, addrlen, &_ret)) {
++					fdput(_f);
++					return _ret;
++				}
++			}
++			fdput(_f);
 +		}
 +	}
-+	buf.sb = f.file->f_inode->i_sb;
-+
-+orig_flow:
 +#endif
- 	error = iterate_dir(f.file, &buf.ctx);
- 	if (error >= 0)
- 		error = buf.error;
-@@ -380,6 +495,10 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
- 			error = count - buf.count;
+ 	f = fdget(fd);
+ 	if (f.file) {
+ 		struct sockaddr_storage address;
+@@ -1917,7 +1945,10 @@ int __sys_getsockname(int fd, struct sockaddr __user *usockaddr,
+ 	if (err < 0)
+ 		goto out_put;
+         /* "err" is actually length in this case */
+-	err = move_addr_to_user(&address, err, usockaddr, usockaddr_len);
++	#ifdef CONFIG_VPNHIDE
++	vpnhide_getname(sock, (struct sockaddr *)&address, 0, &err);
++#endif
++err = move_addr_to_user(&address, err, usockaddr, usockaddr_len);
+ 
+ out_put:
+ 	fput_light(sock->file, fput_needed);
+@@ -1952,10 +1983,13 @@ int __sys_getpeername(int fd, struct sockaddr __user *usockaddr,
+ 		}
+ 
+ 		err = sock->ops->getname(sock, (struct sockaddr *)&address, 1);
+-		if (err >= 0)
+-			/* "err" is actually length in this case */
+-			err = move_addr_to_user(&address, err, usockaddr,
++		if (err >= 0) {
++#ifdef CONFIG_VPNHIDE
++				vpnhide_getname(sock, (struct sockaddr *)&address, 1, &err);
++#endif
++				err = move_addr_to_user(&address, err, usockaddr,
+ 						usockaddr_len);
++			}
+ 		fput_light(sock->file, fput_needed);
  	}
- 	fdput_pos(f);
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	if (!path_err)
-+		path_put(&path);
+ 	return err;
+@@ -2138,7 +2172,17 @@ int __sys_setsockopt(int fd, int level, int optname, char __user *user_optval,
+ 
+ 	if (kernel_optval)
+ 		optval = KERNEL_SOCKPTR(kernel_optval);
+-	if (level == SOL_SOCKET && !sock_use_custom_sol_socket(sock))
++	#ifdef CONFIG_VPNHIDE
++	{
++		int _ret = 0;
++		if (vpnhide_setsockopt(fd, level, optname, user_optval, optlen, &_ret)) {
++			err = _ret;
++			fput_light(sock->file, fput_needed);
++			return err;
++		}
 +#endif
- 	return error;
++
++if (level == SOL_SOCKET && !sock_use_custom_sol_socket(sock))
+ 		err = sock_setsockopt(sock, level, optname, optval, optlen);
+ 	else if (unlikely(!sock->ops->setsockopt))
+ 		err = -EOPNOTSUPP;
+@@ -2193,6 +2237,10 @@ int __sys_getsockopt(int fd, int level, int optname, char __user *optval,
+ 						     err);
+ out_put:
+ 	fput_light(sock->file, fput_needed);
++#ifdef CONFIG_VPNHIDE
++	vpnhide_getsockopt(sock, level, optname, optval, optlen, &err);
++#endif
++
+ 	return err;
  }
  
-@@ -394,6 +513,9 @@ struct compat_old_linux_dirent {
- struct compat_readdir_callback {
- 	struct dir_context ctx;
- 	struct compat_old_linux_dirent __user *dirent;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	struct super_block *sb;
-+#endif
- 	int result;
- };
+@@ -3399,6 +3447,9 @@ static long compat_sock_ioctl(struct file *file, unsigned int cmd,
+ 	if (ret == -ENOIOCTLCMD)
+ 		ret = compat_sock_ioctl_trans(file, sock, cmd, arg);
  
-@@ -405,6 +527,9 @@ static int compat_fillonedir(struct dir_context *ctx, const char *name,
- 		container_of(ctx, struct compat_readdir_callback, ctx);
- 	struct compat_old_linux_dirent __user *dirent;
- 	compat_ulong_t d_ino;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	struct inode *inode;
++#ifdef CONFIG_VPNHIDE
++	vpnhide_ioctl(sock, cmd, arg, &ret);
 +#endif
- 
- 	if (buf->result)
- 		return -EINVAL;
-@@ -416,6 +541,18 @@ static int compat_fillonedir(struct dir_context *ctx, const char *name,
- 		buf->result = -EOVERFLOW;
- 		return -EOVERFLOW;
- 	}
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	inode = ilookup(buf->sb, ino);
-+	if (!inode) {
-+		goto orig_flow;
-+	}
-+	if (susfs_is_inode_sus_path(inode)) {
-+		iput(inode);
-+		return 0;
-+	}
-+	iput(inode);
-+orig_flow:
-+#endif
- 	buf->result++;
- 	dirent = buf->dirent;
- 	if (!user_write_access_begin(dirent,
-@@ -444,15 +581,35 @@ COMPAT_SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
- 		.ctx.actor = compat_fillonedir,
- 		.dirent = dirent
- 	};
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	int path_err = -EINVAL;
-+	struct path path;
-+#endif
- 
- 	if (!f.file)
- 		return -EBADF;
- 
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	if (f.file->f_inode->i_sb->s_magic == FUSE_SUPER_MAGIC) {
-+		path_err = susfs_get_data_path(&path);
-+		if (!path_err) {
-+			buf.sb = path.dentry->d_inode->i_sb;
-+			goto orig_flow;
-+		}
-+	}
-+	buf.sb = f.file->f_inode->i_sb;
-+
-+orig_flow:
-+#endif
- 	error = iterate_dir(f.file, &buf.ctx);
- 	if (buf.result)
- 		error = buf.result;
- 
- 	fdput_pos(f);
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	if (!path_err)
-+		path_put(&path);
-+#endif
- 	return error;
- }
- 
-@@ -466,6 +623,9 @@ struct compat_linux_dirent {
- struct compat_getdents_callback {
- 	struct dir_context ctx;
- 	struct compat_linux_dirent __user *current_dir;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	struct super_block *sb;
-+#endif
- 	int prev_reclen;
- 	int count;
- 	int error;
-@@ -481,6 +641,9 @@ static int compat_filldir(struct dir_context *ctx, const char *name, int namlen,
- 	int reclen = ALIGN(offsetof(struct compat_linux_dirent, d_name) +
- 		namlen + 2, sizeof(compat_long_t));
- 	int prev_reclen;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	struct inode *inode;
-+#endif
- 
- 	buf->error = verify_dirent_name(name, namlen);
- 	if (unlikely(buf->error))
-@@ -496,6 +659,18 @@ static int compat_filldir(struct dir_context *ctx, const char *name, int namlen,
- 	prev_reclen = buf->prev_reclen;
- 	if (prev_reclen && signal_pending(current))
- 		return -EINTR;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	inode = ilookup(buf->sb, ino);
-+	if (!inode) {
-+		goto orig_flow;
-+	}
-+	if (susfs_is_inode_sus_path(inode)) {
-+		iput(inode);
-+		return 0;
-+	}
-+	iput(inode);
-+orig_flow:
-+#endif
- 	dirent = buf->current_dir;
- 	prev = (void __user *) dirent - prev_reclen;
- 	if (!user_write_access_begin(prev, reclen + prev_reclen))
-@@ -529,11 +704,27 @@ COMPAT_SYSCALL_DEFINE3(getdents, unsigned int, fd,
- 		.count = count
- 	};
- 	int error;
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	int path_err = -EINVAL;
-+	struct path path;
-+#endif
- 
- 	f = fdget_pos(fd);
- 	if (!f.file)
- 		return -EBADF;
- 
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	if (f.file->f_inode->i_sb->s_magic == FUSE_SUPER_MAGIC) {
-+		path_err = susfs_get_data_path(&path);
-+		if (!path_err) {
-+			buf.sb = path.dentry->d_inode->i_sb;
-+			goto orig_flow;
-+		}
-+	}
-+	buf.sb = f.file->f_inode->i_sb;
-+
-+orig_flow:
-+#endif
- 	error = iterate_dir(f.file, &buf.ctx);
- 	if (error >= 0)
- 		error = buf.error;
-@@ -547,6 +738,10 @@ COMPAT_SYSCALL_DEFINE3(getdents, unsigned int, fd,
- 			error = count - buf.count;
- 	}
- 	fdput_pos(f);
-+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-+	if (!path_err)
-+		path_put(&path);
-+#endif
- 	return error;
+ 	return ret;
  }
  #endif
+diff --git a/security/Kconfig b/security/Kconfig
+index 9893c316d..b26de0595 100644
+--- a/security/Kconfig
++++ b/security/Kconfig
+@@ -283,5 +283,7 @@ config LSM
+ 
+ source "security/Kconfig.hardening"
+ 
++source "security/vpnhide/Kconfig"
++
+ endmenu
+ 
+diff --git a/security/Makefile b/security/Makefile
+index 3baf435de..562d91cbf 100644
+--- a/security/Makefile
++++ b/security/Makefile
+@@ -36,3 +36,4 @@ obj-$(CONFIG_BPF_LSM)			+= bpf/
+ # Object integrity file lists
+ subdir-$(CONFIG_INTEGRITY)		+= integrity
+ obj-$(CONFIG_INTEGRITY)			+= integrity/
++obj-$(CONFIG_VPNHIDE)			+= vpnhide/
 diff --git a/security/vpnhide/Kconfig b/security/vpnhide/Kconfig
 new file mode 100644
-index 000000000000..2ebd7f81b511
+index 000000000..2ebd7f81b
 --- /dev/null
 +++ b/security/vpnhide/Kconfig
 @@ -0,0 +1,7 @@
@@ -750,7 +586,7 @@ index 000000000000..2ebd7f81b511
 +	  and hide the presence of active VPN interfaces.
 diff --git a/security/vpnhide/Makefile b/security/vpnhide/Makefile
 new file mode 100644
-index 000000000000..aaecf53adeae
+index 000000000..aaecf53ad
 --- /dev/null
 +++ b/security/vpnhide/Makefile
 @@ -0,0 +1,2 @@
@@ -758,10 +594,10 @@ index 000000000000..aaecf53adeae
 +vpnhide-objs := main.o hooks.o
 diff --git a/security/vpnhide/hooks.c b/security/vpnhide/hooks.c
 new file mode 100644
-index 000000000000..58a67a4b0ddb
+index 000000000..7647a8fa6
 --- /dev/null
 +++ b/security/vpnhide/hooks.c
-@@ -0,0 +1,1097 @@
+@@ -0,0 +1,1133 @@
 +#include "vpnhide.h"
 +#include <linux/netlink.h>
 +#include <linux/inetdevice.h>
@@ -769,6 +605,7 @@ index 000000000000..58a67a4b0ddb
 +#include <net/ipv6.h>
 +#include <net/tcp.h>
 +#include <net/udp.h>
++#include <net/fib_rules.h>
 +#include <linux/syscalls.h>
 +#include <linux/namei.h>
 +#include <linux/mount.h>
@@ -1615,7 +1452,7 @@ index 000000000000..58a67a4b0ddb
 +  return 0;
 +}
 +
-+bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg, size_t len) {
++bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg, size_t len, int *err) {
 +  uid_t uid = from_kuid(&init_user_ns, current_uid());
 +
 +  if (!is_hook_active(HOOK_UDP_SENDMSG, uid))
@@ -1629,9 +1466,9 @@ index 000000000000..58a67a4b0ddb
 +
 +  if (msg->msg_flags & MSG_DONTWAIT) {
 +    if (udp_rate_limit_exceeded(uid)) {
-+      sk->sk_sndbuf = 0;
 +      udelay(50);
-+      return true; /* spoofed */
++      *err = -EAGAIN;
++      return true; /* handled */
 +    }
 +  }
 +  return false;
@@ -1859,12 +1696,47 @@ index 000000000000..58a67a4b0ddb
 +      kfree(vbuf);
 +  }
 +}
++
++bool vpnhide_should_filter_rule(struct fib_rule *rule) {
++  uid_t my_uid = from_kuid(&init_user_ns, current_uid());
++
++  if (!is_hook_active(HOOK_FIB_RULE_FILL, my_uid))
++    return false;
++
++  if (!is_target_uid())
++    return false;
++
++  if (!rule)
++    return false;
++
++  rcu_read_lock();
++  if ((rule->iifname[0] != '\0' && is_active_vpn_ifname(rule->iifname)) ||
++      (rule->oifname[0] != '\0' && is_active_vpn_ifname(rule->oifname))) {
++    rcu_read_unlock();
++    return true;
++  } else {
++    uid_t start = from_kuid(&init_user_ns, rule->uid_range.start);
++    uid_t end = from_kuid(&init_user_ns, rule->uid_range.end);
++    if (((start >= 10000 || end >= 10000) || is_target_uid_val(start) ||
++         is_target_uid_val(end)) &&
++        end != (uid_t)~0) {
++      if (rule->table != 254 && rule->table != 255 && rule->table != 253 &&
++          rule->table > 100) {
++        rcu_read_unlock();
++        return true;
++      }
++    }
++  }
++  rcu_read_unlock();
++  return false;
++}
++
 diff --git a/security/vpnhide/main.c b/security/vpnhide/main.c
 new file mode 100644
-index 000000000000..583dd560da0b
+index 000000000..30566f7ae
 --- /dev/null
 +++ b/security/vpnhide/main.c
-@@ -0,0 +1,1123 @@
+@@ -0,0 +1,1134 @@
 +#include "vpnhide.h"
 +
 +bool debug_enabled = false;
@@ -2389,6 +2261,17 @@ index 000000000000..583dd560da0b
 +                          "debug_enabled: %d\n", READ_ONCE(debug_enabled));
 +
 +      rcu_read_lock();
++      lt = rcu_dereference(global_targets);
++      offset +=
++          scnprintf(reader->buf + offset, 65536 - offset, "targets:");
++      if (lt) {
++        for (i = 0; i < lt->count; i++) {
++          offset += scnprintf(reader->buf + offset, 65536 - offset, " %u",
++                              lt->uids[i]);
++        }
++      }
++      offset += scnprintf(reader->buf + offset, 65536 - offset, "\n");
++
 +      lt = rcu_dereference(global_lsposed_targets);
 +      offset +=
 +          scnprintf(reader->buf + offset, 65536 - offset, "lsposed_targets:");
@@ -2990,10 +2873,10 @@ index 000000000000..583dd560da0b
 +late_initcall(vpnhide_init);
 diff --git a/security/vpnhide/vpnhide.h b/security/vpnhide/vpnhide.h
 new file mode 100644
-index 000000000000..1cd8745e7dac
+index 000000000..a1f26971b
 --- /dev/null
 +++ b/security/vpnhide/vpnhide.h
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,271 @@
 +#ifndef _SECURITY_VPNHIDE_H
 +#define _SECURITY_VPNHIDE_H
 +
@@ -3008,6 +2891,7 @@ index 000000000000..1cd8745e7dac
 +#include <linux/fs.h>
 +#include <linux/tcp.h>
 +#include <linux/version.h>
++#include <linux/miscdevice.h>
 +
 +#include "vpnhide_uapi.h"
 +
@@ -3251,7 +3135,11 @@ index 000000000000..1cd8745e7dac
 +int vpnhide_sys_bpf(int cmd, union bpf_attr __user *uattr, unsigned int size, int *retval);
 +void vpnhide_bpf_lookup_elem(struct bpf_map *map, void *key, void *value);
 +void vpnhide_bpf_lookup_batch(struct bpf_map *map, const union bpf_attr *attr, union bpf_attr __user *uattr);
-+bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg, size_t len);
++bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg, size_t len, int *err);
++
++/* Routing / Rules Hooks */
++struct fib_rule;
++bool vpnhide_should_filter_rule(struct fib_rule *rule);
 +
 +/* Filesystem / VFS Hooks */
 +bool vpnhide_should_hide_path(const struct path *path);
@@ -3262,7 +3150,7 @@ index 000000000000..1cd8745e7dac
 +#endif /* _SECURITY_VPNHIDE_H */
 diff --git a/security/vpnhide/vpnhide_uapi.h b/security/vpnhide/vpnhide_uapi.h
 new file mode 100644
-index 000000000000..128fbc7a98b5
+index 000000000..128fbc7a9
 --- /dev/null
 +++ b/security/vpnhide/vpnhide_uapi.h
 @@ -0,0 +1,152 @@

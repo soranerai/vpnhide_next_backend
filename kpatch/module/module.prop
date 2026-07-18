@@ -1,0 +1,6 @@
+id=vpnhide_kpatch
+name=VPNHide Next (Built-in Patch)
+version=v2.1.3
+versionCode=20103
+author=soranerai
+description=Configures built-in VPNHide Next kernel driver. Manage targets via VPNHide Next app.

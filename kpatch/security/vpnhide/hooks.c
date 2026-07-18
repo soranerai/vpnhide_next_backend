@@ -851,7 +851,7 @@ int vpnhide_getdents64(unsigned int fd, struct linux_dirent64 __user *dirent, un
   return 0;
 }
 
-bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg, size_t len) {
+bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg, size_t len, int *err) {
   uid_t uid = from_kuid(&init_user_ns, current_uid());
 
   if (!is_hook_active(HOOK_UDP_SENDMSG, uid))
@@ -865,9 +865,9 @@ bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg, size_t len) {
 
   if (msg->msg_flags & MSG_DONTWAIT) {
     if (udp_rate_limit_exceeded(uid)) {
-      sk->sk_sndbuf = 0;
       udelay(50);
-      return true; /* spoofed */
+      *err = -EAGAIN;
+      return true; /* handled */
     }
   }
   return false;
