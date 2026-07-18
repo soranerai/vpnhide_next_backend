@@ -1,7 +1,17 @@
 config VPNHIDE
-	bool "VPNHide Next support"
+	bool "VPNHide Next in-tree support"
 	default n
+	depends on SECURITY && NET && INET && BPF_SYSCALL
+	depends on IPV6
+	select SORT_TESTING if !SORT_TESTING
 	help
-	  Builds the VPNHide Next kernel driver. It intercepts sockets, VFS path lookups,
-	  directory listings, netlink dumps, and route queries for target UIDs to shield
-	  and hide the presence of active VPN interfaces.
+	  Builds the VPNHide Next kernel subsystem. Intercepts sockets, VFS
+	  path lookups, directory listings, netlink dumps, route queries, and
+	  BPF map reads for target UIDs to hide active VPN interfaces.
+
+	  Unlike the out-of-tree kmod version, this implementation patches
+	  call sites directly, eliminating kretprobe overhead and enabling
+	  early-return optimisations that avoid generating netlink messages
+	  that would otherwise be discarded.
+
+	  If unsure, say N.
