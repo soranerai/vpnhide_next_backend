@@ -32,23 +32,62 @@ def write(path, content):
         f.write(content)
 
 def insert_after(content, anchor, insertion):
-    """Insert `insertion` right after the first occurrence of `anchor`."""
+    """Insert `insertion` right after the first occurrence of `anchor`.
+    Returns (content, False) unchanged when anchor is not found so callers
+    can safely chain multiple fallback attempts without a None-crash."""
     idx = content.find(anchor)
     if idx == -1:
-        return None, False
+        return content, False
     pos = idx + len(anchor)
     return content[:pos] + '\n' + insertion + content[pos:], True
 
 def insert_before(content, anchor, insertion):
-    """Insert `insertion` right before the first occurrence of `anchor`."""
+    """Insert `insertion` right before the first occurrence of `anchor`.
+    Returns (content, False) unchanged when anchor is not found."""
     idx = content.find(anchor)
     if idx == -1:
-        return None, False
+        return content, False
     return content[:idx] + insertion + '\n' + content[idx:], True
 
 def guard(toggle_guard):
     """Wrap `toggle_guard` in CONFIG_VPNHIDE guards."""
     return f'#ifdef CONFIG_VPNHIDE\n{toggle_guard}#endif\n'
+
+_DECL_STARTERS = (
+    'struct ', 'union ', 'enum ', 'const ', 'static ', 'volatile ',
+    'unsigned ', 'signed ', 'int ', 'long ', 'short ', 'char ', 'void ',
+    'bool ', 'size_t ', 'ssize_t ',
+    'u8 ', 'u16 ', 'u32 ', 'u64 ', 's8 ', 's16 ', 's32 ', 's64 ',
+    '__u8 ', '__u16 ', '__u32 ', '__u64 ', '__s8 ', '__s16 ', '__s32 ', '__s64 ',
+    '__le16 ', '__le32 ', '__le64 ', '__be16 ', '__be32 ', '__be64 ',
+    'atomic_t ', 'gfp_t ', 'kuid_t ', 'kgid_t ',
+)
+
+def find_after_decls(content, body_open):
+    """Given the index of a function body's opening '{', return the offset
+    just after the block's leading local-variable declarations (skipping
+    blank lines and comments). GKI kernels build with
+    -Wdeclaration-after-statement as an error, so any statement we inject
+    must land after existing declarations, not right after '{'."""
+    pos = body_open + 1
+    n = len(content)
+    last_decl_end = pos
+    while pos < n:
+        line_end = content.find('\n', pos)
+        if line_end == -1:
+            break
+        line = content[pos:line_end]
+        stripped = line.strip()
+        if not stripped or stripped.startswith('//') or stripped.startswith('/*') or stripped.startswith('*'):
+            pos = line_end + 1
+            continue
+        if any(stripped.startswith(s) for s in _DECL_STARTERS):
+            pos = line_end + 1
+            last_decl_end = pos
+            continue
+        # first non-declaration statement — stop here
+        break
+    return last_decl_end
 
 def patch_file(path, fn):
     """
@@ -358,21 +397,24 @@ def patch_net_core_rtnetlink_c(content):
     # those call sites in one place. The dump loop itself walks
     # hlist_for_each_entry(dev, head, index_hlist), not for_each_netdev(),
     # so hooking the loop (as before) missed RTM_GETLINK dumps entirely.
-    # Insert before nlh = nlmsg_put() (after local declarations, C90-safe)
-    # so a hidden device never reserves skb space.
+    # Inject after the function's local declarations (not by searching for
+    # nlmsg_put's pid arg, which is renamed portid in GKI2 kernels — that
+    # anchor silently missed and left RTM_GETLINK unhooked). This is also
+    # C90-safe: GKI builds with -Wdeclaration-after-statement as an error.
     if 'vpnhide_should_hide_dev(dev)' not in content:
         func_idx = content.find('static int rtnl_fill_ifinfo(')
         if func_idx != -1:
-            nlh_idx = content.find('\tnlh = nlmsg_put(skb, pid, seq, type, sizeof(*ifm), flags);', func_idx)
-            if nlh_idx != -1:
+            body_open = content.find('{', func_idx)
+            if body_open != -1:
+                inject_at = find_after_decls(content, body_open)
                 hook = guard(
                     '\tif (dev && vpnhide_should_hide_dev(dev))\n'
                     '\t\treturn 0;\n'
                 )
-                content = content[:nlh_idx] + hook + content[nlh_idx:]
+                content = content[:inject_at] + hook + content[inject_at:]
                 changed = True
             else:
-                print("WARNING: rtnl_fill_ifinfo nlmsg_put anchor not found")
+                print("WARNING: rtnl_fill_ifinfo opening brace not found")
         else:
             print("WARNING: rtnl_fill_ifinfo not found in rtnetlink.c")
 
@@ -761,14 +803,20 @@ def patch_net_core_fib_rules_c(content):
     if 'vpnhide_should_hide_ifname' not in content:
         func_idx = content.find('static int fib_nl_fill_rule(')
         if func_idx != -1:
-            nlh_idx = content.find(
-                '\tnlh = nlmsg_put(skb, pid, seq, type, sizeof(*frh), flags);',
-                func_idx
-            )
-            if nlh_idx != -1:
-                uid_cond = (' ||\n'
-                            '\t    is_target_uid_val(from_kuid(&init_user_ns, rule->uid_range.start))'
-                            if HAS_FIB_RULE_UID else '')
+            # Inject after the function's local declarations — more robust
+            # than searching for the nlmsg_put line whose arg was renamed
+            # pid→portid in GKI2 kernels (android13-5.15+), and C90-safe
+            # (GKI builds with -Wdeclaration-after-statement as an error).
+            body_open = content.find('{', func_idx)
+            if body_open != -1:
+                inject_at = find_after_decls(content, body_open)
+                uid_cond = (
+                    ' ||\n'
+                    '\t    is_target_uid_val(from_kuid(&init_user_ns,\n'
+                    '\t\t\t\t\t  rule->uid_range.start)) ||\n'
+                    '\t    is_target_uid_val(from_kuid(&init_user_ns,\n'
+                    '\t\t\t\t\t  rule->uid_range.end))'
+                    if HAS_FIB_RULE_UID else '')
                 hook = guard(
                     '\tif (is_target_uid() &&\n'
                     '\t    ((rule->iifname[0] && vpnhide_should_hide_ifname(rule->iifname)) ||\n'
@@ -776,10 +824,10 @@ def patch_net_core_fib_rules_c(content):
                     + uid_cond + '))\n'
                     '\t\treturn 0;\n'
                 )
-                content = content[:nlh_idx] + hook + content[nlh_idx:]
+                content = content[:inject_at] + hook + content[inject_at:]
                 changed = True
             else:
-                print("WARNING: fib_nl_fill_rule nlmsg_put anchor not found")
+                print("WARNING: fib_nl_fill_rule opening brace not found")
         else:
             print("WARNING: fib_nl_fill_rule not found in fib_rules.c")
 
