@@ -10,6 +10,7 @@
 #include <linux/tcp.h>
 #include <linux/udp.h>
 #include <linux/if.h>
+#include <linux/file.h>
 #include <net/sock.h>
 #include <net/inet_sock.h>
 #include <net/ipv6.h>
@@ -23,8 +24,8 @@
 /*   returns <0 → kernel returns that errno to userspace               */
 /* ------------------------------------------------------------------ */
 
-int vpnhide_setsockopt(struct socket *sock, int level, int optname,
-		       sockptr_t optval, unsigned int optlen)
+int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
+			    sockptr_t optval, unsigned int optlen)
 {
 	struct sock *sk;
 	uid_t uid;
@@ -114,7 +115,7 @@ int vpnhide_setsockopt(struct socket *sock, int level, int optname,
 	}
 	return 0;
 }
-EXPORT_SYMBOL_GPL(vpnhide_setsockopt);
+EXPORT_SYMBOL_GPL(vpnhide_setsockopt_sock);
 
 /* ------------------------------------------------------------------ */
 /* getsockopt — called AFTER the real handler with the result buffer   */
@@ -499,3 +500,80 @@ bool vpnhide_udp_sendmsg(struct sock *sk)
 	return drop;
 }
 EXPORT_SYMBOL_GPL(vpnhide_udp_sendmsg);
+
+bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg,
+			     size_t len, int *err)
+{
+	if (!vpnhide_udp_sendmsg(sk))
+		return false;
+	*err = -EPERM;
+	return true;
+}
+EXPORT_SYMBOL_GPL(vpnhide_udp_sendmsg_pre);
+
+/* ------------------------------------------------------------------ */
+/* Wrappers matching names injected by patch_kernel.py                 */
+/* ------------------------------------------------------------------ */
+
+void vpnhide_bind(struct socket *sock, struct sockaddr __user *umyaddr,
+		  int addrlen)
+{
+	struct sockaddr_storage kaddr;
+
+	if (move_addr_to_kernel(umyaddr, addrlen, &kaddr))
+		return;
+	vpnhide_bind_pre(sock, (struct sockaddr *)&kaddr, addrlen);
+}
+EXPORT_SYMBOL_GPL(vpnhide_bind);
+
+bool vpnhide_connect(struct socket *sock, struct sockaddr __user *uservaddr,
+		     int addrlen, int *ret)
+{
+	struct sockaddr_storage kaddr;
+
+	if (move_addr_to_kernel(uservaddr, addrlen, &kaddr))
+		return false;
+	*ret = vpnhide_connect_pre(sock, (struct sockaddr *)&kaddr, addrlen);
+	return (*ret != 0);
+}
+EXPORT_SYMBOL_GPL(vpnhide_connect);
+
+void vpnhide_getname(struct socket *sock, struct sockaddr *addr,
+		     int peer, int *err)
+{
+	vpnhide_getname_post(sock, addr, peer);
+}
+EXPORT_SYMBOL_GPL(vpnhide_getname);
+
+bool vpnhide_setsockopt(int fd, int level, int optname,
+			char __user *user_optval, unsigned int optlen, int *ret)
+{
+	struct fd f = fdget(fd);
+	struct socket *sock;
+	int err = 0;
+	int r;
+
+	if (!f.file)
+		return false;
+	sock = sock_from_file(f.file, &err);
+	if (!sock) {
+		fdput(f);
+		return false;
+	}
+	r = vpnhide_setsockopt_sock(sock, level, optname,
+				    USER_SOCKPTR(user_optval), optlen);
+	fdput(f);
+	if (r) {
+		*ret = r;
+		return true;
+	}
+	return false;
+}
+EXPORT_SYMBOL_GPL(vpnhide_setsockopt);
+
+void vpnhide_getsockopt(struct socket *sock, int level, int optname,
+			char __user *optval, int __user *optlen, int *err)
+{
+	vpnhide_getsockopt_post(sock, level, optname, optval, optlen);
+}
+EXPORT_SYMBOL_GPL(vpnhide_getsockopt);

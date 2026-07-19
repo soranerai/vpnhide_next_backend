@@ -43,6 +43,7 @@ bool vpnhide_skip_dev_seq(struct seq_file *seq, const struct net_device *dev);
 bool vpnhide_skip_if6_seq(struct seq_file *seq, struct inet6_ifaddr *ifa);
 bool vpnhide_skip_tc_qdisc(struct sk_buff *skb, const struct Qdisc *q);
 void vpnhide_filter_seq_line(struct seq_file *seq, int saved_count);
+bool vpnhide_should_hide_dev(const struct net_device *dev);
 
 /* ------------------------------------------------------------------ */
 /* ioctl                                                                */
@@ -55,8 +56,8 @@ void vpnhide_filter_ifconf(void __user *data);
 /* Socket                                                               */
 /* ------------------------------------------------------------------ */
 
-int  vpnhide_setsockopt(struct socket *sock, int level, int optname,
-			sockptr_t optval, unsigned int optlen);
+int  vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
+			     sockptr_t optval, unsigned int optlen);
 void vpnhide_getsockopt_post(struct socket *sock, int level, int optname,
 			     char __user *optval, int __user *optlen);
 int  vpnhide_connect_pre(struct socket *sock,
@@ -64,10 +65,23 @@ int  vpnhide_connect_pre(struct socket *sock,
 int  vpnhide_bind_pre(struct socket *sock,
 		      struct sockaddr *addr, int addrlen);
 void vpnhide_getname_post(struct socket *sock, struct sockaddr *addr, int peer);
+/* Wrappers matching patch_kernel.py injection names */
+void vpnhide_bind(struct socket *sock, struct sockaddr __user *umyaddr,
+		  int addrlen);
+bool vpnhide_connect(struct socket *sock, struct sockaddr __user *uservaddr,
+		     int addrlen, int *ret);
+void vpnhide_getname(struct socket *sock, struct sockaddr *addr,
+		     int peer, int *err);
+bool vpnhide_setsockopt(int fd, int level, int optname,
+			char __user *user_optval, unsigned int optlen, int *ret);
+void vpnhide_getsockopt(struct socket *sock, int level, int optname,
+			char __user *optval, int __user *optlen, int *err);
 int  vpnhide_inet6_bind_ll(struct sock *sk,
 			   struct sockaddr *uaddr, int addr_len);
 bool vpnhide_udpv6_sendmsg_ll(struct sock *sk);
 bool vpnhide_udp_sendmsg(struct sock *sk);
+bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg,
+			     size_t len, int *err);
 
 /* ------------------------------------------------------------------ */
 /* BPF                                                                  */
@@ -85,9 +99,9 @@ void vpnhide_bpf_lookup_batch(struct bpf_map *map,
 bool vpnhide_should_hide_path(const struct path *path);
 bool vpnhide_filter_sysctl(struct inode *dir,
 			   const char *name, size_t namelen);
-int  vpnhide_getdents64(unsigned int fd,
+bool vpnhide_getdents64(unsigned int fd,
 			struct linux_dirent64 __user *dirent,
-			unsigned int count, long retval);
+			unsigned int count, int *retval);
 
 #else /* !CONFIG_VPNHIDE */
 
@@ -137,9 +151,11 @@ static inline bool vpnhide_skip_tc_qdisc(struct sk_buff *s,
 	const struct Qdisc *q) { return false; }
 static inline void vpnhide_filter_seq_line(struct seq_file *s,
 	int c) {}
+static inline bool vpnhide_should_hide_dev(const struct net_device *d)
+	{ return false; }
 static inline bool vpnhide_ioctl_ifname_block(const char *n) { return false; }
 static inline void vpnhide_filter_ifconf(void __user *d) {}
-static inline int vpnhide_setsockopt(struct socket *sock, int lv, int opt,
+static inline int vpnhide_setsockopt_sock(struct socket *sock, int lv, int opt,
 	sockptr_t v, unsigned int l) { return 0; }
 static inline void vpnhide_getsockopt_post(struct socket *sock, int lv,
 	int opt, char __user *v, int __user *l) {}
@@ -149,10 +165,22 @@ static inline int vpnhide_bind_pre(struct socket *sock,
 	struct sockaddr *a, int l) { return 0; }
 static inline void vpnhide_getname_post(struct socket *sock,
 	struct sockaddr *a, int p) {}
+static inline void vpnhide_bind(struct socket *sock,
+	struct sockaddr __user *u, int l) {}
+static inline bool vpnhide_connect(struct socket *sock,
+	struct sockaddr __user *u, int l, int *r) { return false; }
+static inline void vpnhide_getname(struct socket *sock,
+	struct sockaddr *a, int p, int *e) {}
+static inline bool vpnhide_setsockopt(int fd, int lv, int opt,
+	char __user *v, unsigned int l, int *r) { return false; }
+static inline void vpnhide_getsockopt(struct socket *sock, int lv, int opt,
+	char __user *v, int __user *l, int *e) {}
 static inline int vpnhide_inet6_bind_ll(struct sock *sk,
 	struct sockaddr *a, int l) { return 0; }
 static inline bool vpnhide_udpv6_sendmsg_ll(struct sock *sk) { return false; }
 static inline bool vpnhide_udp_sendmsg(struct sock *sk) { return false; }
+static inline bool vpnhide_udp_sendmsg_pre(struct sock *sk,
+	struct msghdr *msg, size_t len, int *err) { return false; }
 static inline void vpnhide_bpf_lookup_elem(struct bpf_map *m,
 	void *k, void *v) {}
 static inline void vpnhide_bpf_lookup_batch(struct bpf_map *m,
@@ -161,9 +189,9 @@ static inline bool vpnhide_should_hide_path(const struct path *p)
 	{ return false; }
 static inline bool vpnhide_filter_sysctl(struct inode *dir,
 	const char *n, size_t l) { return false; }
-static inline int vpnhide_getdents64(unsigned int fd,
-	struct linux_dirent64 __user *d, unsigned int c, long r)
-	{ return (int)r; }
+static inline bool vpnhide_getdents64(unsigned int fd,
+	struct linux_dirent64 __user *d, unsigned int c, int *r)
+	{ return false; }
 
 #endif /* CONFIG_VPNHIDE */
 #endif /* _LINUX_VPNHIDE_H */

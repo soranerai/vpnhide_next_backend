@@ -82,7 +82,7 @@ void vpnhide_bpf_lookup_batch(struct bpf_map *map,
 		goto out;
 
 	if (copy_from_user(keys_buf,
-			   u64_to_user_ptr(attr->batch.keys_out),
+			   u64_to_user_ptr(attr->batch.keys),
 			   count * sizeof(*keys_buf)))
 		goto out;
 	if (copy_from_user(vals_buf,
@@ -107,45 +107,46 @@ EXPORT_SYMBOL_GPL(vpnhide_bpf_lookup_batch);
 /* getdents64 — filter VPN interface names from directory listings     */
 /* ------------------------------------------------------------------ */
 
-int vpnhide_getdents64(unsigned int fd,
-		       struct linux_dirent64 __user *dirent,
-		       unsigned int count, long retval)
+bool vpnhide_getdents64(unsigned int fd,
+			struct linux_dirent64 __user *dirent,
+			unsigned int count, int *retval)
 {
 	struct linux_dirent64 *kbuf, *cur, *prev;
 	uid_t uid = from_kuid(&init_user_ns, current_uid());
+	int nbytes = *retval;
 	long bytes_left;
 
-	if (retval <= 0)
-		return (int)retval;
+	if (nbytes <= 0)
+		return false;
 	if (!is_hook_active(HOOK_GETDENTS64, uid))
-		return (int)retval;
+		return false;
 
-	kbuf = kvmalloc(retval, GFP_KERNEL);
+	kbuf = kvmalloc(nbytes, GFP_KERNEL);
 	if (!kbuf)
-		return (int)retval;
+		return false;
 
-	if (copy_from_user(kbuf, dirent, retval)) {
+	if (copy_from_user(kbuf, dirent, nbytes)) {
 		kvfree(kbuf);
-		return (int)retval;
+		return false;
 	}
 
-	bytes_left = retval;
+	bytes_left = nbytes;
 	prev = NULL;
 	cur  = kbuf;
 
-	while ((char *)cur < (char *)kbuf + retval) {
+	while ((char *)cur < (char *)kbuf + nbytes) {
 		struct linux_dirent64 *next =
 			(struct linux_dirent64 *)((char *)cur + cur->d_reclen);
 
 		if (vh_is_vpn_name_cached(cur->d_name,
 					  strnlen(cur->d_name, NAME_MAX))) {
 			/* Compact: memmove everything after cur back */
-			long tail = (char *)kbuf + retval -
+			long tail = (char *)kbuf + nbytes -
 				    (char *)next;
 			if (tail > 0)
 				memmove(cur, next, tail);
-			retval    -= cur->d_reclen;
-			bytes_left = retval - ((char *)cur - (char *)kbuf);
+			nbytes    -= cur->d_reclen;
+			bytes_left = nbytes - ((char *)cur - (char *)kbuf);
 			/* don't advance cur — it now points to next entry */
 			record_kmod_intercept(uid, HOOK_GETDENTS64);
 		} else {
@@ -154,9 +155,10 @@ int vpnhide_getdents64(unsigned int fd,
 		}
 	}
 
-	copy_to_user(dirent, kbuf, retval);
+	copy_to_user(dirent, kbuf, nbytes);
 	kvfree(kbuf);
-	return (int)retval;
+	*retval = nbytes;
+	return true;
 }
 EXPORT_SYMBOL_GPL(vpnhide_getdents64);
 
@@ -166,12 +168,6 @@ EXPORT_SYMBOL_GPL(vpnhide_getdents64);
 
 #define VH_PROC_SYS_NET   "/proc/sys/net/"
 #define VH_SYS_CLASS_NET  "/sys/class/net/"
-
-static bool path_in_guarded_dir(const char *path)
-{
-	return !strncmp(path, VH_PROC_SYS_NET, strlen(VH_PROC_SYS_NET)) ||
-	       !strncmp(path, VH_SYS_CLASS_NET, strlen(VH_SYS_CLASS_NET));
-}
 
 bool vpnhide_should_hide_path(const struct path *path)
 {

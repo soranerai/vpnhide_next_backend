@@ -1,3 +1,32 @@
+diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
+index c79d77da3..f2c28c57e 100644
+--- a/arch/arm64/configs/gki_defconfig
++++ b/arch/arm64/configs/gki_defconfig
+@@ -699,3 +699,15 @@ CONFIG_TRACEFS_DISABLE_AUTOMOUNT=y
+ CONFIG_HIST_TRIGGERS=y
+ CONFIG_FUNCTION_ERROR_INJECTION=y
+ # CONFIG_RUNTIME_TESTING_MENU is not set
++CONFIG_KSU=y
++CONFIG_KSU_SUSFS=y
++CONFIG_KSU_SUSFS_SUS_PATH=y
++CONFIG_KSU_SUSFS_SUS_MOUNT=y
++CONFIG_KSU_SUSFS_SUS_KSTAT=y
++CONFIG_KSU_SUSFS_SPOOF_UNAME=y
++CONFIG_KSU_SUSFS_ENABLE_LOG=y
++CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
++CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
++CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
++CONFIG_KSU_SUSFS_SUS_MAP=y
++CONFIG_VPNHIDE=y
+diff --git a/build.config.gki b/build.config.gki
+index 44d4ed1be..d5c778536 100644
+--- a/build.config.gki
++++ b/build.config.gki
+@@ -1,3 +1,3 @@
+ DEFCONFIG=gki_defconfig
+-POST_DEFCONFIG_CMDS="check_defconfig"
++POST_DEFCONFIG_CMDS=""
+ 
 diff --git a/fs/namei.c b/fs/namei.c
 index 0881626cd..e1a3e9946 100644
 --- a/fs/namei.c
@@ -45,10 +74,10 @@ index 5813bc37e..6de3d5f32 100644
  	if (buf.prev_reclen) {
 diff --git a/include/linux/vpnhide.h b/include/linux/vpnhide.h
 new file mode 100644
-index 000000000..63e1e3b84
+index 000000000..4724f7751
 --- /dev/null
 +++ b/include/linux/vpnhide.h
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,197 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +#ifndef _LINUX_VPNHIDE_H
 +#define _LINUX_VPNHIDE_H
@@ -94,6 +123,7 @@ index 000000000..63e1e3b84
 +bool vpnhide_skip_if6_seq(struct seq_file *seq, struct inet6_ifaddr *ifa);
 +bool vpnhide_skip_tc_qdisc(struct sk_buff *skb, const struct Qdisc *q);
 +void vpnhide_filter_seq_line(struct seq_file *seq, int saved_count);
++bool vpnhide_should_hide_dev(const struct net_device *dev);
 +
 +/* ------------------------------------------------------------------ */
 +/* ioctl                                                                */
@@ -106,8 +136,8 @@ index 000000000..63e1e3b84
 +/* Socket                                                               */
 +/* ------------------------------------------------------------------ */
 +
-+int  vpnhide_setsockopt(struct socket *sock, int level, int optname,
-+			sockptr_t optval, unsigned int optlen);
++int  vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
++			     sockptr_t optval, unsigned int optlen);
 +void vpnhide_getsockopt_post(struct socket *sock, int level, int optname,
 +			     char __user *optval, int __user *optlen);
 +int  vpnhide_connect_pre(struct socket *sock,
@@ -115,10 +145,23 @@ index 000000000..63e1e3b84
 +int  vpnhide_bind_pre(struct socket *sock,
 +		      struct sockaddr *addr, int addrlen);
 +void vpnhide_getname_post(struct socket *sock, struct sockaddr *addr, int peer);
++/* Wrappers matching patch_kernel.py injection names */
++void vpnhide_bind(struct socket *sock, struct sockaddr __user *umyaddr,
++		  int addrlen);
++bool vpnhide_connect(struct socket *sock, struct sockaddr __user *uservaddr,
++		     int addrlen, int *ret);
++void vpnhide_getname(struct socket *sock, struct sockaddr *addr,
++		     int peer, int *err);
++bool vpnhide_setsockopt(int fd, int level, int optname,
++			char __user *user_optval, unsigned int optlen, int *ret);
++void vpnhide_getsockopt(struct socket *sock, int level, int optname,
++			char __user *optval, int __user *optlen, int *err);
 +int  vpnhide_inet6_bind_ll(struct sock *sk,
 +			   struct sockaddr *uaddr, int addr_len);
 +bool vpnhide_udpv6_sendmsg_ll(struct sock *sk);
 +bool vpnhide_udp_sendmsg(struct sock *sk);
++bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg,
++			     size_t len, int *err);
 +
 +/* ------------------------------------------------------------------ */
 +/* BPF                                                                  */
@@ -136,9 +179,9 @@ index 000000000..63e1e3b84
 +bool vpnhide_should_hide_path(const struct path *path);
 +bool vpnhide_filter_sysctl(struct inode *dir,
 +			   const char *name, size_t namelen);
-+int  vpnhide_getdents64(unsigned int fd,
++bool vpnhide_getdents64(unsigned int fd,
 +			struct linux_dirent64 __user *dirent,
-+			unsigned int count, long retval);
++			unsigned int count, int *retval);
 +
 +#else /* !CONFIG_VPNHIDE */
 +
@@ -188,9 +231,11 @@ index 000000000..63e1e3b84
 +	const struct Qdisc *q) { return false; }
 +static inline void vpnhide_filter_seq_line(struct seq_file *s,
 +	int c) {}
++static inline bool vpnhide_should_hide_dev(const struct net_device *d)
++	{ return false; }
 +static inline bool vpnhide_ioctl_ifname_block(const char *n) { return false; }
 +static inline void vpnhide_filter_ifconf(void __user *d) {}
-+static inline int vpnhide_setsockopt(struct socket *sock, int lv, int opt,
++static inline int vpnhide_setsockopt_sock(struct socket *sock, int lv, int opt,
 +	sockptr_t v, unsigned int l) { return 0; }
 +static inline void vpnhide_getsockopt_post(struct socket *sock, int lv,
 +	int opt, char __user *v, int __user *l) {}
@@ -200,10 +245,22 @@ index 000000000..63e1e3b84
 +	struct sockaddr *a, int l) { return 0; }
 +static inline void vpnhide_getname_post(struct socket *sock,
 +	struct sockaddr *a, int p) {}
++static inline void vpnhide_bind(struct socket *sock,
++	struct sockaddr __user *u, int l) {}
++static inline bool vpnhide_connect(struct socket *sock,
++	struct sockaddr __user *u, int l, int *r) { return false; }
++static inline void vpnhide_getname(struct socket *sock,
++	struct sockaddr *a, int p, int *e) {}
++static inline bool vpnhide_setsockopt(int fd, int lv, int opt,
++	char __user *v, unsigned int l, int *r) { return false; }
++static inline void vpnhide_getsockopt(struct socket *sock, int lv, int opt,
++	char __user *v, int __user *l, int *e) {}
 +static inline int vpnhide_inet6_bind_ll(struct sock *sk,
 +	struct sockaddr *a, int l) { return 0; }
 +static inline bool vpnhide_udpv6_sendmsg_ll(struct sock *sk) { return false; }
 +static inline bool vpnhide_udp_sendmsg(struct sock *sk) { return false; }
++static inline bool vpnhide_udp_sendmsg_pre(struct sock *sk,
++	struct msghdr *msg, size_t len, int *err) { return false; }
 +static inline void vpnhide_bpf_lookup_elem(struct bpf_map *m,
 +	void *k, void *v) {}
 +static inline void vpnhide_bpf_lookup_batch(struct bpf_map *m,
@@ -212,9 +269,9 @@ index 000000000..63e1e3b84
 +	{ return false; }
 +static inline bool vpnhide_filter_sysctl(struct inode *dir,
 +	const char *n, size_t l) { return false; }
-+static inline int vpnhide_getdents64(unsigned int fd,
-+	struct linux_dirent64 __user *d, unsigned int c, long r)
-+	{ return (int)r; }
++static inline bool vpnhide_getdents64(unsigned int fd,
++	struct linux_dirent64 __user *d, unsigned int c, int *r)
++	{ return false; }
 +
 +#endif /* CONFIG_VPNHIDE */
 +#endif /* _LINUX_VPNHIDE_H */
@@ -658,10 +715,10 @@ index 000000000..c51839e96
 +vpnhide-objs := core.o hook_socket.o hook_netlink.o hook_fs.o
 diff --git a/security/vpnhide/core.c b/security/vpnhide/core.c
 new file mode 100644
-index 000000000..d2bfd9488
+index 000000000..cd7fb1b27
 --- /dev/null
 +++ b/security/vpnhide/core.c
-@@ -0,0 +1,775 @@
+@@ -0,0 +1,833 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * vpnhide — core state, IOCTL handler, helpers
@@ -994,20 +1051,30 @@ index 000000000..d2bfd9488
 +	switch (cmd) {
 +
 +	case VH_SET_TARGETS: {
-+		struct vpnhide_ioctl_data td;
++		struct vpnhide_ioctl_data *td;
 +		struct vpnhide_targets *nt, *old;
 +		int i;
 +
-+		if (copy_from_user(&td, uarg, sizeof(td)))
-+			return -EFAULT;
-+		if (td.count < 0 || td.count > MAX_TARGET_UIDS)
-+			return -EINVAL;
-+		nt = kzalloc(sizeof(*nt), GFP_KERNEL);
-+		if (!nt)
++		td = kzalloc(sizeof(*td), GFP_KERNEL);
++		if (!td)
 +			return -ENOMEM;
-+		nt->count = td.count;
-+		for (i = 0; i < td.count; i++)
-+			nt->uids[i] = td.uids[i];
++		if (copy_from_user(td, uarg, sizeof(*td))) {
++			kfree(td);
++			return -EFAULT;
++		}
++		if (td->count < 0 || td->count > MAX_TARGET_UIDS) {
++			kfree(td);
++			return -EINVAL;
++		}
++		nt = kzalloc(sizeof(*nt), GFP_KERNEL);
++		if (!nt) {
++			kfree(td);
++			return -ENOMEM;
++		}
++		nt->count = td->count;
++		for (i = 0; i < td->count; i++)
++			nt->uids[i] = td->uids[i];
++		kfree(td);
 +		sort(nt->uids, nt->count, sizeof(uid_t), uid_cmp, NULL);
 +
 +		spin_lock(&targets_update_lock);
@@ -1022,38 +1089,54 @@ index 000000000..d2bfd9488
 +	}
 +
 +	case VH_GET_TARGETS: {
-+		struct vpnhide_ioctl_data td = {};
++		struct vpnhide_ioctl_data *td;
 +		struct vpnhide_targets *t;
 +		int i;
 +
++		td = kzalloc(sizeof(*td), GFP_KERNEL);
++		if (!td)
++			return -ENOMEM;
 +		rcu_read_lock();
 +		t = rcu_dereference(global_targets);
 +		if (t) {
-+			td.count = t->count;
++			td->count = t->count;
 +			for (i = 0; i < t->count; i++)
-+				td.uids[i] = t->uids[i];
++				td->uids[i] = t->uids[i];
 +		}
 +		rcu_read_unlock();
-+		if (copy_to_user(uarg, &td, sizeof(td)))
++		if (copy_to_user(uarg, td, sizeof(*td))) {
++			kfree(td);
 +			return -EFAULT;
++		}
++		kfree(td);
 +		break;
 +	}
 +
 +	case VH_SET_LSPOSED_TARGETS: {
-+		struct vpnhide_ioctl_data td;
++		struct vpnhide_ioctl_data *td;
 +		struct vpnhide_targets *nt, *old;
 +		int i;
 +
-+		if (copy_from_user(&td, uarg, sizeof(td)))
-+			return -EFAULT;
-+		if (td.count < 0 || td.count > MAX_TARGET_UIDS)
-+			return -EINVAL;
-+		nt = kzalloc(sizeof(*nt), GFP_KERNEL);
-+		if (!nt)
++		td = kzalloc(sizeof(*td), GFP_KERNEL);
++		if (!td)
 +			return -ENOMEM;
-+		nt->count = td.count;
-+		for (i = 0; i < td.count; i++)
-+			nt->uids[i] = td.uids[i];
++		if (copy_from_user(td, uarg, sizeof(*td))) {
++			kfree(td);
++			return -EFAULT;
++		}
++		if (td->count < 0 || td->count > MAX_TARGET_UIDS) {
++			kfree(td);
++			return -EINVAL;
++		}
++		nt = kzalloc(sizeof(*nt), GFP_KERNEL);
++		if (!nt) {
++			kfree(td);
++			return -ENOMEM;
++		}
++		nt->count = td->count;
++		for (i = 0; i < td->count; i++)
++			nt->uids[i] = td->uids[i];
++		kfree(td);
 +		sort(nt->uids, nt->count, sizeof(uid_t), uid_cmp, NULL);
 +
 +		spin_lock(&lsposed_targets_update_lock);
@@ -1066,19 +1149,29 @@ index 000000000..d2bfd9488
 +	}
 +
 +	case VH_SET_PORT_TARGETS: {
-+		struct vpnhide_port_ioctl_data pd;
++		struct vpnhide_port_ioctl_data *pd;
 +		struct vpnhide_port_targets *np, *old;
 +
-+		if (copy_from_user(&pd, uarg, sizeof(pd)))
-+			return -EFAULT;
-+		if (pd.count < 0 || pd.count > MAX_TARGET_UIDS)
-+			return -EINVAL;
-+		np = kzalloc(sizeof(*np), GFP_KERNEL);
-+		if (!np)
++		pd = kzalloc(sizeof(*pd), GFP_KERNEL);
++		if (!pd)
 +			return -ENOMEM;
-+		np->count = pd.count;
-+		memcpy(np->targets, pd.targets,
-+		       pd.count * sizeof(np->targets[0]));
++		if (copy_from_user(pd, uarg, sizeof(*pd))) {
++			kfree(pd);
++			return -EFAULT;
++		}
++		if (pd->count < 0 || pd->count > MAX_TARGET_UIDS) {
++			kfree(pd);
++			return -EINVAL;
++		}
++		np = kzalloc(sizeof(*np), GFP_KERNEL);
++		if (!np) {
++			kfree(pd);
++			return -ENOMEM;
++		}
++		np->count = pd->count;
++		memcpy(np->targets, pd->targets,
++		       pd->count * sizeof(np->targets[0]));
++		kfree(pd);
 +
 +		spin_lock(&port_targets_update_lock);
 +		old = rcu_dereference_protected(global_port_targets,
@@ -1202,19 +1295,29 @@ index 000000000..d2bfd9488
 +	}
 +
 +	case VH_SET_APP_HOOK_MASKS: {
-+		struct vpnhide_app_hook_ioctl_data amd;
++		struct vpnhide_app_hook_ioctl_data *amd;
 +		struct vpnhide_app_hook_masks *nm, *old;
 +
-+		if (copy_from_user(&amd, uarg, sizeof(amd)))
-+			return -EFAULT;
-+		if (amd.count < 0 || amd.count > MAX_TARGET_UIDS)
-+			return -EINVAL;
-+		nm = kzalloc(sizeof(*nm), GFP_KERNEL);
-+		if (!nm)
++		amd = kzalloc(sizeof(*amd), GFP_KERNEL);
++		if (!amd)
 +			return -ENOMEM;
-+		nm->count = amd.count;
-+		memcpy(nm->masks, amd.masks,
-+		       amd.count * sizeof(nm->masks[0]));
++		if (copy_from_user(amd, uarg, sizeof(*amd))) {
++			kfree(amd);
++			return -EFAULT;
++		}
++		if (amd->count < 0 || amd->count > MAX_TARGET_UIDS) {
++			kfree(amd);
++			return -EINVAL;
++		}
++		nm = kzalloc(sizeof(*nm), GFP_KERNEL);
++		if (!nm) {
++			kfree(amd);
++			return -ENOMEM;
++		}
++		nm->count = amd->count;
++		memcpy(nm->masks, amd->masks,
++		       amd->count * sizeof(nm->masks[0]));
++		kfree(amd);
 +
 +		spin_lock(&app_hook_masks_update_lock);
 +		old = rcu_dereference_protected(global_app_hook_masks,
@@ -1226,26 +1329,35 @@ index 000000000..d2bfd9488
 +	}
 +
 +	case VH_GET_APP_HOOK_MASKS: {
-+		struct vpnhide_app_hook_ioctl_data amd = {};
++		struct vpnhide_app_hook_ioctl_data *amd;
 +		struct vpnhide_app_hook_masks *am;
 +
++		amd = kzalloc(sizeof(*amd), GFP_KERNEL);
++		if (!amd)
++			return -ENOMEM;
 +		rcu_read_lock();
 +		am = rcu_dereference(global_app_hook_masks);
 +		if (am) {
-+			amd.count = am->count;
-+			memcpy(amd.masks, am->masks,
-+			       am->count * sizeof(amd.masks[0]));
++			amd->count = am->count;
++			memcpy(amd->masks, am->masks,
++			       am->count * sizeof(amd->masks[0]));
 +		}
 +		rcu_read_unlock();
-+		if (copy_to_user(uarg, &amd, sizeof(amd)))
++		if (copy_to_user(uarg, amd, sizeof(*amd))) {
++			kfree(amd);
 +			return -EFAULT;
++		}
++		kfree(amd);
 +		break;
 +	}
 +
 +	case VH_GET_STATS: {
-+		/* Aggregate intercept ring into per-UID stats */
-+		struct vpnhide_kmod_stats_data sd = {};
++		struct vpnhide_kmod_stats_data *sd;
 +		int i, j;
++
++		sd = kzalloc(sizeof(*sd), GFP_KERNEL);
++		if (!sd)
++			return -ENOMEM;
 +
 +		spin_lock(&intercept_ring.lock);
 +		for (i = 0; i < BUCKETS_COUNT; i++) {
@@ -1253,13 +1365,13 @@ index 000000000..d2bfd9488
 +
 +			if (!r_uid)
 +				continue;
-+			for (j = 0; j < sd.count; j++) {
-+				if (sd.stats[j].uid == r_uid)
++			for (j = 0; j < sd->count; j++) {
++				if (sd->stats[j].uid == r_uid)
 +					goto found;
 +			}
-+			if (sd.count < MAX_STATS_UIDS) {
-+				sd.stats[sd.count].uid = r_uid;
-+				j = sd.count++;
++			if (sd->count < MAX_STATS_UIDS) {
++				sd->stats[sd->count].uid = r_uid;
++				j = sd->count++;
 +			} else {
 +				continue;
 +			}
@@ -1267,7 +1379,7 @@ index 000000000..d2bfd9488
 +			switch (intercept_ring.type[i]) {
 +			case HOOK_SETSOCKOPT:
 +			case HOOK_GETSOCKOPT:
-+				sd.stats[j].sockopt_count++;
++				sd->stats[j].sockopt_count++;
 +				break;
 +			case HOOK_RTNL_FILL:
 +			case HOOK_INET6_FILL:
@@ -1275,29 +1387,32 @@ index 000000000..d2bfd9488
 +			case HOOK_FIB_DUMP:
 +			case HOOK_RT6_FILL:
 +			case HOOK_RT_FILL:
-+				sd.stats[j].netlink_count++;
++				sd->stats[j].netlink_count++;
 +				break;
 +			case HOOK_GETDENTS64:
 +			case HOOK_OPENAT ... HOOK_READLINKAT:
-+				sd.stats[j].proc_count++;
++				sd->stats[j].proc_count++;
 +				break;
 +			case HOOK_CONNECT:
 +			case HOOK_BIND:
-+				sd.stats[j].connect_count++;
++				sd->stats[j].connect_count++;
 +				break;
 +			case HOOK_GETNAME_INET:
 +			case HOOK_GETNAME_INET6:
-+				sd.stats[j].getname_count++;
++				sd->stats[j].getname_count++;
 +				break;
 +			default:
-+				sd.stats[j].ioctl_count++;
++				sd->stats[j].ioctl_count++;
 +				break;
 +			}
 +		}
 +		spin_unlock(&intercept_ring.lock);
 +
-+		if (copy_to_user(uarg, &sd, sizeof(sd)))
++		if (copy_to_user(uarg, sd, sizeof(*sd))) {
++			kfree(sd);
 +			return -EFAULT;
++		}
++		kfree(sd);
 +		break;
 +	}
 +
@@ -1439,10 +1554,10 @@ index 000000000..d2bfd9488
 +MODULE_AUTHOR("soranerai");
 diff --git a/security/vpnhide/hook_fs.c b/security/vpnhide/hook_fs.c
 new file mode 100644
-index 000000000..39b697c18
+index 000000000..bbb3ac1f4
 --- /dev/null
 +++ b/security/vpnhide/hook_fs.c
-@@ -0,0 +1,225 @@
+@@ -0,0 +1,220 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * vpnhide — filesystem, BPF, and UDP hooks
@@ -1527,7 +1642,7 @@ index 000000000..39b697c18
 +		goto out;
 +
 +	if (copy_from_user(keys_buf,
-+			   u64_to_user_ptr(attr->batch.keys_out),
++			   u64_to_user_ptr(attr->batch.keys),
 +			   count * sizeof(*keys_buf)))
 +		goto out;
 +	if (copy_from_user(vals_buf,
@@ -1552,46 +1667,46 @@ index 000000000..39b697c18
 +/* getdents64 — filter VPN interface names from directory listings     */
 +/* ------------------------------------------------------------------ */
 +
-+int vpnhide_getdents64(unsigned int fd,
-+		       struct linux_dirent64 __user *dirent,
-+		       unsigned int count, long retval)
++bool vpnhide_getdents64(unsigned int fd,
++			struct linux_dirent64 __user *dirent,
++			unsigned int count, int *retval)
 +{
-+	struct linux_dirent64 __user *pos, *end;
 +	struct linux_dirent64 *kbuf, *cur, *prev;
 +	uid_t uid = from_kuid(&init_user_ns, current_uid());
++	int nbytes = *retval;
 +	long bytes_left;
 +
-+	if (retval <= 0)
-+		return (int)retval;
++	if (nbytes <= 0)
++		return false;
 +	if (!is_hook_active(HOOK_GETDENTS64, uid))
-+		return (int)retval;
++		return false;
 +
-+	kbuf = kvmalloc(retval, GFP_KERNEL);
++	kbuf = kvmalloc(nbytes, GFP_KERNEL);
 +	if (!kbuf)
-+		return (int)retval;
++		return false;
 +
-+	if (copy_from_user(kbuf, dirent, retval)) {
++	if (copy_from_user(kbuf, dirent, nbytes)) {
 +		kvfree(kbuf);
-+		return (int)retval;
++		return false;
 +	}
 +
-+	bytes_left = retval;
++	bytes_left = nbytes;
 +	prev = NULL;
 +	cur  = kbuf;
 +
-+	while ((char *)cur < (char *)kbuf + retval) {
++	while ((char *)cur < (char *)kbuf + nbytes) {
 +		struct linux_dirent64 *next =
 +			(struct linux_dirent64 *)((char *)cur + cur->d_reclen);
 +
 +		if (vh_is_vpn_name_cached(cur->d_name,
 +					  strnlen(cur->d_name, NAME_MAX))) {
 +			/* Compact: memmove everything after cur back */
-+			long tail = (char *)kbuf + retval -
++			long tail = (char *)kbuf + nbytes -
 +				    (char *)next;
 +			if (tail > 0)
 +				memmove(cur, next, tail);
-+			retval    -= cur->d_reclen;
-+			bytes_left = retval - ((char *)cur - (char *)kbuf);
++			nbytes    -= cur->d_reclen;
++			bytes_left = nbytes - ((char *)cur - (char *)kbuf);
 +			/* don't advance cur — it now points to next entry */
 +			record_kmod_intercept(uid, HOOK_GETDENTS64);
 +		} else {
@@ -1600,9 +1715,10 @@ index 000000000..39b697c18
 +		}
 +	}
 +
-+	copy_to_user(dirent, kbuf, retval);
++	copy_to_user(dirent, kbuf, nbytes);
 +	kvfree(kbuf);
-+	return (int)retval;
++	*retval = nbytes;
++	return true;
 +}
 +EXPORT_SYMBOL_GPL(vpnhide_getdents64);
 +
@@ -1612,12 +1728,6 @@ index 000000000..39b697c18
 +
 +#define VH_PROC_SYS_NET   "/proc/sys/net/"
 +#define VH_SYS_CLASS_NET  "/sys/class/net/"
-+
-+static bool path_in_guarded_dir(const char *path)
-+{
-+	return !strncmp(path, VH_PROC_SYS_NET, strlen(VH_PROC_SYS_NET)) ||
-+	       !strncmp(path, VH_SYS_CLASS_NET, strlen(VH_SYS_CLASS_NET));
-+}
 +
 +bool vpnhide_should_hide_path(const struct path *path)
 +{
@@ -1670,10 +1780,10 @@ index 000000000..39b697c18
 +EXPORT_SYMBOL_GPL(vpnhide_filter_sysctl);
 diff --git a/security/vpnhide/hook_netlink.c b/security/vpnhide/hook_netlink.c
 new file mode 100644
-index 000000000..b6076d5ef
+index 000000000..c82058df0
 --- /dev/null
 +++ b/security/vpnhide/hook_netlink.c
-@@ -0,0 +1,372 @@
+@@ -0,0 +1,392 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * vpnhide — netlink / routing hooks (early-return optimisation)
@@ -1687,6 +1797,7 @@ index 000000000..b6076d5ef
 +#include <linux/skbuff.h>
 +#include <linux/seq_file.h>
 +#include <linux/if_addr.h>
++#include <linux/inetdevice.h>
 +#include <net/addrconf.h>
 +#include <net/fib_rules.h>
 +#include <net/ip_fib.h>
@@ -1695,6 +1806,26 @@ index 000000000..b6076d5ef
 +#include <net/sch_generic.h>
 +
 +#include "vpnhide.h"
++
++/* ------------------------------------------------------------------ */
++/* vpnhide_should_hide_dev — generic per-device hide check             */
++/* Used by rtnetlink, devinet, addrconf, fib_trie, fib_semantics,      */
++/* ip6_fib iterators that walk a net_device list.                      */
++/* ------------------------------------------------------------------ */
++
++bool vpnhide_should_hide_dev(const struct net_device *dev)
++{
++	uid_t uid = from_kuid(&init_user_ns, current_uid());
++
++	if (!is_hook_active(HOOK_RTNL_FILL, uid))
++		return false;
++	if (!is_active_vpn_ifindex(dev->ifindex))
++		return false;
++
++	record_kmod_intercept(uid, HOOK_RTNL_FILL);
++	return true;
++}
++EXPORT_SYMBOL_GPL(vpnhide_should_hide_dev);
 +
 +/* ------------------------------------------------------------------ */
 +/* rtnl_fill_ifinfo — hide interface from RTM_GETLINK / NEWLINK        */
@@ -1811,8 +1942,8 @@ index 000000000..b6076d5ef
 +	if (pt) {
 +		for (i = 0; i < pt->count; i++) {
 +			uid_t tuid = pt->targets[i].uid;
-+			if (rule->uid_range.start <= tuid &&
-+			    tuid <= rule->uid_range.end) {
++			if (rule->uid_range.start.val <= tuid &&
++			    tuid <= rule->uid_range.end.val) {
 +				rcu_read_unlock();
 +				record_kmod_intercept(uid, HOOK_FIB_RULE_FILL);
 +				return true;
@@ -1822,7 +1953,7 @@ index 000000000..b6076d5ef
 +	rcu_read_unlock();
 +
 +	/* Also check global target list */
-+	if (is_target_uid_val(rule->uid_range.start)) {
++	if (is_target_uid_val(rule->uid_range.start.val)) {
 +		record_kmod_intercept(uid, HOOK_FIB_RULE_FILL);
 +		return true;
 +	}
@@ -1846,8 +1977,7 @@ index 000000000..b6076d5ef
 +	if (!is_hook_active(HOOK_RT6_FILL, uid))
 +		return false;
 +
-+	if (rt->fib6_nh)
-+		dev = rt->fib6_nh->fib_nh_dev;
++	dev = rt->fib6_nh->fib_nh_dev;
 +
 +	if (!dev)
 +		return false;
@@ -2048,10 +2178,10 @@ index 000000000..b6076d5ef
 +EXPORT_SYMBOL_GPL(vpnhide_filter_ifconf);
 diff --git a/security/vpnhide/hook_socket.c b/security/vpnhide/hook_socket.c
 new file mode 100644
-index 000000000..0a2c4c9a8
+index 000000000..e35baf9f0
 --- /dev/null
 +++ b/security/vpnhide/hook_socket.c
-@@ -0,0 +1,502 @@
+@@ -0,0 +1,579 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * vpnhide — socket hooks
@@ -2064,6 +2194,7 @@ index 000000000..0a2c4c9a8
 +#include <linux/tcp.h>
 +#include <linux/udp.h>
 +#include <linux/if.h>
++#include <linux/file.h>
 +#include <net/sock.h>
 +#include <net/inet_sock.h>
 +#include <net/ipv6.h>
@@ -2077,8 +2208,8 @@ index 000000000..0a2c4c9a8
 +/*   returns <0 → kernel returns that errno to userspace               */
 +/* ------------------------------------------------------------------ */
 +
-+int vpnhide_setsockopt(struct socket *sock, int level, int optname,
-+		       sockptr_t optval, unsigned int optlen)
++int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
++			    sockptr_t optval, unsigned int optlen)
 +{
 +	struct sock *sk;
 +	uid_t uid;
@@ -2123,7 +2254,6 @@ index 000000000..0a2c4c9a8
 +		}
 +		case SO_MARK: {
 +			/* Force mark to 0 — prevents routing via VPN table */
-+			u32 zero = 0;
 +			if (sk->sk_mark != 0) {
 +				sk->sk_mark = 0;
 +				record_kmod_intercept(uid, HOOK_SETSOCKOPT);
@@ -2169,7 +2299,7 @@ index 000000000..0a2c4c9a8
 +	}
 +	return 0;
 +}
-+EXPORT_SYMBOL_GPL(vpnhide_setsockopt);
++EXPORT_SYMBOL_GPL(vpnhide_setsockopt_sock);
 +
 +/* ------------------------------------------------------------------ */
 +/* getsockopt — called AFTER the real handler with the result buffer   */
@@ -2554,6 +2684,83 @@ index 000000000..0a2c4c9a8
 +	return drop;
 +}
 +EXPORT_SYMBOL_GPL(vpnhide_udp_sendmsg);
++
++bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg,
++			     size_t len, int *err)
++{
++	if (!vpnhide_udp_sendmsg(sk))
++		return false;
++	*err = -EPERM;
++	return true;
++}
++EXPORT_SYMBOL_GPL(vpnhide_udp_sendmsg_pre);
++
++/* ------------------------------------------------------------------ */
++/* Wrappers matching names injected by patch_kernel.py                 */
++/* ------------------------------------------------------------------ */
++
++void vpnhide_bind(struct socket *sock, struct sockaddr __user *umyaddr,
++		  int addrlen)
++{
++	struct sockaddr_storage kaddr;
++
++	if (move_addr_to_kernel(umyaddr, addrlen, &kaddr))
++		return;
++	vpnhide_bind_pre(sock, (struct sockaddr *)&kaddr, addrlen);
++}
++EXPORT_SYMBOL_GPL(vpnhide_bind);
++
++bool vpnhide_connect(struct socket *sock, struct sockaddr __user *uservaddr,
++		     int addrlen, int *ret)
++{
++	struct sockaddr_storage kaddr;
++
++	if (move_addr_to_kernel(uservaddr, addrlen, &kaddr))
++		return false;
++	*ret = vpnhide_connect_pre(sock, (struct sockaddr *)&kaddr, addrlen);
++	return (*ret != 0);
++}
++EXPORT_SYMBOL_GPL(vpnhide_connect);
++
++void vpnhide_getname(struct socket *sock, struct sockaddr *addr,
++		     int peer, int *err)
++{
++	vpnhide_getname_post(sock, addr, peer);
++}
++EXPORT_SYMBOL_GPL(vpnhide_getname);
++
++bool vpnhide_setsockopt(int fd, int level, int optname,
++			char __user *user_optval, unsigned int optlen, int *ret)
++{
++	struct fd f = fdget(fd);
++	struct socket *sock;
++	int err = 0;
++	int r;
++
++	if (!f.file)
++		return false;
++	sock = sock_from_file(f.file, &err);
++	if (!sock) {
++		fdput(f);
++		return false;
++	}
++	r = vpnhide_setsockopt_sock(sock, level, optname,
++				    USER_SOCKPTR(user_optval), optlen);
++	fdput(f);
++	if (r) {
++		*ret = r;
++		return true;
++	}
++	return false;
++}
++EXPORT_SYMBOL_GPL(vpnhide_setsockopt);
++
++void vpnhide_getsockopt(struct socket *sock, int level, int optname,
++			char __user *optval, int __user *optlen, int *err)
++{
++	vpnhide_getsockopt_post(sock, level, optname, optval, optlen);
++}
++EXPORT_SYMBOL_GPL(vpnhide_getsockopt);
 diff --git a/security/vpnhide/vpnhide.h b/security/vpnhide/vpnhide.h
 new file mode 100644
 index 000000000..f4dec8ae8
