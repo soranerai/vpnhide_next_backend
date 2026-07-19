@@ -19,9 +19,21 @@ SIOCGIFNETMASK = 0x891B
 
 # Netlink constants for tc_qdisc check
 NETLINK_ROUTE = 0
-RTM_GETQDISC = 38
+RTM_GETQDISC  = 38
+RTM_GETRULE   = 34
+RTM_NEWRULE   = 32
 NLM_F_REQUEST = 0x01
-NLM_F_DUMP = 0x300
+NLM_F_DUMP    = 0x300
+
+# fib_rule_hdr (12 bytes): family(1) dst_len(1) src_len(1) tos(1)
+#   table(1) res1(1) res2(1) action(1) flags(4)
+FIB_RULE_HDR_FMT  = "BBBBBBBBI"
+FIB_RULE_HDR_SIZE = struct.calcsize(FIB_RULE_HDR_FMT)
+
+# Netlink attribute constants for FIB rules
+FRA_IIFNAME  = 3
+FRA_OIFNAME  = 17
+FRA_UID_RANGE = 20
 
 
 def safe_fork():
@@ -809,6 +821,139 @@ def test_tcp_info_mss():
     return True
 
 
+def _netlink_dump_rules():
+    """Send RTM_GETRULE dump, return list of (iifname, oifname, uid_start, uid_end, table)."""
+    sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_ROUTE)
+    sock.bind((0, 0))
+
+    # RTM_GETRULE dump: nlmsghdr(16) + fib_rule_hdr(12)
+    frh = struct.pack(FIB_RULE_HDR_FMT, socket.AF_UNSPEC, 0, 0, 0, 0, 0, 0, 0, 0)
+    nlhdr = struct.pack("IHHII", 16 + len(frh), RTM_GETRULE,
+                        NLM_F_REQUEST | NLM_F_DUMP, 2, 0)
+    sock.send(nlhdr + frh)
+
+    rules = []
+    while True:
+        data = sock.recv(65536)
+        offset = 0
+        done = False
+        while offset + 16 <= len(data):
+            nl_len, nl_type, _nl_flags, _nl_seq, _nl_pid = struct.unpack_from("IHHII", data, offset)
+            nl_len = max(nl_len, 16)
+            if nl_type == 3:  # NLMSG_DONE
+                done = True
+                break
+            if nl_type == RTM_NEWRULE:
+                # parse fib_rule_hdr
+                hdr_off = offset + 16
+                if hdr_off + FIB_RULE_HDR_SIZE <= len(data):
+                    frh_fields = struct.unpack_from(FIB_RULE_HDR_FMT, data, hdr_off)
+                    table = frh_fields[4]
+                    # parse RTAs
+                    rta_off = hdr_off + FIB_RULE_HDR_SIZE
+                    iifname = b""
+                    oifname = b""
+                    uid_start = 0xFFFFFFFF
+                    uid_end   = 0xFFFFFFFF
+                    while rta_off + 4 <= offset + nl_len:
+                        rta_len, rta_type = struct.unpack_from("HH", data, rta_off)
+                        if rta_len < 4:
+                            break
+                        rta_data = data[rta_off + 4: rta_off + rta_len]
+                        if rta_type == FRA_IIFNAME:
+                            iifname = rta_data.rstrip(b"\x00")
+                        elif rta_type == FRA_OIFNAME:
+                            oifname = rta_data.rstrip(b"\x00")
+                        elif rta_type == FRA_UID_RANGE and len(rta_data) >= 8:
+                            uid_start, uid_end = struct.unpack_from("II", rta_data)
+                        rta_off += (rta_len + 3) & ~3
+                    rules.append((iifname, oifname, uid_start, uid_end, table))
+            offset += nl_len
+        if done:
+            break
+    sock.close()
+    return rules
+
+
+def _rule_matches_vpn(iifname, oifname, vpn_name_bytes):
+    return iifname == vpn_name_bytes or oifname == vpn_name_bytes
+
+
+def test_netlink_getrule(vpn0_name):
+    """RTM_GETRULE dump must not expose vpn0 iif/oif rules to target UID."""
+    print("\n--- netlink_getrule checks ---")
+    vpn_bytes = vpn0_name.encode()
+
+    # Non-target (root): vpn0 rules must be visible
+    try:
+        rules = _netlink_dump_rules()
+        vpn_rules = [r for r in rules if _rule_matches_vpn(r[0], r[1], vpn_bytes)]
+        print(f"[netlink_getrule] Non-target: found {len(vpn_rules)} vpn0 rule(s) — expected >=0")
+        print("[netlink_getrule] Non-target: RTM_GETRULE dump succeeded")
+    except Exception as e:
+        print(f"FAIL: netlink_getrule non-target: {e}")
+        return False
+
+    # Target (uid 5555): no vpn0 rules must appear
+    pid = safe_fork()
+    if pid == 0:
+        try:
+            os.setuid(5555)
+            rules = _netlink_dump_rules()
+            vpn_rules = [r for r in rules if _rule_matches_vpn(r[0], r[1], vpn_bytes)]
+            print(f"[netlink_getrule] Target: vpn0 rules visible: {len(vpn_rules)}")
+            if vpn_rules:
+                print(f"FAIL: netlink_getrule target: vpn0 rule still visible: {vpn_rules[0]}")
+                sys.exit(1)
+            print("[netlink_getrule] Target: no vpn0 rules visible as expected")
+            sys.exit(0)
+        except Exception as e:
+            print(f"FAIL: netlink_getrule child: {e}")
+            sys.exit(1)
+    else:
+        _, status = os.waitpid(pid, 0)
+        if status != 0:
+            return False
+    return True
+
+
+def test_netlink_getrule_uid_leak(vpn0_name):
+    """RTM_GETRULE must not expose UID split-routing rules to target UID."""
+    print("\n--- netlink_getrule_uid_leak checks ---")
+
+    # Target (uid 5555): UID split-routing rules (table > 100, not 253/254/255)
+    # pointing to any app uid range must be hidden
+    pid = safe_fork()
+    if pid == 0:
+        try:
+            os.setuid(5555)
+            rules = _netlink_dump_rules()
+            leaked = []
+            for iif, oif, uid_start, uid_end, table in rules:
+                # rule has a uid_range with actual bounds (end != 0xFFFFFFFF)
+                if uid_end == 0xFFFFFFFF:
+                    continue
+                if table in (253, 254, 255) or table <= 100:
+                    continue
+                # visible uid-split rule with non-trivial range — this is a leak
+                if uid_start >= 10000 or uid_end >= 10000:
+                    leaked.append((uid_start, uid_end, table))
+            print(f"[getrule_uid_leak] Target: leaked uid-split rules: {leaked}")
+            if leaked:
+                print(f"FAIL: getrule_uid_leak target: {len(leaked)} UID split-routing rule(s) visible")
+                sys.exit(1)
+            print("[getrule_uid_leak] Target: no UID split-routing rules visible as expected")
+            sys.exit(0)
+        except Exception as e:
+            print(f"FAIL: getrule_uid_leak child: {e}")
+            sys.exit(1)
+    else:
+        _, status = os.waitpid(pid, 0)
+        if status != 0:
+            return False
+    return True
+
+
 def main():
     try:
         vpn0_idx = socket.if_nametoindex("vpn0")
@@ -828,20 +973,22 @@ def main():
             success = False
         results.append((name, tag))
 
-    run("dev_ioctl",          test_dev_ioctl,         vpn0_idx)
-    run("setsockopt",         test_setsockopt,        vpn0_idx)
-    run("getsockopt",         test_getsockopt,        vpn0_idx)
-    run("getsockname",        test_getsockname)
-    run("connect_port_block", test_connect_port_block)
-    run("bind_port_block",    test_bind_port_block)
-    run("bpf_laundering",     test_bpf_laundering,    vpn0_idx)
-    run("proc_sys_net",       test_proc_sys_net)
-    run("udp_queue_pressure", test_udp_queue_pressure)
-    run("tc_qdisc",           test_tc_qdisc,          vpn0_idx)
-    run("pmtu_discover",      test_pmtu_discover)
-    run("gso_asymmetry",      test_gso_asymmetry)
-    run("ipv6_link_local",    test_ipv6_link_local,   vpn0_idx)
-    run("tcp_info_mss",       test_tcp_info_mss)
+    run("dev_ioctl",              test_dev_ioctl,              vpn0_idx)
+    run("setsockopt",             test_setsockopt,             vpn0_idx)
+    run("getsockopt",             test_getsockopt,             vpn0_idx)
+    run("getsockname",            test_getsockname)
+    run("connect_port_block",     test_connect_port_block)
+    run("bind_port_block",        test_bind_port_block)
+    run("bpf_laundering",         test_bpf_laundering,         vpn0_idx)
+    run("proc_sys_net",           test_proc_sys_net)
+    run("udp_queue_pressure",     test_udp_queue_pressure)
+    run("tc_qdisc",               test_tc_qdisc,               vpn0_idx)
+    run("pmtu_discover",          test_pmtu_discover)
+    run("gso_asymmetry",          test_gso_asymmetry)
+    run("ipv6_link_local",        test_ipv6_link_local,        vpn0_idx)
+    run("tcp_info_mss",           test_tcp_info_mss)
+    run("netlink_getrule",        test_netlink_getrule,        "vpn0")
+    run("netlink_getrule_uid_leak", test_netlink_getrule_uid_leak, "vpn0")
 
     print("\n--- Verification Summary ---")
     for name, tag in results:

@@ -74,7 +74,7 @@ index 5813bc37e..fd8ac3d51 100644
  #include <linux/compat.h>
 diff --git a/include/linux/vpnhide.h b/include/linux/vpnhide.h
 new file mode 100644
-index 000000000..00000000
+index 000000000..074f9ed9a
 --- /dev/null
 +++ b/include/linux/vpnhide.h
 @@ -0,0 +1,145 @@
@@ -315,32 +315,16 @@ index a6159624e..e0aadc537 100644
  #include <net/ip_tunnels.h>
  #include <linux/indirect_call_wrapper.h>
  
-@@ -991,6 +995,29 @@ static int fib_nl_fill_rule(struct sk_buff *skb, struct fib_rule *rule,
+@@ -991,6 +995,13 @@ static int fib_nl_fill_rule(struct sk_buff *skb, struct fib_rule *rule,
  	struct nlmsghdr *nlh;
  	struct fib_rule_hdr *frh;
  
 +#ifdef CONFIG_VPNHIDE
-+	{
-+		uid_t _uid = from_kuid(&init_user_ns, current_uid());
-+		if (is_target_uid_val(_uid)) {
-+			if (rule->iifname[0] && vpnhide_should_hide_ifname(rule->iifname))
-+				return 0;
-+			if (rule->oifname[0] && vpnhide_should_hide_ifname(rule->oifname))
-+				return 0;
-+			if (uid_range_set(&rule->uid_range)) {
-+				u32 s = from_kuid(&init_user_ns, rule->uid_range.start);
-+				u32 e = from_kuid(&init_user_ns, rule->uid_range.end);
-+				u32 t = rule->table;
-+				/* check_netlink_getrule: caller uid in [s,e] with non-main table */
-+				if (_uid >= s && _uid <= e &&
-+				    t > 100 && t != 253 && t != 254 && t != 255)
-+					return 0;
-+				/* check_uid_route_rules_leak: rule covers Android app uid space */
-+				if ((s >= 10000 || e >= 10000) && e != (u32)~0U && e > s)
-+					return 0;
-+			}
-+		}
-+	}
++	if (is_target_uid() &&
++	    ((rule->iifname[0] && vpnhide_should_hide_ifname(rule->iifname)) ||
++	     (rule->oifname[0] && vpnhide_should_hide_ifname(rule->oifname)) ||
++	    is_target_uid_val(from_kuid(&init_user_ns, rule->uid_range.start))))
++		return 0;
 +#endif
  	nlh = nlmsg_put(skb, pid, seq, type, sizeof(*frh), flags);
  	if (nlh == NULL)
@@ -676,17 +660,15 @@ index 538503720..5f8729898 100644
  
  static void udpv6_destruct_sock(struct sock *sk)
  {
-@@ -1316,6 +1320,15 @@ int udpv6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
+@@ -1316,6 +1320,13 @@ int udpv6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
  	int is_udplite = IS_UDPLITE(sk);
  	int (*getfrag)(void *, char *, int, int, int, struct sk_buff *);
-
+ 
 +#ifdef CONFIG_VPNHIDE
 +	{
 +		int _err = 0;
 +		if (vpnhide_udp_sendmsg_pre(sk, msg, len, &_err))
 +			return _err;
-+		if (vpnhide_udpv6_sendmsg_ll(sk, msg))
-+			return -EAGAIN;
 +	}
 +#endif
  	ipcm6_init(&ipc6);
@@ -2395,12 +2377,13 @@ index 000000000..9da398157
 +EXPORT_SYMBOL_GPL(vpnhide_filename_lookup);
 diff --git a/security/vpnhide/hook_netlink.c b/security/vpnhide/hook_netlink.c
 new file mode 100644
-index 000000000..47f6c9b2b
+index 000000000..ac3d239e8
 --- /dev/null
 +++ b/security/vpnhide/hook_netlink.c
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,68 @@
 +// SPDX-License-Identifier: GPL-2.0
 +#include <linux/netdevice.h>
++#include <net/fib_rules.h>
 +#include "vpnhide.h"
 +
 +bool vpnhide_should_hide_dev(const struct net_device *dev)
@@ -2421,9 +2404,54 @@ index 000000000..47f6c9b2b
 +	return true;
 +}
 +EXPORT_SYMBOL_GPL(vpnhide_should_hide_dev);
++
++bool vpnhide_skip_fib_rule(struct sk_buff *skb, struct fib_rule *rule)
++{
++	uid_t uid;
++
++	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_FIB_RULE_FILL)))
++		return false;
++	uid = from_kuid(&init_user_ns, current_uid());
++	if (!is_hook_active(HOOK_FIB_RULE_FILL, uid))
++		return false;
++	if (!is_target_uid_val(uid))
++		return false;
++
++	rcu_read_lock();
++
++	/* Hide rules that reference a VPN interface by name */
++	if ((rule->iifname[0] != '\0' && is_active_vpn_ifname(rule->iifname)) ||
++	    (rule->oifname[0] != '\0' && is_active_vpn_ifname(rule->oifname))) {
++		rcu_read_unlock();
++		record_kmod_intercept(uid, HOOK_FIB_RULE_FILL);
++		return true;
++	}
++
++	/* Hide UID split-routing rules — covers "RTM_GETRULE UID route leak":
++	 * any rule with a uid_range that includes the target or any app UID
++	 * (>= 10000) pointing to a non-main/default/local table. */
++	{
++		uid_t start = from_kuid(&init_user_ns, rule->uid_range.start);
++		uid_t end   = from_kuid(&init_user_ns, rule->uid_range.end);
++
++		if (end != (uid_t)~0 &&
++		    (start >= 10000 || end >= 10000 ||
++		     is_target_uid_val(start) || is_target_uid_val(end)) &&
++		    rule->table != 253 && rule->table != 254 &&
++		    rule->table != 255 && rule->table > 100) {
++			rcu_read_unlock();
++			record_kmod_intercept(uid, HOOK_FIB_RULE_FILL);
++			return true;
++		}
++	}
++
++	rcu_read_unlock();
++	return false;
++}
++EXPORT_SYMBOL_GPL(vpnhide_skip_fib_rule);
 diff --git a/security/vpnhide/hook_socket.c b/security/vpnhide/hook_socket.c
 new file mode 100644
-index 000000000..00000000
+index 000000000..101cf4aa7
 --- /dev/null
 +++ b/security/vpnhide/hook_socket.c
 @@ -0,0 +1,648 @@

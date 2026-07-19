@@ -61,8 +61,8 @@ diff --git a/net/socket.c b/net/socket.c
 
 +		{
 +			sockptr_t _sp = USER_SOCKPTR(optval);
-+			int _ret = vpnhide_setsockopt(sock, level, optname,
-+						      _sp, optlen);
++			int _ret = vpnhide_setsockopt_sock(sock, level, optname,
++							   _sp, optlen);
 +			if (_ret) {
 +				fput_light(sock->file, fput_needed);
 +				return _ret;
