@@ -11,8 +11,10 @@
 #include <linux/uaccess.h>
 #include <linux/rcupdate.h>
 #include <linux/spinlock.h>
+#include <linux/mutex.h>
 #include <linux/wait.h>
 #include <linux/atomic.h>
+#include <linux/vmalloc.h>
 #include <linux/sort.h>
 #include <linux/netdevice.h>
 
@@ -66,6 +68,24 @@ static struct {
 	ktime_t ts[BUCKETS_COUNT];
 	int head;
 } intercept_ring;
+
+/* Java-side stats/status written via device write() */
+static char java_stats_buf[4096];
+static DEFINE_MUTEX(java_stats_lock);
+static char java_status_buf[256];
+static DEFINE_MUTEX(java_status_lock);
+
+/* Cover iface name written via device write() */
+static char global_cover_ifname[IFNAMSIZ];
+static DEFINE_SPINLOCK(cover_ifname_lock);
+
+/* Per-open reader state for blocking read() */
+struct vpnhide_dev_reader {
+	unsigned long generation;
+	char *buf;
+	size_t buf_len;
+	size_t read_pos;
+};
 
 /* ------------------------------------------------------------------ */
 /* FNV-1a hash                                                         */
@@ -197,7 +217,8 @@ bool lookup_app_kernel_mask(uid_t uid, unsigned int *out)
 	ahm = rcu_dereference(global_app_hook_masks);
 	if (ahm) {
 		for (i = 0; i < ahm->count; i++) {
-			if (ahm->masks[i].uid == uid) {
+			if (ahm->masks[i].uid == uid &&
+			    ahm->masks[i].has_kernel_override) {
 				*out = ahm->masks[i].kernel_mask;
 				found = true;
 				break;
@@ -318,6 +339,184 @@ int update_spoof_ip(const struct vpnhide_spoof_ip *sip)
 }
 
 /* ------------------------------------------------------------------ */
+/* Device open / release / read / write                               */
+/* ------------------------------------------------------------------ */
+
+static int vpnhide_dev_open(struct inode *inode, struct file *file)
+{
+	struct vpnhide_dev_reader *reader;
+
+	reader = kzalloc(sizeof(*reader), GFP_KERNEL);
+	if (!reader)
+		return -ENOMEM;
+	file->private_data = reader;
+	return 0;
+}
+
+static int vpnhide_dev_release(struct inode *inode, struct file *file)
+{
+	struct vpnhide_dev_reader *reader = file->private_data;
+
+	if (reader) {
+		kvfree(reader->buf);
+		kfree(reader);
+	}
+	return 0;
+}
+
+static ssize_t vpnhide_dev_read(struct file *file, char __user *buf,
+				size_t count, loff_t *ppos)
+{
+	struct vpnhide_dev_reader *reader = file->private_data;
+	size_t to_copy;
+
+	if (!reader)
+		return -EINVAL;
+
+	if (reader->read_pos >= reader->buf_len) {
+		unsigned long gen = (unsigned long)atomic_read(&vpnhide_config_generation);
+		struct vpnhide_targets *lt;
+		struct vpnhide_iface_prefixes *ip;
+		struct vpnhide_app_hook_masks *ahm;
+		int offset = 0, i;
+
+		if (reader->generation >= gen) {
+			if (from_kuid(&init_user_ns, current_uid()) != 1000)
+				return 0;
+			if (file->f_flags & O_NONBLOCK)
+				return -EAGAIN;
+			if (wait_event_interruptible(vpnhide_config_wait,
+				reader->generation <
+				(unsigned long)atomic_read(&vpnhide_config_generation)))
+				return -ERESTARTSYS;
+		}
+
+		kvfree(reader->buf);
+		reader->buf = kvmalloc(65536, GFP_KERNEL);
+		if (!reader->buf)
+			return -ENOMEM;
+
+		offset += scnprintf(reader->buf + offset, 65536 - offset,
+				    "java_hook_mask: %u\n", READ_ONCE(java_hooks_mask));
+		offset += scnprintf(reader->buf + offset, 65536 - offset,
+				    "java_stats_clear_gen: %d\n",
+				    atomic_read(&java_stats_clear_generation));
+		offset += scnprintf(reader->buf + offset, 65536 - offset,
+				    "stats_bucket_secs: %d\n",
+				    atomic_read(&stats_bucket_secs));
+		offset += scnprintf(reader->buf + offset, 65536 - offset,
+				    "debug_enabled: %d\n", READ_ONCE(debug_enabled));
+
+		rcu_read_lock();
+		lt = rcu_dereference(global_lsposed_targets);
+		offset += scnprintf(reader->buf + offset, 65536 - offset,
+				    "lsposed_targets:");
+		if (lt) {
+			for (i = 0; i < lt->count; i++)
+				offset += scnprintf(reader->buf + offset,
+						    65536 - offset, " %u", lt->uids[i]);
+		}
+		offset += scnprintf(reader->buf + offset, 65536 - offset, "\n");
+
+		ip = rcu_dereference(global_iface_prefixes);
+		offset += scnprintf(reader->buf + offset, 65536 - offset,
+				    "iface_prefixes:");
+		if (ip) {
+			for (i = 0; i < ip->count; i++)
+				offset += scnprintf(reader->buf + offset,
+						    65536 - offset, " %s", ip->prefixes[i]);
+		}
+		offset += scnprintf(reader->buf + offset, 65536 - offset, "\n");
+
+		ahm = rcu_dereference(global_app_hook_masks);
+		offset += scnprintf(reader->buf + offset, 65536 - offset,
+				    "app_java_hook_mask:");
+		if (ahm) {
+			for (i = 0; i < ahm->count; i++) {
+				if (!ahm->masks[i].has_java_override)
+					continue;
+				offset += scnprintf(reader->buf + offset,
+						    65536 - offset, " %u:%u",
+						    ahm->masks[i].uid,
+						    ahm->masks[i].java_mask);
+			}
+		}
+		offset += scnprintf(reader->buf + offset, 65536 - offset, "\n");
+		rcu_read_unlock();
+
+		spin_lock(&cover_ifname_lock);
+		offset += scnprintf(reader->buf + offset, 65536 - offset,
+				    "cover_iface: %s\n",
+				    global_cover_ifname[0] ? global_cover_ifname : "none");
+		spin_unlock(&cover_ifname_lock);
+
+		offset += scnprintf(reader->buf + offset, 65536 - offset, "\n");
+
+		reader->buf_len = offset;
+		reader->generation = (unsigned long)atomic_read(&vpnhide_config_generation);
+		reader->read_pos = 0;
+	}
+
+	to_copy = min(count, reader->buf_len - reader->read_pos);
+	if (copy_to_user(buf, reader->buf + reader->read_pos, to_copy))
+		return -EFAULT;
+	reader->read_pos += to_copy;
+	return to_copy;
+}
+
+static ssize_t vpnhide_dev_write(struct file *file, const char __user *buf,
+				 size_t count, loff_t *ppos)
+{
+	char *kbuf;
+
+	if (count > 4096)
+		return -EINVAL;
+	kbuf = kmalloc(count + 1, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
+	if (copy_from_user(kbuf, buf, count)) {
+		kfree(kbuf);
+		return -EFAULT;
+	}
+	kbuf[count] = '\0';
+
+	if (strncmp(kbuf, "stats:", 6) == 0) {
+		mutex_lock(&java_stats_lock);
+		strncpy(java_stats_buf, kbuf + 6, sizeof(java_stats_buf) - 1);
+		java_stats_buf[sizeof(java_stats_buf) - 1] = '\0';
+		mutex_unlock(&java_stats_lock);
+	} else if (strncmp(kbuf, "status:", 7) == 0) {
+		mutex_lock(&java_status_lock);
+		strncpy(java_status_buf, kbuf + 7, sizeof(java_status_buf) - 1);
+		java_status_buf[sizeof(java_status_buf) - 1] = '\0';
+		mutex_unlock(&java_status_lock);
+	} else if (strcmp(kbuf, "clear_stats") == 0) {
+		mutex_lock(&java_stats_lock);
+		java_stats_buf[0] = '\0';
+		mutex_unlock(&java_stats_lock);
+		atomic_inc(&java_stats_clear_generation);
+		atomic_inc(&vpnhide_config_generation);
+		wake_up_all(&vpnhide_config_wait);
+	} else if (strncmp(kbuf, "cover_iface:", 12) == 0) {
+		char *val = kbuf + 12;
+		size_t len = strlen(val);
+
+		if (len > 0 && val[len - 1] == '\n') { val[--len] = '\0'; }
+		spin_lock(&cover_ifname_lock);
+		if (len == 0 || strcmp(val, "none") == 0)
+			global_cover_ifname[0] = '\0';
+		else
+			strlcpy(global_cover_ifname, val, IFNAMSIZ);
+		spin_unlock(&cover_ifname_lock);
+		atomic_inc(&vpnhide_config_generation);
+		wake_up_all(&vpnhide_config_wait);
+	}
+
+	kfree(kbuf);
+	return count;
+}
+
+/* ------------------------------------------------------------------ */
 /* IOCTL dispatch                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -326,6 +525,9 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 {
 	void __user *uarg = (void __user *)arg;
 	int ret = 0;
+
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
 
 	switch (cmd) {
 
@@ -721,6 +923,102 @@ found:
 		break;
 	}
 
+	case VH_GET_LSPOSED_TARGETS: {
+		struct vpnhide_ioctl_data *td;
+		struct vpnhide_targets *t;
+		int i;
+
+		td = kzalloc(sizeof(*td), GFP_KERNEL);
+		if (!td)
+			return -ENOMEM;
+		rcu_read_lock();
+		t = rcu_dereference(global_lsposed_targets);
+		if (t) {
+			td->count = t->count;
+			for (i = 0; i < t->count; i++)
+				td->uids[i] = t->uids[i];
+		}
+		rcu_read_unlock();
+		if (copy_to_user(uarg, td, sizeof(*td))) {
+			kfree(td);
+			return -EFAULT;
+		}
+		kfree(td);
+		break;
+	}
+
+	case VH_SET_PORT_RULES: {
+		struct vpnhide_port_ioctl_data *pd;
+		struct vpnhide_port_targets *np, *old;
+
+		pd = kzalloc(sizeof(*pd), GFP_KERNEL);
+		if (!pd)
+			return -ENOMEM;
+		if (copy_from_user(pd, uarg, sizeof(*pd))) {
+			kfree(pd);
+			return -EFAULT;
+		}
+		if (pd->count < 0 || pd->count > MAX_TARGET_UIDS) {
+			kfree(pd);
+			return -EINVAL;
+		}
+		np = kzalloc(sizeof(*np), GFP_KERNEL);
+		if (!np) {
+			kfree(pd);
+			return -ENOMEM;
+		}
+		np->count = pd->count;
+		memcpy(np->targets, pd->targets,
+		       pd->count * sizeof(np->targets[0]));
+		kfree(pd);
+
+		spin_lock(&port_targets_update_lock);
+		old = rcu_dereference_protected(global_port_targets,
+				lockdep_is_held(&port_targets_update_lock));
+		rcu_assign_pointer(global_port_targets, np);
+		spin_unlock(&port_targets_update_lock);
+		if (old) { synchronize_rcu(); kfree(old); }
+		break;
+	}
+
+	case VH_GET_IFACE_PREFIXES: {
+		struct vpnhide_iface_ioctl_data pd;
+		struct vpnhide_iface_prefixes *p;
+
+		memset(&pd, 0, sizeof(pd));
+		rcu_read_lock();
+		p = rcu_dereference(global_iface_prefixes);
+		if (p) {
+			pd.count = p->count;
+			memcpy(pd.prefixes, p->prefixes,
+			       p->count * MAX_IFACE_LEN);
+		}
+		rcu_read_unlock();
+		if (copy_to_user(uarg, &pd, sizeof(pd)))
+			return -EFAULT;
+		break;
+	}
+
+	case VH_GET_JAVA_STATS: {
+		mutex_lock(&java_stats_lock);
+		if (copy_to_user(uarg, java_stats_buf, sizeof(java_stats_buf))) {
+			mutex_unlock(&java_stats_lock);
+			return -EFAULT;
+		}
+		mutex_unlock(&java_stats_lock);
+		break;
+	}
+
+	case VH_GET_HOOK_STATUS: {
+		mutex_lock(&java_status_lock);
+		if (copy_to_user(uarg, java_status_buf, sizeof(java_status_buf))) {
+			mutex_unlock(&java_status_lock);
+			return -EFAULT;
+		}
+		mutex_unlock(&java_status_lock);
+		break;
+	}
+
 	default:
 		ret = -ENOTTY;
 		break;
@@ -729,9 +1027,13 @@ found:
 }
 
 static const struct file_operations vpnhide_fops = {
+	.owner          = THIS_MODULE,
+	.open           = vpnhide_dev_open,
+	.release        = vpnhide_dev_release,
+	.read           = vpnhide_dev_read,
+	.write          = vpnhide_dev_write,
 	.unlocked_ioctl = handle_vpnhide_ioctl,
 	.compat_ioctl   = handle_vpnhide_ioctl,
-	.owner          = THIS_MODULE,
 };
 
 static struct miscdevice vpnhide_misc = {
