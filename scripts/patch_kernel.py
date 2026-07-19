@@ -559,6 +559,127 @@ def patch_net_ipv6_udp_c(content):
     return content, changed
 
 
+def patch_net_core_dev_ioctl_c(content):
+    changed = False
+
+    inc = guard('#include "../../security/vpnhide/vpnhide.h"\n')
+    content, c = add_include(content, inc, [
+        '#include <net/wext.h>',
+        '#include <net/dsa.h>',
+        '#include <linux/wireless.h>',
+        '#include <linux/rtnetlink.h>',
+    ])
+    if c:
+        changed = True
+
+    # dev_ifconf: skip VPN interfaces — inject AFTER 'int done;' to respect C90 decl-before-stmt
+    if 'vpnhide_should_hide_dev' not in content:
+        anchor = '\tfor_each_netdev(net, dev) {\n\t\tint done;\n'
+        hook = guard(
+            '\t\tif (vpnhide_should_hide_dev(dev))\n'
+            '\t\t\tcontinue;\n'
+        )
+        content, ok = insert_after(content, anchor, hook)
+        if not ok:
+            # Fallback: inject after opening brace only
+            anchor2 = '\tfor_each_netdev(net, dev) {\n'
+            content, ok = insert_after(content, anchor2, hook)
+        if ok:
+            changed = True
+        else:
+            print("WARNING: dev_ifconf for_each_netdev anchor not found")
+
+    # dev_ifsioc_locked: return -ENODEV for VPN interfaces after the NULL check
+    func_idx = content.find('static int dev_ifsioc_locked(')
+    if func_idx != -1:
+        func_end = content.find('\nstatic ', func_idx + 1)
+        func_body = content[func_idx:func_end] if func_end != -1 else content[func_idx:]
+        if 'vpnhide_should_hide_dev(dev)' not in func_body:
+            nodev_idx = content.find('\tif (!dev)\n\t\treturn -ENODEV;\n', func_idx)
+            if nodev_idx != -1:
+                pos = nodev_idx + len('\tif (!dev)\n\t\treturn -ENODEV;\n')
+                hook = guard(
+                    '\tif (vpnhide_should_hide_dev(dev))\n'
+                    '\t\treturn -ENODEV;\n'
+                )
+                content = content[:pos] + hook + content[pos:]
+                changed = True
+            else:
+                print("WARNING: dev_ifsioc_locked -ENODEV anchor not found")
+    else:
+        print("WARNING: dev_ifsioc_locked not found in dev_ioctl.c")
+
+    return content, changed
+
+
+def patch_net_core_fib_rules_c(content):
+    changed = False
+
+    inc = guard('#include "../../security/vpnhide/vpnhide.h"\n')
+    content, c = add_include(content, inc, [
+        '#include <net/fib_rules.h>',
+        '#include <net/sock.h>',
+        '#include <linux/module.h>',
+    ])
+    if c:
+        changed = True
+
+    # fib_nl_fill_rule: skip rules for VPN interfaces before building the netlink msg
+    if 'vpnhide_should_hide_ifname' not in content:
+        func_idx = content.find('static int fib_nl_fill_rule(')
+        if func_idx != -1:
+            nlh_idx = content.find(
+                '\tnlh = nlmsg_put(skb, pid, seq, type, sizeof(*frh), flags);',
+                func_idx
+            )
+            if nlh_idx != -1:
+                hook = guard(
+                    '\tif ((rule->iifname[0] && vpnhide_should_hide_ifname(rule->iifname)) ||\n'
+                    '\t    (rule->oifname[0] && vpnhide_should_hide_ifname(rule->oifname)))\n'
+                    '\t\treturn 0;\n'
+                )
+                content = content[:nlh_idx] + hook + content[nlh_idx:]
+                changed = True
+            else:
+                print("WARNING: fib_nl_fill_rule nlmsg_put anchor not found")
+        else:
+            print("WARNING: fib_nl_fill_rule not found in fib_rules.c")
+
+    return content, changed
+
+
+def patch_net_ipv6_af_inet6_c(content):
+    changed = False
+
+    inc = guard('#include "../../security/vpnhide/vpnhide.h"\n')
+    content, c = add_include(content, inc, [
+        '#include <net/addrconf.h>',
+        '#include <net/inet_common.h>',
+        '#include <linux/inet.h>',
+        '#include <linux/module.h>',
+    ])
+    if c:
+        changed = True
+
+    # __inet6_bind: call vpnhide_inet6_bind_ll right after the AF_INET6 family check
+    if 'vpnhide_inet6_bind_ll' not in content:
+        anchor = '\tif (addr->sin6_family != AF_INET6)\n\t\treturn -EAFNOSUPPORT;\n'
+        hook = guard(
+            '\t{\n'
+            '\t\tint _r = vpnhide_inet6_bind_ll(sk, uaddr, addr_len);\n'
+            '\t\tif (_r)\n'
+            '\t\t\treturn _r;\n'
+            '\t}\n'
+        )
+        content, ok = insert_after(content, anchor, hook)
+        if ok:
+            changed = True
+        else:
+            print("WARNING: AF_INET6 family check anchor not found in af_inet6.c")
+
+    return content, changed
+
+
 def patch_kernel_bpf_syscall_c(content):
     inc = guard('#include "../../security/vpnhide/vpnhide.h"\n')
     content, changed = add_include(content, inc, [
@@ -660,6 +781,9 @@ def main():
     patch_file(os.path.join(d, "net/ipv4/udp.c"),          patch_net_ipv4_udp_c)
     patch_file(os.path.join(d, "net/ipv6/udp.c"),          patch_net_ipv6_udp_c)
     patch_file(os.path.join(d, "kernel/bpf/syscall.c"),    patch_kernel_bpf_syscall_c)
+    patch_file(os.path.join(d, "net/core/dev_ioctl.c"),    patch_net_core_dev_ioctl_c)
+    patch_file(os.path.join(d, "net/core/fib_rules.c"),    patch_net_core_fib_rules_c)
+    patch_file(os.path.join(d, "net/ipv6/af_inet6.c"),     patch_net_ipv6_af_inet6_c)
 
     print("=== VPNHide patcher: done ===")
 

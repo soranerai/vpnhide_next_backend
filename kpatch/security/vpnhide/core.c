@@ -134,6 +134,14 @@ void vh_rebuild_name_cache(const struct vpnhide_vpn_ifindexes *idata)
 	}
 }
 
+bool vpnhide_should_hide_ifname(const char *ifname)
+{
+	if (!ifname || !ifname[0])
+		return false;
+	return is_active_vpn_ifname(ifname);
+}
+EXPORT_SYMBOL_GPL(vpnhide_should_hide_ifname);
+
 bool vh_is_vpn_name_cached(const char *name, size_t len)
 {
 	struct vh_vpn_name_cache *nc;

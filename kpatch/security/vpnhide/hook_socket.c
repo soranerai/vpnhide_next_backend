@@ -345,6 +345,13 @@ void vpnhide_getname_post(struct socket *sock, struct sockaddr *addr, int peer)
 	    !is_hook_active(HOOK_GETNAME_INET6, uid))
 		return;
 
+	/* Don't spoof sockets explicitly bound to a non-VPN interface —
+	 * that would replace a valid physical IP with a VPN IP and expose
+	 * the spoofing to the test. */
+	if (sock->sk && sock->sk->sk_bound_dev_if &&
+	    !is_active_vpn_ifindex((u32)sock->sk->sk_bound_dev_if))
+		return;
+
 	get_spoof_ip(&sip);
 	if (!sip.has_ipv4 && !sip.has_ipv6)
 		return;

@@ -1,34 +1,5 @@
-diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
-index c79d77da3..f2c28c57e 100644
---- a/arch/arm64/configs/gki_defconfig
-+++ b/arch/arm64/configs/gki_defconfig
-@@ -699,3 +699,15 @@ CONFIG_TRACEFS_DISABLE_AUTOMOUNT=y
- CONFIG_HIST_TRIGGERS=y
- CONFIG_FUNCTION_ERROR_INJECTION=y
- # CONFIG_RUNTIME_TESTING_MENU is not set
-+CONFIG_KSU=y
-+CONFIG_KSU_SUSFS=y
-+CONFIG_KSU_SUSFS_SUS_PATH=y
-+CONFIG_KSU_SUSFS_SUS_MOUNT=y
-+CONFIG_KSU_SUSFS_SUS_KSTAT=y
-+CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-+CONFIG_KSU_SUSFS_ENABLE_LOG=y
-+CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
-+CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
-+CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-+CONFIG_KSU_SUSFS_SUS_MAP=y
-+CONFIG_VPNHIDE=y
-diff --git a/build.config.gki b/build.config.gki
-index 44d4ed1be..d5c778536 100644
---- a/build.config.gki
-+++ b/build.config.gki
-@@ -1,3 +1,3 @@
- DEFCONFIG=gki_defconfig
--POST_DEFCONFIG_CMDS="check_defconfig"
-+POST_DEFCONFIG_CMDS=""
- 
 diff --git a/fs/namei.c b/fs/namei.c
-index 0881626cd..82b5ad6b7 100644
+index 0881626cd..ca10af316 100644
 --- a/fs/namei.c
 +++ b/fs/namei.c
 @@ -24,6 +24,10 @@
@@ -42,10 +13,11 @@ index 0881626cd..82b5ad6b7 100644
  #include <linux/security.h>
  #include <linux/ima.h>
  #include <linux/syscalls.h>
-@@ -2579,6 +2583,10 @@ int filename_lookup(int dfd, struct filename *name, unsigned flags,
+@@ -2579,6 +2583,11 @@ int filename_lookup(int dfd, struct filename *name, unsigned flags,
  			    flags & LOOKUP_MOUNTPOINT ? AUDIT_INODE_NOEVAL : 0);
  	restore_nameidata();
  	putname(name);
++
 +#ifdef CONFIG_VPNHIDE
 +	if (!retval)
 +		vpnhide_filename_lookup(dfd, name, flags, path, &retval);
@@ -85,10 +57,10 @@ index 5813bc37e..6de3d5f32 100644
  	if (buf.prev_reclen) {
 diff --git a/include/linux/vpnhide.h b/include/linux/vpnhide.h
 new file mode 100644
-index 000000000..d5f1dc487
+index 000000000..60b9054f2
 --- /dev/null
 +++ b/include/linux/vpnhide.h
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,145 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +#ifndef _LINUX_VPNHIDE_H
 +#define _LINUX_VPNHIDE_H
@@ -114,6 +86,7 @@ index 000000000..d5f1dc487
 +/* ------------------------------------------------------------------ */
 +
 +bool vpnhide_should_hide_dev(const struct net_device *dev);
++bool vpnhide_should_hide_ifname(const char *ifname);
 +
 +/* ------------------------------------------------------------------ */
 +/* Socket                                                               */
@@ -190,6 +163,7 @@ index 000000000..d5f1dc487
 +
 +static inline bool vpnhide_should_hide_dev(const struct net_device *d)
 +	{ return false; }
++static inline bool vpnhide_should_hide_ifname(const char *n) { return false; }
 +static inline int vpnhide_setsockopt_sock(struct socket *sock, int lv, int opt,
 +	sockptr_t v, unsigned int l) { return 0; }
 +static inline void vpnhide_getsockopt_post(struct socket *sock, int lv,
@@ -271,6 +245,71 @@ index 589332936..39368762d 100644
  err_put:
  	if (has_write)
  		bpf_map_write_active_dec(map);
+diff --git a/net/core/dev_ioctl.c b/net/core/dev_ioctl.c
+index 993420da2..fa2c00baf 100644
+--- a/net/core/dev_ioctl.c
++++ b/net/core/dev_ioctl.c
+@@ -8,6 +8,10 @@
+ #include <linux/wireless.h>
+ #include <net/dsa.h>
+ #include <net/wext.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ 
+ /*
+  *	Map an interface index to its name (SIOCGIFNAME)
+@@ -53,6 +57,11 @@ int dev_ifconf(struct net *net, struct ifconf *ifc, int size)
+ 	total = 0;
+ 	for_each_netdev(net, dev) {
+ 		int done;
++
++#ifdef CONFIG_VPNHIDE
++		if (vpnhide_should_hide_dev(dev))
++			continue;
++#endif
+ 		if (!pos)
+ 			done = inet_gifconf(dev, NULL, 0, size);
+ 		else
+@@ -84,6 +93,10 @@ static int dev_ifsioc_locked(struct net *net, struct ifreq *ifr, unsigned int cm
+ 
+ 	if (!dev)
+ 		return -ENODEV;
++#ifdef CONFIG_VPNHIDE
++	if (vpnhide_should_hide_dev(dev))
++		return -ENODEV;
++#endif
+ 
+ 	switch (cmd) {
+ 	case SIOCGIFFLAGS:	/* Get interface flags */
+diff --git a/net/core/fib_rules.c b/net/core/fib_rules.c
+index a6159624e..ffbb82f29 100644
+--- a/net/core/fib_rules.c
++++ b/net/core/fib_rules.c
+@@ -13,6 +13,10 @@
+ #include <net/net_namespace.h>
+ #include <net/sock.h>
+ #include <net/fib_rules.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ #include <net/ip_tunnels.h>
+ #include <linux/indirect_call_wrapper.h>
+ 
+@@ -991,6 +995,11 @@ static int fib_nl_fill_rule(struct sk_buff *skb, struct fib_rule *rule,
+ 	struct nlmsghdr *nlh;
+ 	struct fib_rule_hdr *frh;
+ 
++#ifdef CONFIG_VPNHIDE
++	if ((rule->iifname[0] && vpnhide_should_hide_ifname(rule->iifname)) ||
++	    (rule->oifname[0] && vpnhide_should_hide_ifname(rule->oifname)))
++		return 0;
++#endif
+ 	nlh = nlmsg_put(skb, pid, seq, type, sizeof(*frh), flags);
+ 	if (nlh == NULL)
+ 		return -EMSGSIZE;
 diff --git a/net/core/rtnetlink.c b/net/core/rtnetlink.c
 index 021dcfdae..3b854f03a 100644
 --- a/net/core/rtnetlink.c
@@ -438,6 +477,36 @@ index 5d9752221..ca70b845b 100644
  			/* only consider addresses on devices in the
  			 * same L3 domain
  			 */
+diff --git a/net/ipv6/af_inet6.c b/net/ipv6/af_inet6.c
+index 002f3dacb..de2a11439 100644
+--- a/net/ipv6/af_inet6.c
++++ b/net/ipv6/af_inet6.c
+@@ -52,6 +52,10 @@
+ #include <net/transp_v6.h>
+ #include <net/ip6_route.h>
+ #include <net/addrconf.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ #include <net/ipv6_stubs.h>
+ #include <net/ndisc.h>
+ #ifdef CONFIG_IPV6_TUNNEL
+@@ -297,6 +301,14 @@ static int __inet6_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len,
+ 	if (addr->sin6_family != AF_INET6)
+ 		return -EAFNOSUPPORT;
+ 
++#ifdef CONFIG_VPNHIDE
++	{
++		int _r = vpnhide_inet6_bind_ll(sk, uaddr, addr_len);
++		if (_r)
++			return _r;
++	}
++#endif
++
+ 	addr_type = ipv6_addr_type(&addr->sin6_addr);
+ 	if ((addr_type & IPV6_ADDR_MULTICAST) && sk->sk_type == SOCK_STREAM)
+ 		return -EINVAL;
 diff --git a/net/ipv6/ip6_fib.c b/net/ipv6/ip6_fib.c
 index 608205c63..dfb3716e1 100644
 --- a/net/ipv6/ip6_fib.c
@@ -526,7 +595,7 @@ index 538503720..5f8729898 100644
  	ipc6.gso_size = READ_ONCE(up->gso_size);
  	ipc6.sockc.tsflags = sk->sk_tsflags;
 diff --git a/net/socket.c b/net/socket.c
-index 9b233861f..bdbece2f2 100644
+index 9b233861f..fbb7de3af 100644
 --- a/net/socket.c
 +++ b/net/socket.c
 @@ -77,6 +77,10 @@
@@ -588,15 +657,19 @@ index 9b233861f..bdbece2f2 100644
  
  out_put:
  	fput_light(sock->file, fput_needed);
-@@ -1956,6 +1985,7 @@ int __sys_getpeername(int fd, struct sockaddr __user *usockaddr,
- 			/* "err" is actually length in this case */
- 			err = move_addr_to_user(&address, err, usockaddr,
- 						usockaddr_len);
-+		vpnhide_getname(sock, (struct sockaddr *)&address, 1, &err);
- 		fput_light(sock->file, fput_needed);
- 	}
- 	return err;
-@@ -2138,7 +2168,18 @@ int __sys_setsockopt(int fd, int level, int optname, char __user *user_optval,
+@@ -1947,7 +1976,10 @@ int __sys_getpeername(int fd, struct sockaddr __user *usockaddr,
+ 	if (sock != NULL) {
+ 		err = security_socket_getpeername(sock);
+ 		if (err) {
+-			fput_light(sock->file, fput_needed);
++		#ifdef CONFIG_VPNHIDE
++	vpnhide_getname(sock, (struct sockaddr *)&address, 1, &err);
++#endif
++	fput_light(sock->file, fput_needed);
+ 			return err;
+ 		}
+ 
+@@ -2138,7 +2170,18 @@ int __sys_setsockopt(int fd, int level, int optname, char __user *user_optval,
  
  	if (kernel_optval)
  		optval = KERNEL_SOCKPTR(kernel_optval);
@@ -616,7 +689,7 @@ index 9b233861f..bdbece2f2 100644
  		err = sock_setsockopt(sock, level, optname, optval, optlen);
  	else if (unlikely(!sock->ops->setsockopt))
  		err = -EOPNOTSUPP;
-@@ -2193,6 +2234,10 @@ int __sys_getsockopt(int fd, int level, int optname, char __user *optval,
+@@ -2193,6 +2236,10 @@ int __sys_getsockopt(int fd, int level, int optname, char __user *optval,
  						     err);
  out_put:
  	fput_light(sock->file, fput_needed);
@@ -680,10 +753,10 @@ index 000000000..c51839e96
 +vpnhide-objs := core.o hook_socket.o hook_netlink.o hook_fs.o
 diff --git a/security/vpnhide/core.c b/security/vpnhide/core.c
 new file mode 100644
-index 000000000..bdb882328
+index 000000000..0d09ebacc
 --- /dev/null
 +++ b/security/vpnhide/core.c
-@@ -0,0 +1,1135 @@
+@@ -0,0 +1,1143 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * vpnhide — core state, IOCTL handler, helpers
@@ -819,6 +892,14 @@ index 000000000..bdb882328
 +		kfree(old);
 +	}
 +}
++
++bool vpnhide_should_hide_ifname(const char *ifname)
++{
++	if (!ifname || !ifname[0])
++		return false;
++	return is_active_vpn_ifname(ifname);
++}
++EXPORT_SYMBOL_GPL(vpnhide_should_hide_ifname);
 +
 +bool vh_is_vpn_name_cached(const char *name, size_t len)
 +{
@@ -2084,10 +2165,10 @@ index 000000000..dfc7ec7f6
 +EXPORT_SYMBOL_GPL(vpnhide_should_hide_dev);
 diff --git a/security/vpnhide/hook_socket.c b/security/vpnhide/hook_socket.c
 new file mode 100644
-index 000000000..e35baf9f0
+index 000000000..4e08783ef
 --- /dev/null
 +++ b/security/vpnhide/hook_socket.c
-@@ -0,0 +1,579 @@
+@@ -0,0 +1,586 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * vpnhide — socket hooks
@@ -2433,6 +2514,13 @@ index 000000000..e35baf9f0
 +
 +	if (!is_hook_active(HOOK_GETNAME_INET, uid) &&
 +	    !is_hook_active(HOOK_GETNAME_INET6, uid))
++		return;
++
++	/* Don't spoof sockets explicitly bound to a non-VPN interface —
++	 * that would replace a valid physical IP with a VPN IP and expose
++	 * the spoofing to the test. */
++	if (sock->sk && sock->sk->sk_bound_dev_if &&
++	    !is_active_vpn_ifindex((u32)sock->sk->sk_bound_dev_if))
 +		return;
 +
 +	get_spoof_ip(&sip);

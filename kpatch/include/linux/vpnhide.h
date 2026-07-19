@@ -23,6 +23,7 @@
 /* ------------------------------------------------------------------ */
 
 bool vpnhide_should_hide_dev(const struct net_device *dev);
+bool vpnhide_should_hide_ifname(const char *ifname);
 
 /* ------------------------------------------------------------------ */
 /* Socket                                                               */
@@ -99,6 +100,7 @@ typedef struct { const void *user; bool is_kernel; } sockptr_t;
 
 static inline bool vpnhide_should_hide_dev(const struct net_device *d)
 	{ return false; }
+static inline bool vpnhide_should_hide_ifname(const char *n) { return false; }
 static inline int vpnhide_setsockopt_sock(struct socket *sock, int lv, int opt,
 	sockptr_t v, unsigned int l) { return 0; }
 static inline void vpnhide_getsockopt_post(struct socket *sock, int lv,
