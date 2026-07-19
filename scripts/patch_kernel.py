@@ -363,6 +363,34 @@ def patch_net_ipv4_devinet_c(content):
                 changed = True
             break
 
+    # devinet_ioctl: hide VPN device for SIOCGIFADDR/GIFDSTADDR/GIFBRDADDR/GIFNETMASK
+    # Anchor: after __dev_get_by_name + !dev goto, before the colon-fix
+    nodev_anchor = '\tdev = __dev_get_by_name(net, ifr->ifr_name);\n\tif (!dev)\n\t\tgoto done;\n'
+    devinet_hook = guard(
+        '\tif (vpnhide_should_hide_dev(dev)) {\n'
+        '\t\tret = -ENODEV;\n'
+        '\t\tgoto done;\n'
+        '\t}\n'
+    )
+    if 'devinet_ioctl' in content and 'vpnhide_should_hide_dev(dev)' not in content:
+        func_idx = content.find('int devinet_ioctl(')
+        if func_idx != -1:
+            nodev_idx = content.find(nodev_anchor, func_idx)
+            if nodev_idx != -1:
+                pos = nodev_idx + len(nodev_anchor)
+                content = content[:pos] + devinet_hook + content[pos:]
+                changed = True
+            else:
+                # fallback: simpler anchor without goto
+                alt_anchor = '\tdev = __dev_get_by_name(net, ifr->ifr_name);\n'
+                alt_idx = content.find(alt_anchor, func_idx)
+                if alt_idx != -1:
+                    pos = alt_idx + len(alt_anchor)
+                    content = content[:pos] + devinet_hook + content[pos:]
+                    changed = True
+                else:
+                    print("WARNING: devinet_ioctl __dev_get_by_name anchor not found")
+
     return content, changed
 
 
@@ -387,6 +415,38 @@ def patch_net_ipv6_addrconf_c(content):
             if ok:
                 changed = True
             break
+
+    # if6_seq_show: hide VPN interfaces from /proc/net/if_inet6
+    # inject at top of function body, before seq_printf
+    if6_anchor = 'static int if6_seq_show(struct seq_file *seq, void *v)\n{\n'
+    if6_hook = guard(
+        '\t{\n'
+        '\t\tstruct inet6_ifaddr *_ifp = (struct inet6_ifaddr *)v;\n'
+        '\t\tif (_ifp->idev && _ifp->idev->dev &&\n'
+        '\t\t    vpnhide_should_hide_dev(_ifp->idev->dev))\n'
+        '\t\t\treturn 0;\n'
+        '\t}\n'
+    )
+    if 'vpnhide_should_hide_dev' not in content or 'if6_seq_show' in content:
+        if 'if6_seq_show' in content and 'if6_seq_show_vpnhide' not in content:
+            func_idx = content.find(if6_anchor)
+            if func_idx != -1:
+                pos = func_idx + len(if6_anchor)
+                # Only inject if not already guarded
+                if '#ifdef CONFIG_VPNHIDE' not in content[pos:pos+60]:
+                    content = content[:pos] + if6_hook + content[pos:]
+                    changed = True
+            else:
+                # Fallback: any if6_seq_show signature
+                func_idx2 = content.find('static int if6_seq_show(')
+                if func_idx2 != -1:
+                    brace_idx = content.find('\n{', func_idx2)
+                    if brace_idx != -1:
+                        pos = brace_idx + len('\n{') + 1  # after newline
+                        content = content[:pos] + if6_hook + content[pos:]
+                        changed = True
+                else:
+                    print("WARNING: if6_seq_show not found in addrconf.c")
 
     return content, changed
 
@@ -739,6 +799,130 @@ def patch_kernel_bpf_syscall_c(content):
     return content, changed
 
 
+def patch_net_core_net_procfs_c(content):
+    """Patch net/core/net-procfs.c: hide VPN ifaces from /proc/net/dev."""
+    changed = False
+
+    inc = guard('#include "../../security/vpnhide/vpnhide.h"\n')
+    content, c = add_include(content, inc, [
+        '#include <linux/rtnetlink.h>',
+        '#include <net/sock.h>',
+        '#include <linux/netdevice.h>',
+    ])
+    if c:
+        changed = True
+
+    # dev_seq_show: when v != SEQ_START_TOKEN, v is a struct net_device*
+    # Inject before dev_seq_printf_stats to skip VPN devices
+    hook = guard(
+        '\tif (v != SEQ_START_TOKEN && vpnhide_should_hide_dev((struct net_device *)v))\n'
+        '\t\treturn 0;\n'
+    )
+    if 'vpnhide_should_hide_dev' not in content and 'dev_seq_show' in content:
+        func_idx = content.find('static int dev_seq_show(')
+        if func_idx != -1:
+            brace_idx = content.find('\n{', func_idx)
+            if brace_idx == -1:
+                brace_idx = content.find(' {', func_idx)
+            body_start = content.find('\n', brace_idx) + 1 if brace_idx != -1 else -1
+            if body_start > 0:
+                content = content[:body_start] + hook + content[body_start:]
+                changed = True
+            else:
+                print("WARNING: dev_seq_show body not found in net-procfs.c")
+        else:
+            print("WARNING: dev_seq_show not found in net-procfs.c")
+
+    return content, changed
+
+
+def patch_net_sched_sch_api_c(content):
+    """Patch net/sched/sch_api.c: hide VPN interfaces from TC qdisc dumps."""
+    changed = False
+
+    inc = guard('#include "../../security/vpnhide/vpnhide.h"\n')
+    content, c = add_include(content, inc, [
+        '#include <net/pkt_sched.h>',
+        '#include <net/rtnetlink.h>',
+        '#include <linux/rtnetlink.h>',
+    ])
+    if c:
+        changed = True
+
+    # tc_fill_qdisc: inject after cond_resched(), before nlmsg_put
+    # qdisc_dev(q) returns the net_device — use vpnhide_should_hide_dev
+    hook = guard(
+        '\tif (vpnhide_should_hide_dev(qdisc_dev(q)))\n'
+        '\t\tgoto out_nlmsg_trim;\n'
+    )
+    if 'vpnhide_should_hide_dev' not in content and 'tc_fill_qdisc' in content:
+        func_idx = content.find('static int tc_fill_qdisc(')
+        if func_idx != -1:
+            # inject after cond_resched(); — present in all GKI2
+            anchor = '\tcond_resched();\n'
+            cs_idx = content.find(anchor, func_idx)
+            if cs_idx != -1:
+                pos = cs_idx + len(anchor)
+                content = content[:pos] + hook + content[pos:]
+                changed = True
+            else:
+                # fallback: inject at start of function body
+                brace_idx = content.find('\n{', func_idx)
+                if brace_idx != -1:
+                    body_start = content.find('\n', brace_idx) + 1
+                    content = content[:body_start] + hook + content[body_start:]
+                    changed = True
+                else:
+                    print("WARNING: tc_fill_qdisc body anchor not found in sch_api.c")
+        else:
+            print("WARNING: tc_fill_qdisc not found in sch_api.c")
+
+    return content, changed
+
+
+def patch_fs_proc_sysctl_c(content):
+    """Patch fs/proc/proc_sysctl.c: hide VPN interface sysctl dirs."""
+    changed = False
+
+    inc = guard('#include "../../../security/vpnhide/vpnhide.h"\n')
+    content, c = add_include(content, inc, [
+        '#include <linux/sysctl.h>',
+        '#include <linux/capability.h>',
+        '#include <linux/security.h>',
+    ])
+    if c:
+        changed = True
+
+    # proc_sys_lookup: after lookup_entry succeeds (p != NULL), filter VPN iface names
+    # name->name contains the directory/file name, name->len its length
+    hook = guard(
+        '\tif (p) {\n'
+        '\t\tconst struct qstr *_qname = &dentry->d_name;\n'
+        '\t\tif (vpnhide_filter_sysctl(dir, _qname->name, _qname->len)) {\n'
+        '\t\t\tif (h)\n'
+        '\t\t\t\tsysctl_head_finish(h);\n'
+        '\t\t\tgoto out;\n'
+        '\t\t}\n'
+        '\t}\n'
+    )
+    if 'vpnhide_filter_sysctl' not in content and 'proc_sys_lookup' in content:
+        func_idx = content.find('static struct dentry *proc_sys_lookup(')
+        if func_idx != -1:
+            # inject right after 'p = lookup_entry(...);\n'
+            le_anchor = 'p = lookup_entry(&h, ctl_dir, name->name, name->len);\n'
+            le_idx = content.find(le_anchor, func_idx)
+            if le_idx != -1:
+                pos = le_idx + len(le_anchor)
+                content = content[:pos] + hook + content[pos:]
+                changed = True
+            else:
+                print("WARNING: lookup_entry anchor not found in proc_sys_lookup")
+        else:
+            print("WARNING: proc_sys_lookup not found in fs/proc/proc_sysctl.c")
+
+    return content, changed
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -784,6 +968,9 @@ def main():
     patch_file(os.path.join(d, "net/core/dev_ioctl.c"),    patch_net_core_dev_ioctl_c)
     patch_file(os.path.join(d, "net/core/fib_rules.c"),    patch_net_core_fib_rules_c)
     patch_file(os.path.join(d, "net/ipv6/af_inet6.c"),     patch_net_ipv6_af_inet6_c)
+    patch_file(os.path.join(d, "net/core/net-procfs.c"),   patch_net_core_net_procfs_c)
+    patch_file(os.path.join(d, "net/sched/sch_api.c"),     patch_net_sched_sch_api_c)
+    patch_file(os.path.join(d, "fs/proc/proc_sysctl.c"),   patch_fs_proc_sysctl_c)
 
     print("=== VPNHide patcher: done ===")
 
