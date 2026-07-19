@@ -28,7 +28,7 @@ index 44d4ed1be..d5c778536 100644
 +POST_DEFCONFIG_CMDS=""
  
 diff --git a/fs/namei.c b/fs/namei.c
-index 0881626cd..e1a3e9946 100644
+index 0881626cd..82b5ad6b7 100644
 --- a/fs/namei.c
 +++ b/fs/namei.c
 @@ -24,6 +24,10 @@
@@ -42,6 +42,17 @@ index 0881626cd..e1a3e9946 100644
  #include <linux/security.h>
  #include <linux/ima.h>
  #include <linux/syscalls.h>
+@@ -2579,6 +2583,10 @@ int filename_lookup(int dfd, struct filename *name, unsigned flags,
+ 			    flags & LOOKUP_MOUNTPOINT ? AUDIT_INODE_NOEVAL : 0);
+ 	restore_nameidata();
+ 	putname(name);
++#ifdef CONFIG_VPNHIDE
++	if (!retval)
++		vpnhide_filename_lookup(dfd, name, flags, path, &retval);
++#endif
+ 	return retval;
+ }
+ 
 diff --git a/fs/readdir.c b/fs/readdir.c
 index 5813bc37e..6de3d5f32 100644
 --- a/fs/readdir.c
@@ -74,10 +85,10 @@ index 5813bc37e..6de3d5f32 100644
  	if (buf.prev_reclen) {
 diff --git a/include/linux/vpnhide.h b/include/linux/vpnhide.h
 new file mode 100644
-index 000000000..4724f7751
+index 000000000..d5f1dc487
 --- /dev/null
 +++ b/include/linux/vpnhide.h
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,143 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +#ifndef _LINUX_VPNHIDE_H
 +#define _LINUX_VPNHIDE_H
@@ -98,39 +109,11 @@ index 000000000..4724f7751
 +#include <linux/fs.h>
 +#include <linux/dirent.h>
 +
-+struct inet6_ifaddr;
-+struct in_ifaddr;
-+struct fib_info;
-+struct fib_rule;
-+struct rt6_info;
-+struct rtable;
-+struct qdisc_dump_args;
-+struct Qdisc;
-+struct proc_dir_entry;
-+
 +/* ------------------------------------------------------------------ */
 +/* Netlink / routing                                                    */
 +/* ------------------------------------------------------------------ */
 +
-+bool vpnhide_skip_iflink(struct sk_buff *skb, const struct net_device *dev);
-+bool vpnhide_skip_inet6_ifaddr(struct sk_buff *skb, struct inet6_ifaddr *ifa);
-+bool vpnhide_skip_inet_ifaddr(struct sk_buff *skb, struct in_ifaddr *ifa);
-+bool vpnhide_skip_fib_dump(struct sk_buff *skb, struct fib_info *fi, int nhsel);
-+bool vpnhide_skip_fib_rule(struct sk_buff *skb, struct fib_rule *rule);
-+bool vpnhide_skip_rt6(struct sk_buff *skb, struct fib6_info *rt);
-+bool vpnhide_skip_rt4(struct sk_buff *skb, struct rtable *rt);
-+bool vpnhide_skip_dev_seq(struct seq_file *seq, const struct net_device *dev);
-+bool vpnhide_skip_if6_seq(struct seq_file *seq, struct inet6_ifaddr *ifa);
-+bool vpnhide_skip_tc_qdisc(struct sk_buff *skb, const struct Qdisc *q);
-+void vpnhide_filter_seq_line(struct seq_file *seq, int saved_count);
 +bool vpnhide_should_hide_dev(const struct net_device *dev);
-+
-+/* ------------------------------------------------------------------ */
-+/* ioctl                                                                */
-+/* ------------------------------------------------------------------ */
-+
-+bool vpnhide_ioctl_ifname_block(const char *ifname);
-+void vpnhide_filter_ifconf(void __user *data);
 +
 +/* ------------------------------------------------------------------ */
 +/* Socket                                                               */
@@ -182,6 +165,8 @@ index 000000000..4724f7751
 +bool vpnhide_getdents64(unsigned int fd,
 +			struct linux_dirent64 __user *dirent,
 +			unsigned int count, int *retval);
++void vpnhide_filename_lookup(int dfd, struct filename *name,
++			     unsigned flags, struct path *path, int *retval);
 +
 +#else /* !CONFIG_VPNHIDE */
 +
@@ -190,13 +175,6 @@ index 000000000..4724f7751
 +struct sk_buff;
 +struct net_device;
 +struct seq_file;
-+struct inet6_ifaddr;
-+struct in_ifaddr;
-+struct fib_info;
-+struct fib_rule;
-+struct fib6_info;
-+struct rtable;
-+struct Qdisc;
 +struct socket;
 +struct sockaddr;
 +struct sock;
@@ -205,36 +183,13 @@ index 000000000..4724f7751
 +struct path;
 +struct linux_dirent64;
 +struct inode;
++struct filename;
 +#ifndef _LINUX_SOCKPTR_H
 +typedef struct { const void *user; bool is_kernel; } sockptr_t;
 +#endif
 +
-+static inline bool vpnhide_skip_iflink(struct sk_buff *s,
-+	const struct net_device *d) { return false; }
-+static inline bool vpnhide_skip_inet6_ifaddr(struct sk_buff *s,
-+	struct inet6_ifaddr *i) { return false; }
-+static inline bool vpnhide_skip_inet_ifaddr(struct sk_buff *s,
-+	struct in_ifaddr *i) { return false; }
-+static inline bool vpnhide_skip_fib_dump(struct sk_buff *s,
-+	struct fib_info *fi, int n) { return false; }
-+static inline bool vpnhide_skip_fib_rule(struct sk_buff *s,
-+	struct fib_rule *r) { return false; }
-+static inline bool vpnhide_skip_rt6(struct sk_buff *s,
-+	struct fib6_info *r) { return false; }
-+static inline bool vpnhide_skip_rt4(struct sk_buff *s,
-+	struct rtable *r) { return false; }
-+static inline bool vpnhide_skip_dev_seq(struct seq_file *s,
-+	const struct net_device *d) { return false; }
-+static inline bool vpnhide_skip_if6_seq(struct seq_file *s,
-+	struct inet6_ifaddr *i) { return false; }
-+static inline bool vpnhide_skip_tc_qdisc(struct sk_buff *s,
-+	const struct Qdisc *q) { return false; }
-+static inline void vpnhide_filter_seq_line(struct seq_file *s,
-+	int c) {}
 +static inline bool vpnhide_should_hide_dev(const struct net_device *d)
 +	{ return false; }
-+static inline bool vpnhide_ioctl_ifname_block(const char *n) { return false; }
-+static inline void vpnhide_filter_ifconf(void __user *d) {}
 +static inline int vpnhide_setsockopt_sock(struct socket *sock, int lv, int opt,
 +	sockptr_t v, unsigned int l) { return 0; }
 +static inline void vpnhide_getsockopt_post(struct socket *sock, int lv,
@@ -272,6 +227,8 @@ index 000000000..4724f7751
 +static inline bool vpnhide_getdents64(unsigned int fd,
 +	struct linux_dirent64 __user *d, unsigned int c, int *r)
 +	{ return false; }
++static inline void vpnhide_filename_lookup(int dfd, struct filename *name,
++	unsigned flags, struct path *path, int *r) {}
 +
 +#endif /* CONFIG_VPNHIDE */
 +#endif /* _LINUX_VPNHIDE_H */
@@ -569,7 +526,7 @@ index 538503720..5f8729898 100644
  	ipc6.gso_size = READ_ONCE(up->gso_size);
  	ipc6.sockc.tsflags = sk->sk_tsflags;
 diff --git a/net/socket.c b/net/socket.c
-index 9b233861f..ee4a280ca 100644
+index 9b233861f..bdbece2f2 100644
 --- a/net/socket.c
 +++ b/net/socket.c
 @@ -77,6 +77,10 @@
@@ -631,7 +588,15 @@ index 9b233861f..ee4a280ca 100644
  
  out_put:
  	fput_light(sock->file, fput_needed);
-@@ -2138,7 +2167,18 @@ int __sys_setsockopt(int fd, int level, int optname, char __user *user_optval,
+@@ -1956,6 +1985,7 @@ int __sys_getpeername(int fd, struct sockaddr __user *usockaddr,
+ 			/* "err" is actually length in this case */
+ 			err = move_addr_to_user(&address, err, usockaddr,
+ 						usockaddr_len);
++		vpnhide_getname(sock, (struct sockaddr *)&address, 1, &err);
+ 		fput_light(sock->file, fput_needed);
+ 	}
+ 	return err;
+@@ -2138,7 +2168,18 @@ int __sys_setsockopt(int fd, int level, int optname, char __user *user_optval,
  
  	if (kernel_optval)
  		optval = KERNEL_SOCKPTR(kernel_optval);
@@ -651,7 +616,7 @@ index 9b233861f..ee4a280ca 100644
  		err = sock_setsockopt(sock, level, optname, optval, optlen);
  	else if (unlikely(!sock->ops->setsockopt))
  		err = -EOPNOTSUPP;
-@@ -2193,6 +2233,10 @@ int __sys_getsockopt(int fd, int level, int optname, char __user *optval,
+@@ -2193,6 +2234,10 @@ int __sys_getsockopt(int fd, int level, int optname, char __user *optval,
  						     err);
  out_put:
  	fput_light(sock->file, fput_needed);
@@ -1554,10 +1519,10 @@ index 000000000..cd7fb1b27
 +MODULE_AUTHOR("soranerai");
 diff --git a/security/vpnhide/hook_fs.c b/security/vpnhide/hook_fs.c
 new file mode 100644
-index 000000000..bbb3ac1f4
+index 000000000..f58e1ad5b
 --- /dev/null
 +++ b/security/vpnhide/hook_fs.c
-@@ -0,0 +1,220 @@
+@@ -0,0 +1,234 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * vpnhide — filesystem, BPF, and UDP hooks
@@ -1778,40 +1743,29 @@ index 000000000..bbb3ac1f4
 +	return false;
 +}
 +EXPORT_SYMBOL_GPL(vpnhide_filter_sysctl);
++
++/* ------------------------------------------------------------------ */
++/* filename_lookup — deny access to VPN-revealing paths               */
++/* ------------------------------------------------------------------ */
++
++void vpnhide_filename_lookup(int dfd, struct filename *name,
++			     unsigned flags, struct path *path, int *retval)
++{
++	if (vpnhide_should_hide_path(path)) {
++		path_put(path);
++		*retval = -ENOENT;
++	}
++}
++EXPORT_SYMBOL_GPL(vpnhide_filename_lookup);
 diff --git a/security/vpnhide/hook_netlink.c b/security/vpnhide/hook_netlink.c
 new file mode 100644
-index 000000000..c82058df0
+index 000000000..dfc7ec7f6
 --- /dev/null
 +++ b/security/vpnhide/hook_netlink.c
-@@ -0,0 +1,392 @@
+@@ -0,0 +1,17 @@
 +// SPDX-License-Identifier: GPL-2.0
-+/*
-+ * vpnhide — netlink / routing hooks (early-return optimisation)
-+ *
-+ * Called at the TOP of each fill/seq_show function so no netlink message
-+ * is built at all for hidden interfaces. This is a fundamental improvement
-+ * over the kmod kretprobe approach which had to trim an already-built skb.
-+ */
-+
 +#include <linux/netdevice.h>
-+#include <linux/skbuff.h>
-+#include <linux/seq_file.h>
-+#include <linux/if_addr.h>
-+#include <linux/inetdevice.h>
-+#include <net/addrconf.h>
-+#include <net/fib_rules.h>
-+#include <net/ip_fib.h>
-+#include <net/ip6_fib.h>
-+#include <net/route.h>
-+#include <net/sch_generic.h>
-+
 +#include "vpnhide.h"
-+
-+/* ------------------------------------------------------------------ */
-+/* vpnhide_should_hide_dev — generic per-device hide check             */
-+/* Used by rtnetlink, devinet, addrconf, fib_trie, fib_semantics,      */
-+/* ip6_fib iterators that walk a net_device list.                      */
-+/* ------------------------------------------------------------------ */
 +
 +bool vpnhide_should_hide_dev(const struct net_device *dev)
 +{
@@ -1826,356 +1780,6 @@ index 000000000..c82058df0
 +	return true;
 +}
 +EXPORT_SYMBOL_GPL(vpnhide_should_hide_dev);
-+
-+/* ------------------------------------------------------------------ */
-+/* rtnl_fill_ifinfo — hide interface from RTM_GETLINK / NEWLINK        */
-+/* ------------------------------------------------------------------ */
-+
-+bool vpnhide_skip_iflink(struct sk_buff *skb, const struct net_device *dev)
-+{
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
-+
-+	if (!is_hook_active(HOOK_RTNL_FILL, uid))
-+		return false;
-+	if (!is_active_vpn_ifindex(dev->ifindex))
-+		return false;
-+
-+	record_kmod_intercept(uid, HOOK_RTNL_FILL);
-+	return true;
-+}
-+EXPORT_SYMBOL_GPL(vpnhide_skip_iflink);
-+
-+/* ------------------------------------------------------------------ */
-+/* inet6_fill_ifaddr — hide IPv6 address from RTM_GETADDR              */
-+/* ------------------------------------------------------------------ */
-+
-+bool vpnhide_skip_inet6_ifaddr(struct sk_buff *skb, struct inet6_ifaddr *ifa)
-+{
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
-+
-+	if (!is_hook_active(HOOK_INET6_FILL, uid))
-+		return false;
-+	if (!ifa || !ifa->idev || !ifa->idev->dev)
-+		return false;
-+	if (!is_active_vpn_ifindex(ifa->idev->dev->ifindex))
-+		return false;
-+
-+	record_kmod_intercept(uid, HOOK_INET6_FILL);
-+	return true;
-+}
-+EXPORT_SYMBOL_GPL(vpnhide_skip_inet6_ifaddr);
-+
-+/* ------------------------------------------------------------------ */
-+/* inet_fill_ifaddr — hide IPv4 address from RTM_GETADDR               */
-+/* ------------------------------------------------------------------ */
-+
-+bool vpnhide_skip_inet_ifaddr(struct sk_buff *skb, struct in_ifaddr *ifa)
-+{
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
-+
-+	if (!is_hook_active(HOOK_INET_FILL, uid))
-+		return false;
-+	if (!ifa || !ifa->ifa_dev || !ifa->ifa_dev->dev)
-+		return false;
-+	if (!is_active_vpn_ifindex(ifa->ifa_dev->dev->ifindex))
-+		return false;
-+
-+	record_kmod_intercept(uid, HOOK_INET_FILL);
-+	return true;
-+}
-+EXPORT_SYMBOL_GPL(vpnhide_skip_inet_ifaddr);
-+
-+/* ------------------------------------------------------------------ */
-+/* fib_dump_info — hide IPv4 route from RTM_GETROUTE                   */
-+/* ------------------------------------------------------------------ */
-+
-+bool vpnhide_skip_fib_dump(struct sk_buff *skb, struct fib_info *fi, int nhsel)
-+{
-+	const struct net_device *dev = NULL;
-+	uid_t uid;
-+
-+	if (!fi)
-+		return false;
-+
-+	uid = from_kuid(&init_user_ns, current_uid());
-+	if (!is_hook_active(HOOK_FIB_DUMP, uid))
-+		return false;
-+
-+#if IS_ENABLED(CONFIG_IP_ROUTE_MULTIPATH)
-+	if (fi->fib_nhs > nhsel) {
-+		dev = fi->fib_nh[nhsel].fib_nh_dev;
-+	}
-+#else
-+	if (fi->fib_nhs > 0)
-+		dev = fi->fib_nh[0].fib_nh_dev;
-+#endif
-+	if (!dev)
-+		return false;
-+	if (!is_active_vpn_ifindex(dev->ifindex))
-+		return false;
-+
-+	record_kmod_intercept(uid, HOOK_FIB_DUMP);
-+	return true;
-+}
-+EXPORT_SYMBOL_GPL(vpnhide_skip_fib_dump);
-+
-+/* ------------------------------------------------------------------ */
-+/* fib_nl_fill_rule — hide UID split-routing rules                     */
-+/* ------------------------------------------------------------------ */
-+
-+bool vpnhide_skip_fib_rule(struct sk_buff *skb, struct fib_rule *rule)
-+{
-+	struct vpnhide_port_targets *pt;
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
-+	int i;
-+
-+	if (!is_hook_active(HOOK_FIB_RULE_FILL, uid))
-+		return false;
-+
-+	/* Hide rules that belong to app-uid routing tables (table > 100)
-+	 * whose UID range covers any of our target UIDs. */
-+	if (rule->table <= 100)
-+		return false;
-+
-+	rcu_read_lock();
-+	pt = rcu_dereference(global_port_targets);
-+	if (pt) {
-+		for (i = 0; i < pt->count; i++) {
-+			uid_t tuid = pt->targets[i].uid;
-+			if (rule->uid_range.start.val <= tuid &&
-+			    tuid <= rule->uid_range.end.val) {
-+				rcu_read_unlock();
-+				record_kmod_intercept(uid, HOOK_FIB_RULE_FILL);
-+				return true;
-+			}
-+		}
-+	}
-+	rcu_read_unlock();
-+
-+	/* Also check global target list */
-+	if (is_target_uid_val(rule->uid_range.start.val)) {
-+		record_kmod_intercept(uid, HOOK_FIB_RULE_FILL);
-+		return true;
-+	}
-+	return false;
-+}
-+EXPORT_SYMBOL_GPL(vpnhide_skip_fib_rule);
-+
-+/* ------------------------------------------------------------------ */
-+/* rt6_fill_node — hide IPv6 route from RTM_GETROUTE                   */
-+/* ------------------------------------------------------------------ */
-+
-+bool vpnhide_skip_rt6(struct sk_buff *skb, struct fib6_info *rt)
-+{
-+	const struct net_device *dev = NULL;
-+	uid_t uid;
-+
-+	if (!rt)
-+		return false;
-+
-+	uid = from_kuid(&init_user_ns, current_uid());
-+	if (!is_hook_active(HOOK_RT6_FILL, uid))
-+		return false;
-+
-+	dev = rt->fib6_nh->fib_nh_dev;
-+
-+	if (!dev)
-+		return false;
-+	if (!is_active_vpn_ifindex(dev->ifindex))
-+		return false;
-+
-+	record_kmod_intercept(uid, HOOK_RT6_FILL);
-+	return true;
-+}
-+EXPORT_SYMBOL_GPL(vpnhide_skip_rt6);
-+
-+/* ------------------------------------------------------------------ */
-+/* rt_fill_info — hide IPv4 RTM_GETROUTE reply (connected route)       */
-+/* ------------------------------------------------------------------ */
-+
-+bool vpnhide_skip_rt4(struct sk_buff *skb, struct rtable *rt)
-+{
-+	const struct net_device *dev;
-+	uid_t uid;
-+
-+	if (!rt)
-+		return false;
-+
-+	uid = from_kuid(&init_user_ns, current_uid());
-+	if (!is_hook_active(HOOK_RT_FILL, uid))
-+		return false;
-+
-+	dev = rt->dst.dev;
-+	if (!dev)
-+		return false;
-+	if (!is_active_vpn_ifindex(dev->ifindex))
-+		return false;
-+
-+	record_kmod_intercept(uid, HOOK_RT_FILL);
-+	return true;
-+}
-+EXPORT_SYMBOL_GPL(vpnhide_skip_rt4);
-+
-+/* ------------------------------------------------------------------ */
-+/* dev_seq_show — hide interface from /proc/net/dev                    */
-+/* ------------------------------------------------------------------ */
-+
-+bool vpnhide_skip_dev_seq(struct seq_file *seq, const struct net_device *dev)
-+{
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
-+
-+	if (!is_hook_active(HOOK_DEV_SEQ, uid))
-+		return false;
-+	if (!is_active_vpn_ifindex(dev->ifindex))
-+		return false;
-+
-+	record_kmod_intercept(uid, HOOK_DEV_SEQ);
-+	return true;
-+}
-+EXPORT_SYMBOL_GPL(vpnhide_skip_dev_seq);
-+
-+/* ------------------------------------------------------------------ */
-+/* if6_seq_show — hide interface from /proc/net/if_inet6               */
-+/* ------------------------------------------------------------------ */
-+
-+bool vpnhide_skip_if6_seq(struct seq_file *seq, struct inet6_ifaddr *ifa)
-+{
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
-+
-+	if (!is_hook_active(HOOK_IF6_SEQ, uid))
-+		return false;
-+	if (!ifa || !ifa->idev || !ifa->idev->dev)
-+		return false;
-+	if (!is_active_vpn_ifindex(ifa->idev->dev->ifindex))
-+		return false;
-+
-+	record_kmod_intercept(uid, HOOK_IF6_SEQ);
-+	return true;
-+}
-+EXPORT_SYMBOL_GPL(vpnhide_skip_if6_seq);
-+
-+/* ------------------------------------------------------------------ */
-+/* tc_fill_qdisc — hide qdisc from RTM_GETQDISC                        */
-+/* ------------------------------------------------------------------ */
-+
-+bool vpnhide_skip_tc_qdisc(struct sk_buff *skb, const struct Qdisc *q)
-+{
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
-+
-+	if (!is_hook_active(HOOK_TC_FILL_QDISC, uid))
-+		return false;
-+	if (!q || !q->dev_queue || !q->dev_queue->dev)
-+		return false;
-+	if (!is_active_vpn_ifindex(q->dev_queue->dev->ifindex))
-+		return false;
-+
-+	record_kmod_intercept(uid, HOOK_TC_FILL_QDISC);
-+	return true;
-+}
-+EXPORT_SYMBOL_GPL(vpnhide_skip_tc_qdisc);
-+
-+/* ------------------------------------------------------------------ */
-+/* vpnhide_filter_seq_line                                             */
-+/*                                                                     */
-+/* Called AFTER a seq_show that cannot do early return (fib_route,    */
-+/* fib_trie). The caller saves seq->count before the show call and     */
-+/* passes it here. If the written text names a VPN interface, we       */
-+/* roll the seq buffer back to saved_count, discarding the line.       */
-+/* ------------------------------------------------------------------ */
-+
-+void vpnhide_filter_seq_line(struct seq_file *seq, int saved_count)
-+{
-+	char *buf;
-+	int written;
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
-+
-+	if (!is_target_uid_val(uid))
-+		return;
-+
-+	written = (int)seq->count - saved_count;
-+	if (written <= 0)
-+		return;
-+
-+	buf = seq->buf + saved_count;
-+
-+	/* Scan the written text for any active VPN interface name */
-+	if (vh_is_vpn_name_cached(buf, written))
-+		seq->count = saved_count;
-+}
-+EXPORT_SYMBOL_GPL(vpnhide_filter_seq_line);
-+
-+/* ------------------------------------------------------------------ */
-+/* ioctl hooks — SIOCG* per-interface and SIOCGIFCONF                  */
-+/* ------------------------------------------------------------------ */
-+
-+/*
-+ * vpnhide_ioctl_ifname_block — called before dev_ioctl dispatches a
-+ * per-interface command.  Returns true (→ caller should return -ENODEV)
-+ * when the named interface is an active VPN.
-+ */
-+bool vpnhide_ioctl_ifname_block(const char *ifname)
-+{
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
-+
-+	if (!is_hook_active(HOOK_DEV_IOCTL, uid))
-+		return false;
-+	if (!ifname || !ifname[0])
-+		return false;
-+	if (!is_active_vpn_ifname(ifname))
-+		return false;
-+
-+	record_kmod_intercept(uid, HOOK_DEV_IOCTL);
-+	return true;
-+}
-+EXPORT_SYMBOL_GPL(vpnhide_ioctl_ifname_block);
-+
-+/*
-+ * vpnhide_filter_ifconf — post-filter for SIOCGIFCONF.
-+ * data is the void __user * passed to dev_ifconf (points to struct ifconf).
-+ * Compacts the ifreq array in-place, removing VPN entries, and updates
-+ * ifc_len so the caller sees a shorter list.
-+ */
-+void vpnhide_filter_ifconf(void __user *data)
-+{
-+	struct ifconf __user *uifc = data;
-+	struct ifconf ifc;
-+	struct ifreq tmp;
-+	int n, i, dst;
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
-+
-+	if (!is_hook_active(HOOK_SOCK_IOCTL, uid))
-+		return;
-+	if (!is_target_uid_val(uid))
-+		return;
-+
-+	if (copy_from_user(&ifc, uifc, sizeof(ifc)))
-+		return;
-+	if (!ifc.ifc_req || ifc.ifc_len <= 0)
-+		return;
-+
-+	n = ifc.ifc_len / (int)sizeof(struct ifreq);
-+	dst = 0;
-+
-+	for (i = 0; i < n; i++) {
-+		if (copy_from_user(&tmp, &ifc.ifc_req[i], sizeof(tmp)))
-+			return;
-+		tmp.ifr_name[IFNAMSIZ - 1] = '\0';
-+		if (is_active_vpn_ifname(tmp.ifr_name))
-+			continue;
-+		if (dst != i) {
-+			if (copy_to_user(&ifc.ifc_req[dst], &tmp, sizeof(tmp)))
-+				return;
-+		}
-+		dst++;
-+	}
-+
-+	if (dst < n) {
-+		int new_len = dst * (int)sizeof(struct ifreq);
-+		put_user(new_len, &uifc->ifc_len);
-+		record_kmod_intercept(uid, HOOK_SOCK_IOCTL);
-+	}
-+}
-+EXPORT_SYMBOL_GPL(vpnhide_filter_ifconf);
 diff --git a/security/vpnhide/hook_socket.c b/security/vpnhide/hook_socket.c
 new file mode 100644
 index 000000000..e35baf9f0
@@ -2763,7 +2367,7 @@ index 000000000..e35baf9f0
 +EXPORT_SYMBOL_GPL(vpnhide_getsockopt);
 diff --git a/security/vpnhide/vpnhide.h b/security/vpnhide/vpnhide.h
 new file mode 100644
-index 000000000..f4dec8ae8
+index 000000000..96a5503b7
 --- /dev/null
 +++ b/security/vpnhide/vpnhide.h
 @@ -0,0 +1,258 @@
@@ -2788,7 +2392,7 @@ index 000000000..f4dec8ae8
 +
 +#include "vpnhide_uapi.h"
 +
-+#define MODNAME        "vpnhide"
++#define MODNAME        "vpnhide_ctrl"
 +#define BUCKETS_COUNT  30
 +
 +#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)

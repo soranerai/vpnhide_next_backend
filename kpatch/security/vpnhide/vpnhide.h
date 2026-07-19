@@ -19,7 +19,7 @@
 
 #include "vpnhide_uapi.h"
 
-#define MODNAME        "vpnhide"
+#define MODNAME        "vpnhide_ctrl"
 #define BUCKETS_COUNT  30
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)

@@ -185,20 +185,21 @@ def patch_net_socket_c(content):
         else:
             print("WARNING: getsockname anchor not found")
 
-    # 5. __sys_getpeername: hook after second move_addr_to_user
-    getpeername_anchor = 'err = move_addr_to_user(&address, err, usockaddr, usockaddr_len);'
+    # 5. __sys_getpeername: hook before fput_light — 5.10 splits move_addr_to_user across lines
     getpeername_hook = guard(
         '\tvpnhide_getname(sock, (struct sockaddr *)&address, 1, &err);\n'
     )
     if 'vpnhide_getname(sock, (struct sockaddr *)&address, 1' not in content:
-        # Find second occurrence
-        idx = content.find(getsockname_anchor)
-        if idx != -1:
-            idx2 = content.find(getsockname_anchor, idx + len(getsockname_anchor))
-            if idx2 != -1:
-                pos = idx2 + len(getsockname_anchor)
-                content = content[:pos] + '\n' + getpeername_hook + content[pos:]
+        peer_idx = content.find('int __sys_getpeername(')
+        if peer_idx != -1:
+            fput_idx = content.find('\tfput_light(sock->file, fput_needed);', peer_idx)
+            if fput_idx != -1:
+                content = content[:fput_idx] + getpeername_hook + content[fput_idx:]
                 changed = True
+            else:
+                print("WARNING: fput_light anchor not found inside __sys_getpeername")
+        else:
+            print("WARNING: __sys_getpeername not found in net/socket.c")
 
     # 6. __sys_setsockopt: hook at entry before SOL_SOCKET check
     setsockopt_anchor = 'if (level == SOL_SOCKET'
@@ -245,22 +246,24 @@ def patch_fs_namei_c(content):
         if ok:
             changed = True
 
-    # filename_lookup: hook if lookup succeeded (err == 0)
-    fname_anchor = 'filename_lookup(int dfd, struct filename *name, unsigned int flags,'
+    # filename_lookup: hook if lookup succeeded — 5.10 uses "unsigned flags" (no int)
+    fname_anchor = 'filename_lookup(int dfd, struct filename *name, unsigned'
     if 'vpnhide_filename_lookup' not in content:
         idx = content.find(fname_anchor)
         if idx != -1:
-            ret_anchor = '\treturn err;\n}'
+            ret_anchor = '\treturn retval;\n}'
             idx2 = content.find(ret_anchor, idx)
             if idx2 != -1:
                 hook = (
                     '\n#ifdef CONFIG_VPNHIDE\n'
-                    '\tif (!err)\n'
-                    '\t\tvpnhide_filename_lookup(dfd, name, flags, path, &err);\n'
+                    '\tif (!retval)\n'
+                    '\t\tvpnhide_filename_lookup(dfd, name, flags, path, &retval);\n'
                     '#endif\n'
                 )
                 content = content[:idx2] + hook + content[idx2:]
                 changed = True
+            else:
+                print("WARNING: filename_lookup return anchor not found in namei.c")
 
     return content, changed
 

@@ -18,39 +18,11 @@
 #include <linux/fs.h>
 #include <linux/dirent.h>
 
-struct inet6_ifaddr;
-struct in_ifaddr;
-struct fib_info;
-struct fib_rule;
-struct rt6_info;
-struct rtable;
-struct qdisc_dump_args;
-struct Qdisc;
-struct proc_dir_entry;
-
 /* ------------------------------------------------------------------ */
 /* Netlink / routing                                                    */
 /* ------------------------------------------------------------------ */
 
-bool vpnhide_skip_iflink(struct sk_buff *skb, const struct net_device *dev);
-bool vpnhide_skip_inet6_ifaddr(struct sk_buff *skb, struct inet6_ifaddr *ifa);
-bool vpnhide_skip_inet_ifaddr(struct sk_buff *skb, struct in_ifaddr *ifa);
-bool vpnhide_skip_fib_dump(struct sk_buff *skb, struct fib_info *fi, int nhsel);
-bool vpnhide_skip_fib_rule(struct sk_buff *skb, struct fib_rule *rule);
-bool vpnhide_skip_rt6(struct sk_buff *skb, struct fib6_info *rt);
-bool vpnhide_skip_rt4(struct sk_buff *skb, struct rtable *rt);
-bool vpnhide_skip_dev_seq(struct seq_file *seq, const struct net_device *dev);
-bool vpnhide_skip_if6_seq(struct seq_file *seq, struct inet6_ifaddr *ifa);
-bool vpnhide_skip_tc_qdisc(struct sk_buff *skb, const struct Qdisc *q);
-void vpnhide_filter_seq_line(struct seq_file *seq, int saved_count);
 bool vpnhide_should_hide_dev(const struct net_device *dev);
-
-/* ------------------------------------------------------------------ */
-/* ioctl                                                                */
-/* ------------------------------------------------------------------ */
-
-bool vpnhide_ioctl_ifname_block(const char *ifname);
-void vpnhide_filter_ifconf(void __user *data);
 
 /* ------------------------------------------------------------------ */
 /* Socket                                                               */
@@ -102,6 +74,8 @@ bool vpnhide_filter_sysctl(struct inode *dir,
 bool vpnhide_getdents64(unsigned int fd,
 			struct linux_dirent64 __user *dirent,
 			unsigned int count, int *retval);
+void vpnhide_filename_lookup(int dfd, struct filename *name,
+			     unsigned flags, struct path *path, int *retval);
 
 #else /* !CONFIG_VPNHIDE */
 
@@ -110,13 +84,6 @@ bool vpnhide_getdents64(unsigned int fd,
 struct sk_buff;
 struct net_device;
 struct seq_file;
-struct inet6_ifaddr;
-struct in_ifaddr;
-struct fib_info;
-struct fib_rule;
-struct fib6_info;
-struct rtable;
-struct Qdisc;
 struct socket;
 struct sockaddr;
 struct sock;
@@ -125,36 +92,13 @@ union bpf_attr;
 struct path;
 struct linux_dirent64;
 struct inode;
+struct filename;
 #ifndef _LINUX_SOCKPTR_H
 typedef struct { const void *user; bool is_kernel; } sockptr_t;
 #endif
 
-static inline bool vpnhide_skip_iflink(struct sk_buff *s,
-	const struct net_device *d) { return false; }
-static inline bool vpnhide_skip_inet6_ifaddr(struct sk_buff *s,
-	struct inet6_ifaddr *i) { return false; }
-static inline bool vpnhide_skip_inet_ifaddr(struct sk_buff *s,
-	struct in_ifaddr *i) { return false; }
-static inline bool vpnhide_skip_fib_dump(struct sk_buff *s,
-	struct fib_info *fi, int n) { return false; }
-static inline bool vpnhide_skip_fib_rule(struct sk_buff *s,
-	struct fib_rule *r) { return false; }
-static inline bool vpnhide_skip_rt6(struct sk_buff *s,
-	struct fib6_info *r) { return false; }
-static inline bool vpnhide_skip_rt4(struct sk_buff *s,
-	struct rtable *r) { return false; }
-static inline bool vpnhide_skip_dev_seq(struct seq_file *s,
-	const struct net_device *d) { return false; }
-static inline bool vpnhide_skip_if6_seq(struct seq_file *s,
-	struct inet6_ifaddr *i) { return false; }
-static inline bool vpnhide_skip_tc_qdisc(struct sk_buff *s,
-	const struct Qdisc *q) { return false; }
-static inline void vpnhide_filter_seq_line(struct seq_file *s,
-	int c) {}
 static inline bool vpnhide_should_hide_dev(const struct net_device *d)
 	{ return false; }
-static inline bool vpnhide_ioctl_ifname_block(const char *n) { return false; }
-static inline void vpnhide_filter_ifconf(void __user *d) {}
 static inline int vpnhide_setsockopt_sock(struct socket *sock, int lv, int opt,
 	sockptr_t v, unsigned int l) { return 0; }
 static inline void vpnhide_getsockopt_post(struct socket *sock, int lv,
@@ -192,6 +136,8 @@ static inline bool vpnhide_filter_sysctl(struct inode *dir,
 static inline bool vpnhide_getdents64(unsigned int fd,
 	struct linux_dirent64 __user *d, unsigned int c, int *r)
 	{ return false; }
+static inline void vpnhide_filename_lookup(int dfd, struct filename *name,
+	unsigned flags, struct path *path, int *r) {}
 
 #endif /* CONFIG_VPNHIDE */
 #endif /* _LINUX_VPNHIDE_H */

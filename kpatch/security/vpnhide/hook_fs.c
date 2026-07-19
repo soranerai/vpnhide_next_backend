@@ -218,3 +218,17 @@ bool vpnhide_filter_sysctl(struct inode *dir,
 	return false;
 }
 EXPORT_SYMBOL_GPL(vpnhide_filter_sysctl);
+
+/* ------------------------------------------------------------------ */
+/* filename_lookup — deny access to VPN-revealing paths               */
+/* ------------------------------------------------------------------ */
+
+void vpnhide_filename_lookup(int dfd, struct filename *name,
+			     unsigned flags, struct path *path, int *retval)
+{
+	if (vpnhide_should_hide_path(path)) {
+		path_put(path);
+		*retval = -ENOENT;
+	}
+}
+EXPORT_SYMBOL_GPL(vpnhide_filename_lookup);
