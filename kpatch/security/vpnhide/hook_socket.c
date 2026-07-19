@@ -11,6 +11,7 @@
 #include <linux/udp.h>
 #include <linux/if.h>
 #include <linux/file.h>
+#include <linux/netdevice.h>
 #include <net/sock.h>
 #include <net/inet_sock.h>
 #include <net/ipv6.h>
@@ -108,7 +109,10 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 		}
 	} else if (level == SOL_UDP) {
 		if (optname == UDP_SEGMENT) {
-			/* Accept silently; not setting gso_size means no GSO — send path works normally */
+			u16 val = 0;
+			if (optlen >= sizeof(val))
+				copy_from_sockptr(&val, optval, sizeof(val));
+			udp_sk(sk)->gso_size = val;
 			record_kmod_intercept(uid, HOOK_SETSOCKOPT);
 			return 0;
 		}
@@ -424,8 +428,21 @@ int vpnhide_inet6_bind_ll(struct sock *sk,
 		return 0;
 	if (!is_target_uid_val(uid))
 		return 0;
-	if (!is_active_vpn_ifindex(sin6->sin6_scope_id))
-		return 0;
+	if (!is_active_vpn_ifindex(sin6->sin6_scope_id)) {
+		/* ifindex not tracked by daemon yet — resolve name and check */
+		struct net_device *_dev;
+		bool _vpn;
+
+		if (!sin6->sin6_scope_id)
+			return 0;
+		_dev = dev_get_by_index(sock_net(sk), sin6->sin6_scope_id);
+		if (!_dev)
+			return 0;
+		_vpn = is_active_vpn_ifname(_dev->name);
+		dev_put(_dev);
+		if (!_vpn)
+			return 0;
+	}
 
 	record_kmod_intercept(uid, HOOK_INET6_BIND_LL);
 	return -ENODEV;
@@ -436,10 +453,11 @@ EXPORT_SYMBOL_GPL(vpnhide_inet6_bind_ll);
 /* udpv6_sendmsg_ll — block UDP link-local toward VPN interface        */
 /* ------------------------------------------------------------------ */
 
-bool vpnhide_udpv6_sendmsg_ll(struct sock *sk)
+bool vpnhide_udpv6_sendmsg_ll(struct sock *sk, struct msghdr *msg)
 {
 	struct ipv6_pinfo *np;
 	uid_t uid;
+	u32 oifindex;
 
 	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_UDPV6_SENDMSG)))
 		return false;
@@ -452,7 +470,18 @@ bool vpnhide_udpv6_sendmsg_ll(struct sock *sk)
 	np = inet6_sk(sk);
 	if (!np)
 		return false;
-	if (!is_active_vpn_ifindex(sk->sk_bound_dev_if))
+
+	oifindex = sk->sk_bound_dev_if;
+	/* For unbound sockets (e.g. sendto with scope_id), check the destination */
+	if (!oifindex && msg && msg->msg_name &&
+	    msg->msg_namelen >= sizeof(struct sockaddr_in6)) {
+		const struct sockaddr_in6 *sin6 = msg->msg_name;
+		if (sin6->sin6_family == AF_INET6 &&
+		    (ipv6_addr_type(&sin6->sin6_addr) & IPV6_ADDR_LINKLOCAL))
+			oifindex = sin6->sin6_scope_id;
+	}
+
+	if (!is_active_vpn_ifindex(oifindex))
 		return false;
 
 	record_kmod_intercept(uid, HOOK_UDPV6_SENDMSG);

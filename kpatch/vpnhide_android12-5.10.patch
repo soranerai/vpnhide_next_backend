@@ -74,7 +74,7 @@ index 5813bc37e..fd8ac3d51 100644
  #include <linux/compat.h>
 diff --git a/include/linux/vpnhide.h b/include/linux/vpnhide.h
 new file mode 100644
-index 000000000..60b9054f2
+index 000000000..00000000
 --- /dev/null
 +++ b/include/linux/vpnhide.h
 @@ -0,0 +1,145 @@
@@ -131,7 +131,7 @@ index 000000000..60b9054f2
 +			char __user *optval, int __user *optlen, int *err);
 +int  vpnhide_inet6_bind_ll(struct sock *sk,
 +			   struct sockaddr *uaddr, int addr_len);
-+bool vpnhide_udpv6_sendmsg_ll(struct sock *sk);
++bool vpnhide_udpv6_sendmsg_ll(struct sock *sk, struct msghdr *msg);
 +bool vpnhide_udp_sendmsg(struct sock *sk);
 +bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg,
 +			     size_t len, int *err);
@@ -203,7 +203,7 @@ index 000000000..60b9054f2
 +	char __user *v, int __user *l, int *e) {}
 +static inline int vpnhide_inet6_bind_ll(struct sock *sk,
 +	struct sockaddr *a, int l) { return 0; }
-+static inline bool vpnhide_udpv6_sendmsg_ll(struct sock *sk) { return false; }
++static inline bool vpnhide_udpv6_sendmsg_ll(struct sock *sk, struct msghdr *msg) { return false; }
 +static inline bool vpnhide_udp_sendmsg(struct sock *sk) { return false; }
 +static inline bool vpnhide_udp_sendmsg_pre(struct sock *sk,
 +	struct msghdr *msg, size_t len, int *err) { return false; }
@@ -315,16 +315,32 @@ index a6159624e..e0aadc537 100644
  #include <net/ip_tunnels.h>
  #include <linux/indirect_call_wrapper.h>
  
-@@ -991,6 +995,13 @@ static int fib_nl_fill_rule(struct sk_buff *skb, struct fib_rule *rule,
+@@ -991,6 +995,29 @@ static int fib_nl_fill_rule(struct sk_buff *skb, struct fib_rule *rule,
  	struct nlmsghdr *nlh;
  	struct fib_rule_hdr *frh;
  
 +#ifdef CONFIG_VPNHIDE
-+	if (is_target_uid() &&
-+	    ((rule->iifname[0] && vpnhide_should_hide_ifname(rule->iifname)) ||
-+	     (rule->oifname[0] && vpnhide_should_hide_ifname(rule->oifname)) ||
-+	    is_target_uid_val(from_kuid(&init_user_ns, rule->uid_range.start))))
-+		return 0;
++	{
++		uid_t _uid = from_kuid(&init_user_ns, current_uid());
++		if (is_target_uid_val(_uid)) {
++			if (rule->iifname[0] && vpnhide_should_hide_ifname(rule->iifname))
++				return 0;
++			if (rule->oifname[0] && vpnhide_should_hide_ifname(rule->oifname))
++				return 0;
++			if (uid_range_set(&rule->uid_range)) {
++				u32 s = from_kuid(&init_user_ns, rule->uid_range.start);
++				u32 e = from_kuid(&init_user_ns, rule->uid_range.end);
++				u32 t = rule->table;
++				/* check_netlink_getrule: caller uid in [s,e] with non-main table */
++				if (_uid >= s && _uid <= e &&
++				    t > 100 && t != 253 && t != 254 && t != 255)
++					return 0;
++				/* check_uid_route_rules_leak: rule covers Android app uid space */
++				if ((s >= 10000 || e >= 10000) && e != (u32)~0U && e > s)
++					return 0;
++			}
++		}
++	}
 +#endif
  	nlh = nlmsg_put(skb, pid, seq, type, sizeof(*frh), flags);
  	if (nlh == NULL)
@@ -660,15 +676,17 @@ index 538503720..5f8729898 100644
  
  static void udpv6_destruct_sock(struct sock *sk)
  {
-@@ -1316,6 +1320,13 @@ int udpv6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
+@@ -1316,6 +1320,15 @@ int udpv6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
  	int is_udplite = IS_UDPLITE(sk);
  	int (*getfrag)(void *, char *, int, int, int, struct sk_buff *);
- 
+
 +#ifdef CONFIG_VPNHIDE
 +	{
 +		int _err = 0;
 +		if (vpnhide_udp_sendmsg_pre(sk, msg, len, &_err))
 +			return _err;
++		if (vpnhide_udpv6_sendmsg_ll(sk, msg))
++			return -EAGAIN;
 +	}
 +#endif
  	ipcm6_init(&ipc6);
@@ -862,10 +880,10 @@ index 000000000..c51839e96
 +vpnhide-objs := core.o hook_socket.o hook_netlink.o hook_fs.o
 diff --git a/security/vpnhide/core.c b/security/vpnhide/core.c
 new file mode 100644
-index 000000000..28e81fe4d
+index 000000000..3a01a3be4
 --- /dev/null
 +++ b/security/vpnhide/core.c
-@@ -0,0 +1,1148 @@
+@@ -0,0 +1,1158 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * vpnhide — core state, IOCTL handler, helpers
@@ -894,6 +912,11 @@ index 000000000..28e81fe4d
 +
 +bool          debug_enabled;
 +unsigned int  active_hooks_mask = 0xFFFFFFFF;
++
++/* Fast-path flags — checked before any RCU section.  Written under their
++ * respective update locks; read with READ_ONCE on the hot path. */
++static bool g_has_targets;
++static bool g_has_app_masks;
 +
 +struct vpnhide_app_hook_masks __rcu *global_app_hook_masks;
 +spinlock_t app_hook_masks_update_lock;
@@ -1051,6 +1074,8 @@ index 000000000..28e81fe4d
 +
 +	if (uid == 0 || uid == 1000)
 +		return false;
++	if (!READ_ONCE(g_has_targets))
++		return false;
 +
 +	rcu_read_lock();
 +	t = rcu_dereference(global_targets);
@@ -1107,15 +1132,14 @@ index 000000000..28e81fe4d
 +
 +bool is_hook_active(enum vpnhide_hook_idx index, uid_t uid)
 +{
-+	unsigned int mask;
 +	unsigned int bit = BIT(index);
++	unsigned int mask;
 +
-+	/* A per-app kernel mask, when present, fully overrides the global
-+	 * mask for that uid — it does not additionally require the global
-+	 * bit to be set. This matches kmod's is_hook_active(); "is this hook
-+	 * active" is a policy question and must not be conflated with
-+	 * "is this uid a target" (that check belongs in the caller, e.g.
-+	 * BPF laundering explicitly skips target uids itself). */
++	/* Fast path: no per-app masks configured — skip RCU entirely. */
++	if (!READ_ONCE(g_has_app_masks))
++		return !!(READ_ONCE(active_hooks_mask) & bit);
++
++	/* Per-app mask fully overrides the global for that uid. */
 +	if (lookup_app_kernel_mask(uid, &mask))
 +		return !!(mask & bit);
 +
@@ -1443,6 +1467,7 @@ index 000000000..28e81fe4d
 +		old = rcu_dereference_protected(global_targets,
 +				lockdep_is_held(&targets_update_lock));
 +		rcu_assign_pointer(global_targets, nt);
++		WRITE_ONCE(g_has_targets, nt->count > 0);
 +		spin_unlock(&targets_update_lock);
 +		if (old) { synchronize_rcu(); kfree(old); }
 +		atomic_inc(&vpnhide_config_generation);
@@ -1685,6 +1710,7 @@ index 000000000..28e81fe4d
 +		old = rcu_dereference_protected(global_app_hook_masks,
 +				lockdep_is_held(&app_hook_masks_update_lock));
 +		rcu_assign_pointer(global_app_hook_masks, nm);
++		WRITE_ONCE(g_has_app_masks, nm->count > 0);
 +		spin_unlock(&app_hook_masks_update_lock);
 +		if (old) { synchronize_rcu(); kfree(old); }
 +		break;
@@ -1977,6 +2003,7 @@ index 000000000..28e81fe4d
 +
 +	t  = rcu_dereference_protected(global_targets, 1);
 +	rcu_assign_pointer(global_targets, NULL);
++	WRITE_ONCE(g_has_targets, false);
 +
 +	pt = rcu_dereference_protected(global_port_targets, 1);
 +	rcu_assign_pointer(global_port_targets, NULL);
@@ -1995,6 +2022,7 @@ index 000000000..28e81fe4d
 +
 +	am = rcu_dereference_protected(global_app_hook_masks, 1);
 +	rcu_assign_pointer(global_app_hook_masks, NULL);
++	WRITE_ONCE(g_has_app_masks, false);
 +
 +	synchronize_rcu();
 +	kfree(t);
@@ -2016,10 +2044,10 @@ index 000000000..28e81fe4d
 +MODULE_AUTHOR("soranerai");
 diff --git a/security/vpnhide/hook_fs.c b/security/vpnhide/hook_fs.c
 new file mode 100644
-index 000000000..f6059ae91
+index 000000000..9da398157
 --- /dev/null
 +++ b/security/vpnhide/hook_fs.c
-@@ -0,0 +1,324 @@
+@@ -0,0 +1,345 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * vpnhide — filesystem, BPF, and UDP hooks
@@ -2098,14 +2126,18 @@ index 000000000..f6059ae91
 +void vpnhide_bpf_lookup_elem(struct bpf_map *map, void *key, void *value)
 +{
 +	struct vh_stats_value *sv = value;
++	uid_t uid;
 +
 +	if (!map || !key || !value)
 +		return;
++	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_BPF)))
++		return;
++	uid = from_kuid(&init_user_ns, current_uid());
 +	/* The target process itself must see its own real traffic — only
 +	 * OTHER processes (e.g. netd, settings) get the laundered view. */
-+	if (is_target_uid())
++	if (is_target_uid_val(uid))
 +		return;
-+	if (!is_hook_active(HOOK_BPF, from_kuid(&init_user_ns, current_uid())))
++	if (!is_hook_active(HOOK_BPF, uid))
 +		return;
 +
 +	if (vh_is_wide_stats_map(map)) {
@@ -2160,13 +2192,17 @@ index 000000000..f6059ae91
 +	u32 count = 0;
 +	u32 i;
 +	bool wide, iface;
++	uid_t uid;
 +
 +	if (!map || !attr || !uattr)
 +		return;
-+	/* The target process itself must see its own real traffic. */
-+	if (is_target_uid())
++	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_BPF)))
 +		return;
-+	if (!is_hook_active(HOOK_BPF, from_kuid(&init_user_ns, current_uid())))
++	uid = from_kuid(&init_user_ns, current_uid());
++	/* The target process itself must see its own real traffic. */
++	if (is_target_uid_val(uid))
++		return;
++	if (!is_hook_active(HOOK_BPF, uid))
 +		return;
 +	wide  = vh_is_wide_stats_map(map);
 +	iface = vh_is_iface_stats_map(map);
@@ -2222,15 +2258,18 @@ index 000000000..f6059ae91
 +			unsigned int count, int *retval)
 +{
 +	struct linux_dirent64 *kbuf, *cur, *prev;
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
++	uid_t uid;
 +	int nbytes = *retval;
 +	long bytes_left;
 +
 +	if (nbytes <= 0)
 +		return false;
++	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_GETDENTS64)))
++		return false;
++	uid = from_kuid(&init_user_ns, current_uid());
 +	if (!is_hook_active(HOOK_GETDENTS64, uid))
 +		return false;
-+	if (!is_target_uid())
++	if (!is_target_uid_val(uid))
 +		return false;
 +
 +	kbuf = kvmalloc(nbytes, GFP_KERNEL);
@@ -2284,8 +2323,13 @@ index 000000000..f6059ae91
 +bool vpnhide_should_hide_path(const struct path *path)
 +{
 +	struct dentry *dentry = path->dentry;
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
++	uid_t uid;
 +
++	/* Fast exits — avoid RCU + binary search on every filename_lookup */
++	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_OPENAT)))
++		return false;
++
++	uid = from_kuid(&init_user_ns, current_uid());
 +	if (!is_target_uid_val(uid))
 +		return false;
 +
@@ -2314,8 +2358,13 @@ index 000000000..f6059ae91
 +bool vpnhide_filter_sysctl(struct inode *dir,
 +			   const char *name, size_t namelen)
 +{
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
++	uid_t uid;
 +
++	/* Fast exits */
++	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_OPENAT)))
++		return false;
++
++	uid = from_kuid(&init_user_ns, current_uid());
 +	if (!is_target_uid_val(uid))
 +		return false;
 +
@@ -2346,21 +2395,24 @@ index 000000000..f6059ae91
 +EXPORT_SYMBOL_GPL(vpnhide_filename_lookup);
 diff --git a/security/vpnhide/hook_netlink.c b/security/vpnhide/hook_netlink.c
 new file mode 100644
-index 000000000..c95d46172
+index 000000000..47f6c9b2b
 --- /dev/null
 +++ b/security/vpnhide/hook_netlink.c
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,22 @@
 +// SPDX-License-Identifier: GPL-2.0
 +#include <linux/netdevice.h>
 +#include "vpnhide.h"
 +
 +bool vpnhide_should_hide_dev(const struct net_device *dev)
 +{
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
++	uid_t uid;
 +
++	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_RTNL_FILL)))
++		return false;
++	uid = from_kuid(&init_user_ns, current_uid());
 +	if (!is_hook_active(HOOK_RTNL_FILL, uid))
 +		return false;
-+	if (!is_target_uid())
++	if (!is_target_uid_val(uid))
 +		return false;
 +	if (!is_active_vpn_ifindex(dev->ifindex))
 +		return false;
@@ -2371,10 +2423,10 @@ index 000000000..c95d46172
 +EXPORT_SYMBOL_GPL(vpnhide_should_hide_dev);
 diff --git a/security/vpnhide/hook_socket.c b/security/vpnhide/hook_socket.c
 new file mode 100644
-index 000000000..5a1b0c2e9
+index 000000000..00000000
 --- /dev/null
 +++ b/security/vpnhide/hook_socket.c
-@@ -0,0 +1,601 @@
+@@ -0,0 +1,648 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * vpnhide — socket hooks
@@ -2388,6 +2440,7 @@ index 000000000..5a1b0c2e9
 +#include <linux/udp.h>
 +#include <linux/if.h>
 +#include <linux/file.h>
++#include <linux/netdevice.h>
 +#include <net/sock.h>
 +#include <net/inet_sock.h>
 +#include <net/ipv6.h>
@@ -2413,7 +2466,7 @@ index 000000000..5a1b0c2e9
 +	uid = from_kuid(&init_user_ns, current_uid());
 +	if (!is_hook_active(HOOK_SETSOCKOPT, uid))
 +		return 0;
-+	if (!is_target_uid())
++	if (!is_target_uid_val(uid))
 +		return 0;
 +
 +	sk = sock->sk;
@@ -2472,24 +2525,25 @@ index 000000000..5a1b0c2e9
 +		}
 +	} else if (level == SOL_IP) {
 +		if (optname == IP_MTU_DISCOVER) {
-+			/* Force DONT so IP never sends PMTU probes via VPN */
-+			int val = IP_PMTUDISC_DONT;
-+
-+			inet_sk(sk)->pmtudisc = val;
++			/* Force DONT; pretend to caller that their value was accepted */
++			inet_sk(sk)->pmtudisc = IP_PMTUDISC_DONT;
 +			record_kmod_intercept(uid, HOOK_SETSOCKOPT);
-+			return -EPERM; /* block original call */
++			return 0;
 +		}
 +	} else if (level == SOL_IPV6) {
 +		if (optname == IPV6_MTU_DISCOVER) {
 +			inet6_sk(sk)->pmtudisc = IPV6_PMTUDISC_DONT;
 +			record_kmod_intercept(uid, HOOK_SETSOCKOPT);
-+			return -EPERM;
++			return 0;
 +		}
 +	} else if (level == SOL_UDP) {
 +		if (optname == UDP_SEGMENT) {
-+			/* Block GSO probe — leaks VPN MTU info */
++			u16 val = 0;
++			if (optlen >= sizeof(val))
++				copy_from_sockptr(&val, optval, sizeof(val));
++			udp_sk(sk)->gso_size = val;
 +			record_kmod_intercept(uid, HOOK_SETSOCKOPT);
-+			return -ENOPROTOOPT;
++			return 0;
 +		}
 +	}
 +	return 0;
@@ -2513,7 +2567,7 @@ index 000000000..5a1b0c2e9
 +	uid = from_kuid(&init_user_ns, current_uid());
 +	if (!is_hook_active(HOOK_GETSOCKOPT, uid))
 +		return;
-+	if (!is_target_uid())
++	if (!is_target_uid_val(uid))
 +		return;
 +
 +	if (get_user(len, optlen))
@@ -2586,14 +2640,20 @@ index 000000000..5a1b0c2e9
 +		}
 +		case TCP_INFO: {
 +			struct tcp_info info;
++			/* lib.rs passes a partial TcpInfoMss (24 bytes) — only require
++			 * enough buffer to reach tcpi_rcv_mss, not the full tcp_info. */
++			int need = offsetof(struct tcp_info, tcpi_rcv_mss) +
++				   (int)sizeof(u32);
 +
-+			if (len < (int)sizeof(info))
++			if (len < need)
 +				break;
-+			if (copy_from_user(&info, optval, sizeof(info)))
++			if (copy_from_user(&info, optval,
++					   min_t(int, len, (int)sizeof(info))))
 +				break;
 +			info.tcpi_snd_mss = 1460;
 +			info.tcpi_rcv_mss = 1460;
-+			copy_to_user(optval, &info, sizeof(info));
++			copy_to_user(optval, &info,
++				     min_t(int, len, (int)sizeof(info)));
 +			record_kmod_intercept(uid, HOOK_GETSOCKOPT);
 +			break;
 +		}
@@ -2639,9 +2699,12 @@ index 000000000..5a1b0c2e9
 +int vpnhide_connect_pre(struct socket *sock,
 +			struct sockaddr *addr, int addrlen)
 +{
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
++	uid_t uid;
 +	sa_family_t family;
 +
++	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_CONNECT)))
++		return 0;
++	uid = from_kuid(&init_user_ns, current_uid());
 +	if (!is_hook_active(HOOK_CONNECT, uid))
 +		return 0;
 +
@@ -2679,9 +2742,12 @@ index 000000000..5a1b0c2e9
 +int vpnhide_bind_pre(struct socket *sock,
 +		     struct sockaddr *addr, int addrlen)
 +{
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
++	uid_t uid;
 +	sa_family_t family;
 +
++	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_BIND)))
++		return 0;
++	uid = from_kuid(&init_user_ns, current_uid());
 +	if (!is_hook_active(HOOK_BIND, uid))
 +		return 0;
 +
@@ -2716,16 +2782,17 @@ index 000000000..5a1b0c2e9
 +void vpnhide_getname_post(struct socket *sock, struct sockaddr *addr, int peer)
 +{
 +	struct vpnhide_spoof_ip sip;
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
++	uid_t uid;
 +	sa_family_t family;
 +
 +	if (peer)
 +		return; /* only spoof local name */
 +
++	uid = from_kuid(&init_user_ns, current_uid());
 +	if (!is_hook_active(HOOK_GETNAME_INET, uid) &&
 +	    !is_hook_active(HOOK_GETNAME_INET6, uid))
 +		return;
-+	if (!is_target_uid())
++	if (!is_target_uid_val(uid))
 +		return;
 +
 +	/* Don't spoof sockets explicitly bound to a non-VPN interface —
@@ -2788,13 +2855,26 @@ index 000000000..5a1b0c2e9
 +		return 0;
 +	if (!is_hook_active(HOOK_INET6_BIND_LL, uid))
 +		return 0;
-+	if (!is_target_uid())
++	if (!is_target_uid_val(uid))
 +		return 0;
-+	if (!is_active_vpn_ifindex(sin6->sin6_scope_id))
-+		return 0;
++	if (!is_active_vpn_ifindex(sin6->sin6_scope_id)) {
++		/* ifindex not tracked by daemon yet — resolve name and check */
++		struct net_device *_dev;
++		bool _vpn;
++
++		if (!sin6->sin6_scope_id)
++			return 0;
++		_dev = dev_get_by_index(sock_net(sk), sin6->sin6_scope_id);
++		if (!_dev)
++			return 0;
++		_vpn = is_active_vpn_ifname(_dev->name);
++		dev_put(_dev);
++		if (!_vpn)
++			return 0;
++	}
 +
 +	record_kmod_intercept(uid, HOOK_INET6_BIND_LL);
-+	return -EPERM;
++	return -ENODEV;
 +}
 +EXPORT_SYMBOL_GPL(vpnhide_inet6_bind_ll);
 +
@@ -2802,20 +2882,35 @@ index 000000000..5a1b0c2e9
 +/* udpv6_sendmsg_ll — block UDP link-local toward VPN interface        */
 +/* ------------------------------------------------------------------ */
 +
-+bool vpnhide_udpv6_sendmsg_ll(struct sock *sk)
++bool vpnhide_udpv6_sendmsg_ll(struct sock *sk, struct msghdr *msg)
 +{
 +	struct ipv6_pinfo *np;
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
++	uid_t uid;
++	u32 oifindex;
 +
++	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_UDPV6_SENDMSG)))
++		return false;
++	uid = from_kuid(&init_user_ns, current_uid());
 +	if (!is_hook_active(HOOK_UDPV6_SENDMSG, uid))
 +		return false;
-+	if (!is_target_uid())
++	if (!is_target_uid_val(uid))
 +		return false;
 +
 +	np = inet6_sk(sk);
 +	if (!np)
 +		return false;
-+	if (!is_active_vpn_ifindex(sk->sk_bound_dev_if))
++
++	oifindex = sk->sk_bound_dev_if;
++	/* For unbound sockets (e.g. sendto with scope_id), check the destination */
++	if (!oifindex && msg && msg->msg_name &&
++	    msg->msg_namelen >= sizeof(struct sockaddr_in6)) {
++		const struct sockaddr_in6 *sin6 = msg->msg_name;
++		if (sin6->sin6_family == AF_INET6 &&
++		    (ipv6_addr_type(&sin6->sin6_addr) & IPV6_ADDR_LINKLOCAL))
++			oifindex = sin6->sin6_scope_id;
++	}
++
++	if (!is_active_vpn_ifindex(oifindex))
 +		return false;
 +
 +	record_kmod_intercept(uid, HOOK_UDPV6_SENDMSG);
@@ -2854,11 +2949,15 @@ index 000000000..5a1b0c2e9
 +bool vpnhide_udp_sendmsg(struct sock *sk)
 +{
 +	struct vh_udp_uid_rate *r;
-+	uid_t uid = from_kuid(&init_user_ns, current_uid());
++	uid_t uid;
 +	ktime_t now;
 +	s64 elapsed_ns;
 +	int regen;
 +	bool drop = false;
++
++	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_UDP_SENDMSG)))
++		return false;
++	uid = from_kuid(&init_user_ns, current_uid());
 +
 +	if (!is_hook_active(HOOK_UDP_SENDMSG, uid))
 +		return false;

@@ -51,7 +51,7 @@ void vpnhide_getsockopt(struct socket *sock, int level, int optname,
 			char __user *optval, int __user *optlen, int *err);
 int  vpnhide_inet6_bind_ll(struct sock *sk,
 			   struct sockaddr *uaddr, int addr_len);
-bool vpnhide_udpv6_sendmsg_ll(struct sock *sk);
+bool vpnhide_udpv6_sendmsg_ll(struct sock *sk, struct msghdr *msg);
 bool vpnhide_udp_sendmsg(struct sock *sk);
 bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg,
 			     size_t len, int *err);
@@ -123,7 +123,7 @@ static inline void vpnhide_getsockopt(struct socket *sock, int lv, int opt,
 	char __user *v, int __user *l, int *e) {}
 static inline int vpnhide_inet6_bind_ll(struct sock *sk,
 	struct sockaddr *a, int l) { return 0; }
-static inline bool vpnhide_udpv6_sendmsg_ll(struct sock *sk) { return false; }
+static inline bool vpnhide_udpv6_sendmsg_ll(struct sock *sk, struct msghdr *msg) { return false; }
 static inline bool vpnhide_udp_sendmsg(struct sock *sk) { return false; }
 static inline bool vpnhide_udp_sendmsg_pre(struct sock *sk,
 	struct msghdr *msg, size_t len, int *err) { return false; }
