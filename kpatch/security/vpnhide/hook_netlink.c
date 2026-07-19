@@ -4,11 +4,14 @@
 
 bool vpnhide_should_hide_dev(const struct net_device *dev)
 {
-	uid_t uid = from_kuid(&init_user_ns, current_uid());
+	uid_t uid;
 
+	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_RTNL_FILL)))
+		return false;
+	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_RTNL_FILL, uid))
 		return false;
-	if (!is_target_uid())
+	if (!is_target_uid_val(uid))
 		return false;
 	if (!is_active_vpn_ifindex(dev->ifindex))
 		return false;

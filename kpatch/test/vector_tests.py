@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import ctypes
+import errno
 import fcntl
 import os
 import platform
@@ -645,6 +646,169 @@ def test_tc_qdisc(vpn0_idx):
     return True
 
 
+IP_MTU_DISCOVER   = 10
+IP_PMTUDISC_DONT  = 0
+IP_PMTUDISC_DO    = 2
+IPV6_MTU_DISCOVER = 23
+SOL_UDP           = 17
+UDP_SEGMENT       = 103
+TCP_INFO          = 11
+
+
+def test_pmtu_discover():
+    """setsockopt IP_MTU_DISCOVER=DO must return 0 for target; hook forces pmtudisc=DONT."""
+    print("\n--- pmtu_discover checks ---")
+
+    # Non-target: set DO, getsockopt returns DO (hook inactive)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DO)
+        val = struct.unpack("i", s.getsockopt(socket.IPPROTO_IP, IP_MTU_DISCOVER, 4))[0]
+        s.close()
+        if val != IP_PMTUDISC_DO:
+            print(f"FAIL: pmtu_discover non-target: expected pmtudisc={IP_PMTUDISC_DO}, got {val}")
+            return False
+        print(f"[pmtu_discover] Non-target: pmtudisc={val} as expected")
+    except OSError as e:
+        print(f"FAIL: pmtu_discover non-target setsockopt: {e}")
+        return False
+
+    pid = safe_fork()
+    if pid == 0:
+        try:
+            os.setuid(5555)
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # Must not raise — hook returns 0
+            s.setsockopt(socket.IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DO)
+            # Hook must have forced pmtudisc to DONT
+            val = struct.unpack("i", s.getsockopt(socket.IPPROTO_IP, IP_MTU_DISCOVER, 4))[0]
+            s.close()
+            if val != IP_PMTUDISC_DONT:
+                print(f"FAIL: pmtu_discover target: hook did not force DONT (got {val})")
+                sys.exit(1)
+            print(f"[pmtu_discover] Target: setsockopt returned 0, pmtudisc forced to DONT")
+            sys.exit(0)
+        except OSError as e:
+            print(f"FAIL: pmtu_discover target: setsockopt raised {e}")
+            sys.exit(1)
+    else:
+        _, status = os.waitpid(pid, 0)
+        if status != 0:
+            return False
+    return True
+
+
+def test_gso_asymmetry():
+    """setsockopt UDP_SEGMENT=1200 must return 0 for target (silently accepted)."""
+    print("\n--- gso_asymmetry checks ---")
+
+    pid = safe_fork()
+    if pid == 0:
+        try:
+            os.setuid(5555)
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # Must not raise — hook returns 0 silently
+            s.setsockopt(SOL_UDP, UDP_SEGMENT, 1200)
+            s.close()
+            print("[gso_asymmetry] Target: setsockopt UDP_SEGMENT returned 0")
+            sys.exit(0)
+        except OSError as e:
+            print(f"FAIL: gso_asymmetry target: setsockopt raised errno={e.errno} ({e})")
+            sys.exit(1)
+    else:
+        _, status = os.waitpid(pid, 0)
+        if status != 0:
+            return False
+    print("[gso_asymmetry] Passed")
+    return True
+
+
+def test_ipv6_link_local(vpn0_idx):
+    """Binding fe80::1 to vpn0 must return ENODEV for target (not EPERM/EADDRNOTAVAIL)."""
+    print("\n--- ipv6_link_local checks ---")
+
+    # Non-target: bind fe80::1 to vpn0_idx → kernel finds the interface → NOT ENODEV
+    try:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        s.bind(("fe80::1", 0, 0, vpn0_idx))
+        # Unexpected success — vpn0 has fe80::1 configured; that's fine, non-target can bind
+        s.close()
+        print("[ipv6_link_local] Non-target: bind succeeded (fe80::1 is on vpn0)")
+    except OSError as e:
+        if e.errno == errno.ENODEV:
+            print(f"FAIL: ipv6_link_local non-target: got ENODEV — hook should not fire for root")
+            return False
+        print(f"[ipv6_link_local] Non-target: got errno={e.errno} (not ENODEV) — interface visible")
+
+    pid = safe_fork()
+    if pid == 0:
+        try:
+            os.setuid(5555)
+            s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+            s.bind(("fe80::1", 0, 0, vpn0_idx))
+            s.close()
+            # bind succeeded — hook did not fire (unexpected)
+            print("FAIL: ipv6_link_local target: bind succeeded — hook did not return ENODEV")
+            sys.exit(1)
+        except OSError as e:
+            if e.errno == errno.ENODEV:
+                print(f"[ipv6_link_local] Target: got ENODEV as expected")
+                sys.exit(0)
+            print(f"FAIL: ipv6_link_local target: expected ENODEV, got errno={e.errno} ({e})")
+            sys.exit(1)
+    else:
+        _, status = os.waitpid(pid, 0)
+        if status != 0:
+            return False
+    return True
+
+
+def test_tcp_info_mss():
+    """getsockopt TCP_INFO with 24-byte buffer must return spoofed MSS=1460 for target."""
+    print("\n--- tcp_info_mss checks ---")
+
+    # Non-target: getsockopt must succeed (baseline)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        buf = s.getsockopt(socket.IPPROTO_TCP, TCP_INFO, 24)
+        s.close()
+        if len(buf) < 24:
+            print(f"FAIL: tcp_info_mss non-target: got only {len(buf)} bytes")
+            return False
+        snd_mss = struct.unpack_from("<I", buf, 16)[0]
+        rcv_mss = struct.unpack_from("<I", buf, 20)[0]
+        print(f"[tcp_info_mss] Non-target: tcpi_snd_mss={snd_mss} tcpi_rcv_mss={rcv_mss}")
+    except OSError as e:
+        print(f"FAIL: tcp_info_mss non-target: {e}")
+        return False
+
+    pid = safe_fork()
+    if pid == 0:
+        try:
+            os.setuid(5555)
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            buf = s.getsockopt(socket.IPPROTO_TCP, TCP_INFO, 24)
+            s.close()
+            if len(buf) < 24:
+                print(f"FAIL: tcp_info_mss target: got only {len(buf)} bytes")
+                sys.exit(1)
+            snd_mss = struct.unpack_from("<I", buf, 16)[0]
+            rcv_mss = struct.unpack_from("<I", buf, 20)[0]
+            print(f"[tcp_info_mss] Target: tcpi_snd_mss={snd_mss} tcpi_rcv_mss={rcv_mss}")
+            if snd_mss != 1460 or rcv_mss != 1460:
+                print(f"FAIL: tcp_info_mss target: expected 1460/1460, got {snd_mss}/{rcv_mss}")
+                sys.exit(1)
+            sys.exit(0)
+        except OSError as e:
+            print(f"FAIL: tcp_info_mss target: {e}")
+            sys.exit(1)
+    else:
+        _, status = os.waitpid(pid, 0)
+        if status != 0:
+            return False
+    return True
+
+
 def main():
     try:
         vpn0_idx = socket.if_nametoindex("vpn0")
@@ -674,6 +838,10 @@ def main():
     run("proc_sys_net",       test_proc_sys_net)
     run("udp_queue_pressure", test_udp_queue_pressure)
     run("tc_qdisc",           test_tc_qdisc,          vpn0_idx)
+    run("pmtu_discover",      test_pmtu_discover)
+    run("gso_asymmetry",      test_gso_asymmetry)
+    run("ipv6_link_local",    test_ipv6_link_local,   vpn0_idx)
+    run("tcp_info_mss",       test_tcp_info_mss)
 
     print("\n--- Verification Summary ---")
     for name, tag in results:

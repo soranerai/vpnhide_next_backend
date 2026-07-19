@@ -76,14 +76,18 @@ static void vh_collect_vpn_traffic_sum(struct bpf_map *map,
 void vpnhide_bpf_lookup_elem(struct bpf_map *map, void *key, void *value)
 {
 	struct vh_stats_value *sv = value;
+	uid_t uid;
 
 	if (!map || !key || !value)
 		return;
+	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_BPF)))
+		return;
+	uid = from_kuid(&init_user_ns, current_uid());
 	/* The target process itself must see its own real traffic — only
 	 * OTHER processes (e.g. netd, settings) get the laundered view. */
-	if (is_target_uid())
+	if (is_target_uid_val(uid))
 		return;
-	if (!is_hook_active(HOOK_BPF, from_kuid(&init_user_ns, current_uid())))
+	if (!is_hook_active(HOOK_BPF, uid))
 		return;
 
 	if (vh_is_wide_stats_map(map)) {
@@ -138,13 +142,17 @@ void vpnhide_bpf_lookup_batch(struct bpf_map *map,
 	u32 count = 0;
 	u32 i;
 	bool wide, iface;
+	uid_t uid;
 
 	if (!map || !attr || !uattr)
 		return;
-	/* The target process itself must see its own real traffic. */
-	if (is_target_uid())
+	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_BPF)))
 		return;
-	if (!is_hook_active(HOOK_BPF, from_kuid(&init_user_ns, current_uid())))
+	uid = from_kuid(&init_user_ns, current_uid());
+	/* The target process itself must see its own real traffic. */
+	if (is_target_uid_val(uid))
+		return;
+	if (!is_hook_active(HOOK_BPF, uid))
 		return;
 	wide  = vh_is_wide_stats_map(map);
 	iface = vh_is_iface_stats_map(map);
@@ -200,15 +208,18 @@ bool vpnhide_getdents64(unsigned int fd,
 			unsigned int count, int *retval)
 {
 	struct linux_dirent64 *kbuf, *cur, *prev;
-	uid_t uid = from_kuid(&init_user_ns, current_uid());
+	uid_t uid;
 	int nbytes = *retval;
 	long bytes_left;
 
 	if (nbytes <= 0)
 		return false;
+	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_GETDENTS64)))
+		return false;
+	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_GETDENTS64, uid))
 		return false;
-	if (!is_target_uid())
+	if (!is_target_uid_val(uid))
 		return false;
 
 	kbuf = kvmalloc(nbytes, GFP_KERNEL);
@@ -262,8 +273,13 @@ EXPORT_SYMBOL_GPL(vpnhide_getdents64);
 bool vpnhide_should_hide_path(const struct path *path)
 {
 	struct dentry *dentry = path->dentry;
-	uid_t uid = from_kuid(&init_user_ns, current_uid());
+	uid_t uid;
 
+	/* Fast exits — avoid RCU + binary search on every filename_lookup */
+	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_OPENAT)))
+		return false;
+
+	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_target_uid_val(uid))
 		return false;
 
@@ -292,8 +308,13 @@ static const char vh_ghost_name[] = "__vpnhide_nonexistent_void";
 bool vpnhide_filter_sysctl(struct inode *dir,
 			   const char *name, size_t namelen)
 {
-	uid_t uid = from_kuid(&init_user_ns, current_uid());
+	uid_t uid;
 
+	/* Fast exits */
+	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_OPENAT)))
+		return false;
+
+	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_target_uid_val(uid))
 		return false;
 

@@ -63,6 +63,8 @@ ip route add 10.9.9.0/24 dev vpn0 2>/dev/null
 ip -6 addr add fd00:9::1/64 dev vpn0 2>/dev/null
 ip -6 route add fd00:99::/64 dev vpn0 2>/dev/null
 ip rule add uidrange 5555-5555 table 199 2>/dev/null
+ip rule add iif vpn0 table 200 2>/dev/null
+ip rule add oif vpn0 table 201 2>/dev/null
 # Give the daemon time to detect vpn0 and push its ifindex to the kernel
 sleep 3
 
@@ -98,6 +100,8 @@ check proc_route_v6   "cat /proc/net/ipv6_route"     "vpn0"   # ipv6_route_seq_s
 check netlink_route4  "ip route show table all"      "vpn0"   # fib_dump_info
 check netlink_route6  "ip -6 route show table all"   "vpn0"   # rt6_fill_node
 check policy_rule     "ip rule show"                 "199"    # fib_nl_fill_rule (UID split-routing rule)
+check getrule_iif     "ip rule show"                 "200"    # fib_nl_fill_rule (iifname=vpn0 hidden)
+check getrule_oif     "ip rule show"                 "201"    # fib_nl_fill_rule (oifname=vpn0 hidden)
 check sysfs_ipv4_conf "ls /proc/sys/net/ipv4/conf"   "vpn0"   # getdents64 / proc_sys_lookup
 check sysfs_ipv6_neig "ls /proc/sys/net/ipv6/neigh"  "vpn0"   # getdents64
 check proc_net_dev    "cat /proc/net/dev"            "vpn0"   # dev_seq_show  (kpatch gap fixed)

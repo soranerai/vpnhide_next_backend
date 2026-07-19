@@ -36,7 +36,7 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_SETSOCKOPT, uid))
 		return 0;
-	if (!is_target_uid())
+	if (!is_target_uid_val(uid))
 		return 0;
 
 	sk = sock->sk;
@@ -95,24 +95,22 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 		}
 	} else if (level == SOL_IP) {
 		if (optname == IP_MTU_DISCOVER) {
-			/* Force DONT so IP never sends PMTU probes via VPN */
-			int val = IP_PMTUDISC_DONT;
-
-			inet_sk(sk)->pmtudisc = val;
+			/* Force DONT; pretend to caller that their value was accepted */
+			inet_sk(sk)->pmtudisc = IP_PMTUDISC_DONT;
 			record_kmod_intercept(uid, HOOK_SETSOCKOPT);
-			return -EPERM; /* block original call */
+			return 0;
 		}
 	} else if (level == SOL_IPV6) {
 		if (optname == IPV6_MTU_DISCOVER) {
 			inet6_sk(sk)->pmtudisc = IPV6_PMTUDISC_DONT;
 			record_kmod_intercept(uid, HOOK_SETSOCKOPT);
-			return -EPERM;
+			return 0;
 		}
 	} else if (level == SOL_UDP) {
 		if (optname == UDP_SEGMENT) {
-			/* Block GSO probe — leaks VPN MTU info */
+			/* Accept silently; not setting gso_size means no GSO — send path works normally */
 			record_kmod_intercept(uid, HOOK_SETSOCKOPT);
-			return -ENOPROTOOPT;
+			return 0;
 		}
 	}
 	return 0;
@@ -136,7 +134,7 @@ void vpnhide_getsockopt_post(struct socket *sock, int level, int optname,
 	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_GETSOCKOPT, uid))
 		return;
-	if (!is_target_uid())
+	if (!is_target_uid_val(uid))
 		return;
 
 	if (get_user(len, optlen))
@@ -209,14 +207,20 @@ void vpnhide_getsockopt_post(struct socket *sock, int level, int optname,
 		}
 		case TCP_INFO: {
 			struct tcp_info info;
+			/* lib.rs passes a partial TcpInfoMss (24 bytes) — only require
+			 * enough buffer to reach tcpi_rcv_mss, not the full tcp_info. */
+			int need = offsetof(struct tcp_info, tcpi_rcv_mss) +
+				   (int)sizeof(u32);
 
-			if (len < (int)sizeof(info))
+			if (len < need)
 				break;
-			if (copy_from_user(&info, optval, sizeof(info)))
+			if (copy_from_user(&info, optval,
+					   min_t(int, len, (int)sizeof(info))))
 				break;
 			info.tcpi_snd_mss = 1460;
 			info.tcpi_rcv_mss = 1460;
-			copy_to_user(optval, &info, sizeof(info));
+			copy_to_user(optval, &info,
+				     min_t(int, len, (int)sizeof(info)));
 			record_kmod_intercept(uid, HOOK_GETSOCKOPT);
 			break;
 		}
@@ -262,9 +266,12 @@ out:
 int vpnhide_connect_pre(struct socket *sock,
 			struct sockaddr *addr, int addrlen)
 {
-	uid_t uid = from_kuid(&init_user_ns, current_uid());
+	uid_t uid;
 	sa_family_t family;
 
+	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_CONNECT)))
+		return 0;
+	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_CONNECT, uid))
 		return 0;
 
@@ -302,9 +309,12 @@ EXPORT_SYMBOL_GPL(vpnhide_connect_pre);
 int vpnhide_bind_pre(struct socket *sock,
 		     struct sockaddr *addr, int addrlen)
 {
-	uid_t uid = from_kuid(&init_user_ns, current_uid());
+	uid_t uid;
 	sa_family_t family;
 
+	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_BIND)))
+		return 0;
+	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_BIND, uid))
 		return 0;
 
@@ -339,16 +349,17 @@ EXPORT_SYMBOL_GPL(vpnhide_bind_pre);
 void vpnhide_getname_post(struct socket *sock, struct sockaddr *addr, int peer)
 {
 	struct vpnhide_spoof_ip sip;
-	uid_t uid = from_kuid(&init_user_ns, current_uid());
+	uid_t uid;
 	sa_family_t family;
 
 	if (peer)
 		return; /* only spoof local name */
 
+	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_GETNAME_INET, uid) &&
 	    !is_hook_active(HOOK_GETNAME_INET6, uid))
 		return;
-	if (!is_target_uid())
+	if (!is_target_uid_val(uid))
 		return;
 
 	/* Don't spoof sockets explicitly bound to a non-VPN interface —
@@ -411,13 +422,13 @@ int vpnhide_inet6_bind_ll(struct sock *sk,
 		return 0;
 	if (!is_hook_active(HOOK_INET6_BIND_LL, uid))
 		return 0;
-	if (!is_target_uid())
+	if (!is_target_uid_val(uid))
 		return 0;
 	if (!is_active_vpn_ifindex(sin6->sin6_scope_id))
 		return 0;
 
 	record_kmod_intercept(uid, HOOK_INET6_BIND_LL);
-	return -EPERM;
+	return -ENODEV;
 }
 EXPORT_SYMBOL_GPL(vpnhide_inet6_bind_ll);
 
@@ -428,11 +439,14 @@ EXPORT_SYMBOL_GPL(vpnhide_inet6_bind_ll);
 bool vpnhide_udpv6_sendmsg_ll(struct sock *sk)
 {
 	struct ipv6_pinfo *np;
-	uid_t uid = from_kuid(&init_user_ns, current_uid());
+	uid_t uid;
 
+	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_UDPV6_SENDMSG)))
+		return false;
+	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_UDPV6_SENDMSG, uid))
 		return false;
-	if (!is_target_uid())
+	if (!is_target_uid_val(uid))
 		return false;
 
 	np = inet6_sk(sk);
@@ -477,11 +491,15 @@ static struct vh_udp_uid_rate *rl_find_or_alloc(uid_t uid)
 bool vpnhide_udp_sendmsg(struct sock *sk)
 {
 	struct vh_udp_uid_rate *r;
-	uid_t uid = from_kuid(&init_user_ns, current_uid());
+	uid_t uid;
 	ktime_t now;
 	s64 elapsed_ns;
 	int regen;
 	bool drop = false;
+
+	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_UDP_SENDMSG)))
+		return false;
+	uid = from_kuid(&init_user_ns, current_uid());
 
 	if (!is_hook_active(HOOK_UDP_SENDMSG, uid))
 		return false;

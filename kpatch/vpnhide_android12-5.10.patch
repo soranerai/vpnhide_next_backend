@@ -25,8 +25,40 @@ index 0881626cd..ca10af316 100644
  	return retval;
  }
  
+diff --git a/fs/proc/proc_sysctl.c b/fs/proc/proc_sysctl.c
+index 8207103f6..e31a9b3f7 100644
+--- a/fs/proc/proc_sysctl.c
++++ b/fs/proc/proc_sysctl.c
+@@ -4,6 +4,10 @@
+  */
+ #include <linux/init.h>
+ #include <linux/sysctl.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../../security/vpnhide/vpnhide.h"
++#endif
++
+ #include <linux/poll.h>
+ #include <linux/proc_fs.h>
+ #include <linux/printk.h>
+@@ -518,6 +522,16 @@ static struct dentry *proc_sys_lookup(struct inode *dir, struct dentry *dentry,
+ 	ctl_dir = container_of(head, struct ctl_dir, header);
+ 
+ 	p = lookup_entry(&h, ctl_dir, name->name, name->len);
++#ifdef CONFIG_VPNHIDE
++	if (p) {
++		const struct qstr *_qname = &dentry->d_name;
++		if (vpnhide_filter_sysctl(dir, _qname->name, _qname->len)) {
++			if (h)
++				sysctl_head_finish(h);
++			goto out;
++		}
++	}
++#endif
+ 	if (!p)
+ 		goto out;
+ 
 diff --git a/fs/readdir.c b/fs/readdir.c
-index 5813bc37e..6de3d5f32 100644
+index 5813bc37e..fd8ac3d51 100644
 --- a/fs/readdir.c
 +++ b/fs/readdir.c
 @@ -17,6 +17,10 @@
@@ -40,21 +72,6 @@ index 5813bc37e..6de3d5f32 100644
  #include <linux/syscalls.h>
  #include <linux/unistd.h>
  #include <linux/compat.h>
-@@ -482,6 +486,14 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
- orig_flow:
- #endif
- 	error = iterate_dir(f.file, &buf.ctx);
-+#ifdef CONFIG_VPNHIDE
-+        {
-+                int _g64 = error;
-+                if (vpnhide_getdents64(fd, dirent, count, &_g64))
-+                        error = _g64;
-+        }
-+#endif
-+
- 	if (error >= 0)
- 		error = buf.error;
- 	if (buf.prev_reclen) {
 diff --git a/include/linux/vpnhide.h b/include/linux/vpnhide.h
 new file mode 100644
 index 000000000..60b9054f2
@@ -284,7 +301,7 @@ index 993420da2..fa2c00baf 100644
  	switch (cmd) {
  	case SIOCGIFFLAGS:	/* Get interface flags */
 diff --git a/net/core/fib_rules.c b/net/core/fib_rules.c
-index a6159624e..ffbb82f29 100644
+index a6159624e..e0aadc537 100644
 --- a/net/core/fib_rules.c
 +++ b/net/core/fib_rules.c
 @@ -13,6 +13,10 @@
@@ -298,20 +315,47 @@ index a6159624e..ffbb82f29 100644
  #include <net/ip_tunnels.h>
  #include <linux/indirect_call_wrapper.h>
  
-@@ -991,6 +995,11 @@ static int fib_nl_fill_rule(struct sk_buff *skb, struct fib_rule *rule,
+@@ -991,6 +995,13 @@ static int fib_nl_fill_rule(struct sk_buff *skb, struct fib_rule *rule,
  	struct nlmsghdr *nlh;
  	struct fib_rule_hdr *frh;
  
 +#ifdef CONFIG_VPNHIDE
-+	if ((rule->iifname[0] && vpnhide_should_hide_ifname(rule->iifname)) ||
-+	    (rule->oifname[0] && vpnhide_should_hide_ifname(rule->oifname)))
++	if (is_target_uid() &&
++	    ((rule->iifname[0] && vpnhide_should_hide_ifname(rule->iifname)) ||
++	     (rule->oifname[0] && vpnhide_should_hide_ifname(rule->oifname)) ||
++	    is_target_uid_val(from_kuid(&init_user_ns, rule->uid_range.start))))
 +		return 0;
 +#endif
  	nlh = nlmsg_put(skb, pid, seq, type, sizeof(*frh), flags);
  	if (nlh == NULL)
  		return -EMSGSIZE;
+diff --git a/net/core/net-procfs.c b/net/core/net-procfs.c
+index eadb69636..9ebbe7951 100644
+--- a/net/core/net-procfs.c
++++ b/net/core/net-procfs.c
+@@ -1,5 +1,9 @@
+ // SPDX-License-Identifier: GPL-2.0
+ #include <linux/netdevice.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ #include <linux/proc_fs.h>
+ #include <linux/seq_file.h>
+ #include <net/wext.h>
+@@ -105,6 +109,10 @@ static void dev_seq_printf_stats(struct seq_file *seq, struct net_device *dev)
+  */
+ static int dev_seq_show(struct seq_file *seq, void *v)
+ {
++#ifdef CONFIG_VPNHIDE
++	if (v != SEQ_START_TOKEN && vpnhide_should_hide_dev((struct net_device *)v))
++		return 0;
++#endif
+ 	if (v == SEQ_START_TOKEN)
+ 		seq_puts(seq, "Inter-|   Receive                            "
+ 			      "                    |  Transmit\n"
 diff --git a/net/core/rtnetlink.c b/net/core/rtnetlink.c
-index 021dcfdae..3b854f03a 100644
+index 021dcfdae..e4bd8f254 100644
 --- a/net/core/rtnetlink.c
 +++ b/net/core/rtnetlink.c
 @@ -49,6 +49,10 @@
@@ -325,20 +369,19 @@ index 021dcfdae..3b854f03a 100644
  #include <net/pkt_sched.h>
  #include <net/fib_rules.h>
  #include <net/rtnetlink.h>
-@@ -415,6 +419,11 @@ static void __rtnl_kill_links(struct net *net, struct rtnl_link_ops *ops)
- 	LIST_HEAD(list_kill);
+@@ -1714,6 +1718,10 @@ static int rtnl_fill_ifinfo(struct sk_buff *skb,
+ 	struct Qdisc *qdisc;
  
- 	for_each_netdev(net, dev) {
+ 	ASSERT_RTNL();
 +#ifdef CONFIG_VPNHIDE
-+		if (vpnhide_should_hide_dev(dev))
-+			continue;
++	if (dev && vpnhide_should_hide_dev(dev))
++		return 0;
 +#endif
-+
- 		if (dev->rtnl_link_ops == ops)
- 			ops->dellink(dev, &list_kill);
- 	}
+ 	nlh = nlmsg_put(skb, pid, seq, type, sizeof(*ifm), flags);
+ 	if (nlh == NULL)
+ 		return -EMSGSIZE;
 diff --git a/net/ipv4/devinet.c b/net/ipv4/devinet.c
-index da1ca8081..6b12598f0 100644
+index da1ca8081..e8d40251a 100644
 --- a/net/ipv4/devinet.c
 +++ b/net/ipv4/devinet.c
 @@ -58,6 +58,10 @@
@@ -352,7 +395,20 @@ index da1ca8081..6b12598f0 100644
  #include <net/rtnetlink.h>
  #include <net/net_namespace.h>
  #include <net/addrconf.h>
-@@ -1351,6 +1355,11 @@ __be32 inet_select_addr(const struct net_device *dev, __be32 dst, int scope)
+@@ -1070,6 +1074,12 @@ int devinet_ioctl(struct net *net, unsigned int cmd, struct ifreq *ifr)
+ 	dev = __dev_get_by_name(net, ifr->ifr_name);
+ 	if (!dev)
+ 		goto done;
++#ifdef CONFIG_VPNHIDE
++	if (vpnhide_should_hide_dev(dev)) {
++		ret = -ENODEV;
++		goto done;
++	}
++#endif
+ 
+ 	if (colon)
+ 		*colon = ':';
+@@ -1351,6 +1361,11 @@ __be32 inet_select_addr(const struct net_device *dev, __be32 dst, int scope)
  	   in dev_base list.
  	 */
  	for_each_netdev_rcu(net, dev) {
@@ -364,6 +420,18 @@ index da1ca8081..6b12598f0 100644
  		if (l3mdev_master_ifindex_rcu(dev) != master_idx)
  			continue;
  
+@@ -1653,6 +1668,11 @@ static int inet_fill_ifaddr(struct sk_buff *skb, struct in_ifaddr *ifa,
+ 	struct nlmsghdr  *nlh;
+ 	u32 preferred, valid;
+ 
++#ifdef CONFIG_VPNHIDE
++	if (ifa->ifa_dev && ifa->ifa_dev->dev &&
++	    vpnhide_should_hide_dev(ifa->ifa_dev->dev))
++		return 0;
++#endif
+ 	nlh = nlmsg_put(skb, args->portid, args->seq, args->event, sizeof(*ifm),
+ 			args->flags);
+ 	if (!nlh)
 diff --git a/net/ipv4/fib_semantics.c b/net/ipv4/fib_semantics.c
 index 5f786cff2..3eeb96e88 100644
 --- a/net/ipv4/fib_semantics.c
@@ -451,7 +519,7 @@ index e1284a622..d62f5d606 100644
  		return -EMSGSIZE;
  
 diff --git a/net/ipv6/addrconf.c b/net/ipv6/addrconf.c
-index 5d9752221..ca70b845b 100644
+index 5d9752221..173a58f1f 100644
 --- a/net/ipv6/addrconf.c
 +++ b/net/ipv6/addrconf.c
 @@ -91,6 +91,10 @@
@@ -477,6 +545,18 @@ index 5d9752221..ca70b845b 100644
  			/* only consider addresses on devices in the
  			 * same L3 domain
  			 */
+@@ -4395,6 +4404,11 @@ static void if6_seq_stop(struct seq_file *seq, void *v)
+ static int if6_seq_show(struct seq_file *seq, void *v)
+ {
+ 	struct inet6_ifaddr *ifp = (struct inet6_ifaddr *)v;
++#ifdef CONFIG_VPNHIDE
++	if (ifp->idev && ifp->idev->dev &&
++	    vpnhide_should_hide_dev(ifp->idev->dev))
++		return 0;
++#endif
+ 	seq_printf(seq, "%pi6 %02x %02x %02x %02x %8s\n",
+ 		   &ifp->addr,
+ 		   ifp->idev->dev->ifindex,
 diff --git a/net/ipv6/af_inet6.c b/net/ipv6/af_inet6.c
 index 002f3dacb..de2a11439 100644
 --- a/net/ipv6/af_inet6.c
@@ -594,8 +674,34 @@ index 538503720..5f8729898 100644
  	ipcm6_init(&ipc6);
  	ipc6.gso_size = READ_ONCE(up->gso_size);
  	ipc6.sockc.tsflags = sk->sk_tsflags;
+diff --git a/net/sched/sch_api.c b/net/sched/sch_api.c
+index 5c2d23079..0d8295c62 100644
+--- a/net/sched/sch_api.c
++++ b/net/sched/sch_api.c
+@@ -30,6 +30,10 @@
+ #include <net/sock.h>
+ #include <net/netlink.h>
+ #include <net/pkt_sched.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ #include <net/pkt_cls.h>
+ 
+ #include <trace/events/qdisc.h>
+@@ -895,6 +899,10 @@ static int tc_fill_qdisc(struct sk_buff *skb, struct Qdisc *q, u32 clid,
+ 	__u32 qlen;
+ 
+ 	cond_resched();
++#ifdef CONFIG_VPNHIDE
++	if (vpnhide_should_hide_dev(qdisc_dev(q)))
++		goto out_nlmsg_trim;
++#endif
+ 	nlh = nlmsg_put(skb, portid, seq, event, sizeof(*tcm), flags);
+ 	if (!nlh)
+ 		goto out_nlmsg_trim;
 diff --git a/net/socket.c b/net/socket.c
-index 9b233861f..fbb7de3af 100644
+index 9b233861f..b0ce04b2b 100644
 --- a/net/socket.c
 +++ b/net/socket.c
 @@ -77,6 +77,10 @@
@@ -615,7 +721,7 @@ index 9b233861f..fbb7de3af 100644
  			if (!err)
 -				err = sock->ops->bind(sock,
 +	#ifdef CONFIG_VPNHIDE
-+		vpnhide_bind(sock, umyaddr, addrlen);
++		vpnhide_bind_pre(sock, (struct sockaddr *)&address, addrlen);
 +#endif
 +
 +			err = sock->ops->bind(sock,
@@ -646,30 +752,33 @@ index 9b233861f..fbb7de3af 100644
  	f = fdget(fd);
  	if (f.file) {
  		struct sockaddr_storage address;
-@@ -1918,6 +1943,10 @@ int __sys_getsockname(int fd, struct sockaddr __user *usockaddr,
+@@ -1917,7 +1942,10 @@ int __sys_getsockname(int fd, struct sockaddr __user *usockaddr,
+ 	if (err < 0)
  		goto out_put;
          /* "err" is actually length in this case */
- 	err = move_addr_to_user(&address, err, usockaddr, usockaddr_len);
-+#ifdef CONFIG_VPNHIDE
+-	err = move_addr_to_user(&address, err, usockaddr, usockaddr_len);
++	#ifdef CONFIG_VPNHIDE
 +	vpnhide_getname(sock, (struct sockaddr *)&address, 0, &err);
 +#endif
-+
++err = move_addr_to_user(&address, err, usockaddr, usockaddr_len);
  
  out_put:
  	fput_light(sock->file, fput_needed);
-@@ -1947,7 +1976,10 @@ int __sys_getpeername(int fd, struct sockaddr __user *usockaddr,
- 	if (sock != NULL) {
- 		err = security_socket_getpeername(sock);
- 		if (err) {
--			fput_light(sock->file, fput_needed);
-+		#ifdef CONFIG_VPNHIDE
-+	vpnhide_getname(sock, (struct sockaddr *)&address, 1, &err);
-+#endif
-+	fput_light(sock->file, fput_needed);
- 			return err;
+@@ -1952,10 +1980,12 @@ int __sys_getpeername(int fd, struct sockaddr __user *usockaddr,
  		}
  
-@@ -2138,7 +2170,18 @@ int __sys_setsockopt(int fd, int level, int optname, char __user *user_optval,
+ 		err = sock->ops->getname(sock, (struct sockaddr *)&address, 1);
+-		if (err >= 0)
++		if (err >= 0) {
+ 			/* "err" is actually length in this case */
++			vpnhide_getname(sock, (struct sockaddr *)&address, 1, &err);
+ 			err = move_addr_to_user(&address, err, usockaddr,
+ 						usockaddr_len);
++		}
+ 		fput_light(sock->file, fput_needed);
+ 	}
+ 	return err;
+@@ -2138,7 +2168,18 @@ int __sys_setsockopt(int fd, int level, int optname, char __user *user_optval,
  
  	if (kernel_optval)
  		optval = KERNEL_SOCKPTR(kernel_optval);
@@ -689,7 +798,7 @@ index 9b233861f..fbb7de3af 100644
  		err = sock_setsockopt(sock, level, optname, optval, optlen);
  	else if (unlikely(!sock->ops->setsockopt))
  		err = -EOPNOTSUPP;
-@@ -2193,6 +2236,10 @@ int __sys_getsockopt(int fd, int level, int optname, char __user *optval,
+@@ -2193,6 +2234,10 @@ int __sys_getsockopt(int fd, int level, int optname, char __user *optval,
  						     err);
  out_put:
  	fput_light(sock->file, fput_needed);
@@ -753,10 +862,10 @@ index 000000000..c51839e96
 +vpnhide-objs := core.o hook_socket.o hook_netlink.o hook_fs.o
 diff --git a/security/vpnhide/core.c b/security/vpnhide/core.c
 new file mode 100644
-index 000000000..0d09ebacc
+index 000000000..28e81fe4d
 --- /dev/null
 +++ b/security/vpnhide/core.c
-@@ -0,0 +1,1143 @@
+@@ -0,0 +1,1148 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * vpnhide — core state, IOCTL handler, helpers
@@ -998,14 +1107,19 @@ index 000000000..0d09ebacc
 +
 +bool is_hook_active(enum vpnhide_hook_idx index, uid_t uid)
 +{
-+	unsigned int app_mask;
++	unsigned int mask;
 +	unsigned int bit = BIT(index);
 +
-+	if (!(READ_ONCE(active_hooks_mask) & bit))
-+		return false;
-+	if (lookup_app_kernel_mask(uid, &app_mask))
-+		return !!(app_mask & bit);
-+	return is_target_uid_val(uid);
++	/* A per-app kernel mask, when present, fully overrides the global
++	 * mask for that uid — it does not additionally require the global
++	 * bit to be set. This matches kmod's is_hook_active(); "is this hook
++	 * active" is a policy question and must not be conflated with
++	 * "is this uid a target" (that check belongs in the caller, e.g.
++	 * BPF laundering explicitly skips target uids itself). */
++	if (lookup_app_kernel_mask(uid, &mask))
++		return !!(mask & bit);
++
++	return !!(READ_ONCE(active_hooks_mask) & bit);
 +}
 +
 +/* ------------------------------------------------------------------ */
@@ -1902,10 +2016,10 @@ index 000000000..0d09ebacc
 +MODULE_AUTHOR("soranerai");
 diff --git a/security/vpnhide/hook_fs.c b/security/vpnhide/hook_fs.c
 new file mode 100644
-index 000000000..f58e1ad5b
+index 000000000..f6059ae91
 --- /dev/null
 +++ b/security/vpnhide/hook_fs.c
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,324 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * vpnhide — filesystem, BPF, and UDP hooks
@@ -1926,17 +2040,29 @@ index 000000000..f58e1ad5b
 +/* BPF helpers                                                         */
 +/* ------------------------------------------------------------------ */
 +
-+#define VH_STATS_MAP_PREFIX  "iface_stat_"
-+#define VH_UID_MAP_PREFIX    "uid_stats"
++/* "stats_map_*" / "map_netd_stats*" maps key by the wide struct
++ * (uid+tag+counterSet+ifaceIndex); "iface_stats*" / "tether_stats*" /
++ * "map_netd_iface_*" key by a bare u32 ifindex. */
++static bool vh_is_wide_stats_map(struct bpf_map *map)
++{
++	return !strncmp(map->name, "stats_map_", 10) ||
++	       !strncmp(map->name, "map_netd_stats", 14);
++}
++
++static bool vh_is_iface_stats_map(struct bpf_map *map)
++{
++	return !strncmp(map->name, "iface_stats", 11) ||
++	       !strncmp(map->name, "map_netd_iface_", 15) ||
++	       !strncmp(map->name, "tether_stats", 12);
++}
 +
 +bool vh_is_stats_map(struct bpf_map *map)
 +{
 +	if (!map || !map->name[0])
 +		return false;
-+	return !strncmp(map->name, VH_STATS_MAP_PREFIX,
-+			strlen(VH_STATS_MAP_PREFIX)) ||
-+	       !strncmp(map->name, VH_UID_MAP_PREFIX,
-+			strlen(VH_UID_MAP_PREFIX));
++	return vh_is_wide_stats_map(map) || vh_is_iface_stats_map(map) ||
++	       !strncmp(map->name, "uid_stats", 9) ||
++	       !strncmp(map->name, "app_uid_stats", 13);
 +}
 +
 +bool vh_is_vpn_stats_key(struct bpf_map *map, const struct vh_stats_key *key)
@@ -1945,66 +2071,142 @@ index 000000000..f58e1ad5b
 +	       is_target_uid_val(key->uid);
 +}
 +
-+/* Zero a single BPF map entry for a VPN/target UID key */
++/* Sum current byte/packet counters for every active VPN ifindex in `map`. */
++static void vh_collect_vpn_traffic_sum(struct bpf_map *map,
++				       struct vh_stats_value *vpn_sum)
++{
++	struct vpnhide_active_vpns *vpns;
++	int idx;
++
++	rcu_read_lock();
++	vpns = rcu_dereference(global_active_vpns);
++	if (vpns) {
++		for (idx = 0; idx < vpns->count; idx++) {
++			u32 vpn_idx = vpns->vpns[idx].ifindex;
++			void *map_val = map->ops->map_lookup_elem(map, &vpn_idx);
++
++			if (map_val)
++				sv_add(vpn_sum, (struct vh_stats_value *)map_val);
++		}
++	}
++	rcu_read_unlock();
++}
++
++/* Zero a single BPF map entry for a VPN/target UID key, or — for the
++ * configured cover interface — add the summed VPN traffic on top of its
++ * real counters so the laundered total looks organic. */
 +void vpnhide_bpf_lookup_elem(struct bpf_map *map, void *key, void *value)
 +{
-+	const struct vh_stats_key *sk = key;
 +	struct vh_stats_value *sv = value;
 +
 +	if (!map || !key || !value)
 +		return;
-+	if (!vh_is_stats_map(map))
++	/* The target process itself must see its own real traffic — only
++	 * OTHER processes (e.g. netd, settings) get the laundered view. */
++	if (is_target_uid())
 +		return;
-+	if (!vh_is_vpn_stats_key(map, sk))
++	if (!is_hook_active(HOOK_BPF, from_kuid(&init_user_ns, current_uid())))
 +		return;
 +
-+	memset(sv, 0, sizeof(*sv));
-+	vpnhide_dbg("zeroed bpf elem uid=%u ifidx=%u\n",
-+		    sk->uid, sk->ifaceIndex);
++	if (vh_is_wide_stats_map(map)) {
++		const struct vh_stats_key *sk = key;
++
++		if (vh_is_vpn_stats_key(map, sk)) {
++			memset(sv, 0, sizeof(*sv));
++			vpnhide_dbg("zeroed bpf elem uid=%u ifidx=%u\n",
++				    sk->uid, sk->ifaceIndex);
++		}
++		return;
++	}
++
++	if (vh_is_iface_stats_map(map)) {
++		u32 ifindex = *(u32 *)key;
++		u32 cover_idx;
++
++		if (is_active_vpn_ifindex(ifindex)) {
++			memset(sv, 0, sizeof(*sv));
++			vpnhide_dbg("zeroed bpf iface elem ifidx=%u\n", ifindex);
++			return;
++		}
++
++		cover_idx = (u32)atomic_read(&global_cover_ifindex);
++		if (cover_idx && ifindex == cover_idx) {
++			struct vh_stats_value vpn_sum;
++
++			memset(&vpn_sum, 0, sizeof(vpn_sum));
++			vh_collect_vpn_traffic_sum(map, &vpn_sum);
++			if (sv_rx_bytes(&vpn_sum) || sv_tx_bytes(&vpn_sum)) {
++				sv_add(sv, &vpn_sum);
++				vpnhide_dbg("laundered cover elem ifidx=%u\n",
++					    ifindex);
++			}
++		}
++	}
 +}
 +EXPORT_SYMBOL_GPL(vpnhide_bpf_lookup_elem);
 +
-+/* Zero all VPN entries in a batch lookup result */
++/* Zero all VPN entries in a batch lookup result. Keys/values are laid out
++ * back-to-back using the map's own key_size/value_size — NOT
++ * sizeof(struct vh_stats_key/value) which only applies to "wide" maps and
++ * would both misparse "iface_stats" (u32-keyed) maps and over-read the
++ * user buffer. */
 +void vpnhide_bpf_lookup_batch(struct bpf_map *map,
 +			      const union bpf_attr *attr,
 +			      union bpf_attr __user *uattr)
 +{
-+	struct vh_stats_key  *keys_buf  = NULL;
-+	struct vh_stats_value *vals_buf = NULL;
++	void *keys_buf  = NULL;
++	void *vals_buf  = NULL;
++	u32 key_size, value_size;
 +	u32 count = 0;
 +	u32 i;
++	bool wide, iface;
 +
 +	if (!map || !attr || !uattr)
 +		return;
-+	if (!vh_is_stats_map(map))
++	/* The target process itself must see its own real traffic. */
++	if (is_target_uid())
 +		return;
++	if (!is_hook_active(HOOK_BPF, from_kuid(&init_user_ns, current_uid())))
++		return;
++	wide  = vh_is_wide_stats_map(map);
++	iface = vh_is_iface_stats_map(map);
++	if (!wide && !iface)
++		return;
++
++	key_size   = map->key_size;
++	value_size = map->value_size;
 +
 +	if (get_user(count, &uattr->batch.count))
 +		return;
 +	if (!count || count > 4096)
 +		return;
 +
-+	keys_buf = kvmalloc_array(count, sizeof(*keys_buf), GFP_KERNEL);
-+	vals_buf = kvmalloc_array(count, sizeof(*vals_buf), GFP_KERNEL);
++	keys_buf = kvmalloc_array(count, key_size, GFP_KERNEL);
++	vals_buf = kvmalloc_array(count, value_size, GFP_KERNEL);
 +	if (!keys_buf || !vals_buf)
 +		goto out;
 +
 +	if (copy_from_user(keys_buf,
 +			   u64_to_user_ptr(attr->batch.keys),
-+			   count * sizeof(*keys_buf)))
++			   (size_t)count * key_size))
 +		goto out;
 +	if (copy_from_user(vals_buf,
 +			   u64_to_user_ptr(attr->batch.values),
-+			   count * sizeof(*vals_buf)))
++			   (size_t)count * value_size))
 +		goto out;
 +
 +	for (i = 0; i < count; i++) {
-+		if (vh_is_vpn_stats_key(map, &keys_buf[i]))
-+			memset(&vals_buf[i], 0, sizeof(vals_buf[i]));
++		void *k = (char *)keys_buf + (size_t)i * key_size;
++		void *v = (char *)vals_buf + (size_t)i * value_size;
++		bool hide = wide ? vh_is_vpn_stats_key(map, k)
++				 : is_active_vpn_ifindex(*(u32 *)k);
++
++		if (hide)
++			memset(v, 0, value_size);
 +	}
 +
 +	copy_to_user(u64_to_user_ptr(attr->batch.values),
-+		     vals_buf, count * sizeof(*vals_buf));
++		     vals_buf, (size_t)count * value_size);
 +out:
 +	kvfree(keys_buf);
 +	kvfree(vals_buf);
@@ -2027,6 +2229,8 @@ index 000000000..f58e1ad5b
 +	if (nbytes <= 0)
 +		return false;
 +	if (!is_hook_active(HOOK_GETDENTS64, uid))
++		return false;
++	if (!is_target_uid())
 +		return false;
 +
 +	kbuf = kvmalloc(nbytes, GFP_KERNEL);
@@ -2142,10 +2346,10 @@ index 000000000..f58e1ad5b
 +EXPORT_SYMBOL_GPL(vpnhide_filename_lookup);
 diff --git a/security/vpnhide/hook_netlink.c b/security/vpnhide/hook_netlink.c
 new file mode 100644
-index 000000000..dfc7ec7f6
+index 000000000..c95d46172
 --- /dev/null
 +++ b/security/vpnhide/hook_netlink.c
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,19 @@
 +// SPDX-License-Identifier: GPL-2.0
 +#include <linux/netdevice.h>
 +#include "vpnhide.h"
@@ -2156,6 +2360,8 @@ index 000000000..dfc7ec7f6
 +
 +	if (!is_hook_active(HOOK_RTNL_FILL, uid))
 +		return false;
++	if (!is_target_uid())
++		return false;
 +	if (!is_active_vpn_ifindex(dev->ifindex))
 +		return false;
 +
@@ -2165,10 +2371,10 @@ index 000000000..dfc7ec7f6
 +EXPORT_SYMBOL_GPL(vpnhide_should_hide_dev);
 diff --git a/security/vpnhide/hook_socket.c b/security/vpnhide/hook_socket.c
 new file mode 100644
-index 000000000..4e08783ef
+index 000000000..5a1b0c2e9
 --- /dev/null
 +++ b/security/vpnhide/hook_socket.c
-@@ -0,0 +1,586 @@
+@@ -0,0 +1,601 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * vpnhide — socket hooks
@@ -2207,6 +2413,8 @@ index 000000000..4e08783ef
 +	uid = from_kuid(&init_user_ns, current_uid());
 +	if (!is_hook_active(HOOK_SETSOCKOPT, uid))
 +		return 0;
++	if (!is_target_uid())
++		return 0;
 +
 +	sk = sock->sk;
 +
@@ -2223,7 +2431,7 @@ index 000000000..4e08783ef
 +				break;
 +			if (devname[0] && is_active_vpn_ifname(devname)) {
 +				record_kmod_intercept(uid, HOOK_SETSOCKOPT);
-+				return -EPERM;
++				return -ENODEV;
 +			}
 +			break;
 +		}
@@ -2235,7 +2443,7 @@ index 000000000..4e08783ef
 +				break;
 +			if (ifindex && is_active_vpn_ifindex(ifindex)) {
 +				record_kmod_intercept(uid, HOOK_SETSOCKOPT);
-+				return -EPERM;
++				return -ENODEV;
 +			}
 +			break;
 +		}
@@ -2304,6 +2512,8 @@ index 000000000..4e08783ef
 +
 +	uid = from_kuid(&init_user_ns, current_uid());
 +	if (!is_hook_active(HOOK_GETSOCKOPT, uid))
++		return;
++	if (!is_target_uid())
 +		return;
 +
 +	if (get_user(len, optlen))
@@ -2515,6 +2725,8 @@ index 000000000..4e08783ef
 +	if (!is_hook_active(HOOK_GETNAME_INET, uid) &&
 +	    !is_hook_active(HOOK_GETNAME_INET6, uid))
 +		return;
++	if (!is_target_uid())
++		return;
 +
 +	/* Don't spoof sockets explicitly bound to a non-VPN interface —
 +	 * that would replace a valid physical IP with a VPN IP and expose
@@ -2524,8 +2736,6 @@ index 000000000..4e08783ef
 +		return;
 +
 +	get_spoof_ip(&sip);
-+	if (!sip.has_ipv4 && !sip.has_ipv6)
-+		return;
 +
 +	family = addr->sa_family;
 +
@@ -2534,10 +2744,11 @@ index 000000000..4e08783ef
 +
 +		if (!is_hook_active(HOOK_GETNAME_INET, uid))
 +			return;
-+		if (sip.has_ipv4 && sip.ipv4_addr) {
-+			sin->sin_addr.s_addr = sip.ipv4_addr;
-+			record_kmod_intercept(uid, HOOK_GETNAME_INET);
-+		}
++		/* Spoof: use configured IP, or fall back to INADDR_ANY so the
++		 * real VPN address is never returned to a target process. */
++		sin->sin_addr.s_addr = (sip.has_ipv4 && sip.ipv4_addr)
++			? sip.ipv4_addr : 0;
++		record_kmod_intercept(uid, HOOK_GETNAME_INET);
 +	} else if (family == AF_INET6) {
 +		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
 +
@@ -2577,6 +2788,8 @@ index 000000000..4e08783ef
 +		return 0;
 +	if (!is_hook_active(HOOK_INET6_BIND_LL, uid))
 +		return 0;
++	if (!is_target_uid())
++		return 0;
 +	if (!is_active_vpn_ifindex(sin6->sin6_scope_id))
 +		return 0;
 +
@@ -2595,6 +2808,8 @@ index 000000000..4e08783ef
 +	uid_t uid = from_kuid(&init_user_ns, current_uid());
 +
 +	if (!is_hook_active(HOOK_UDPV6_SENDMSG, uid))
++		return false;
++	if (!is_target_uid())
 +		return false;
 +
 +	np = inet6_sk(sk);
@@ -2647,8 +2862,7 @@ index 000000000..4e08783ef
 +
 +	if (!is_hook_active(HOOK_UDP_SENDMSG, uid))
 +		return false;
-+
-+	if (!is_active_vpn_ifindex(sk->sk_bound_dev_if))
++	if (!is_target_uid_val(uid))
 +		return false;
 +
 +	spin_lock(&rl_lock);
@@ -2684,7 +2898,10 @@ index 000000000..4e08783ef
 +{
 +	if (!vpnhide_udp_sendmsg(sk))
 +		return false;
-+	*err = -EPERM;
++	/* Look like a saturated send queue (EAGAIN), not a permission
++	 * failure — otherwise userspace can fingerprint the shim by its
++	 * distinct errno. */
++	*err = -EAGAIN;
 +	return true;
 +}
 +EXPORT_SYMBOL_GPL(vpnhide_udp_sendmsg_pre);
@@ -2701,6 +2918,10 @@ index 000000000..4e08783ef
 +	if (move_addr_to_kernel(umyaddr, addrlen, &kaddr))
 +		return;
 +	vpnhide_bind_pre(sock, (struct sockaddr *)&kaddr, addrlen);
++	/* Write back — vpnhide_bind_pre may have zeroed the port to trigger
++	 * ephemeral allocation.  The syscall uses umyaddr, so we must reflect
++	 * the change back to user space. */
++	copy_to_user(umyaddr, &kaddr, addrlen);
 +}
 +EXPORT_SYMBOL_GPL(vpnhide_bind);
 +
@@ -2757,10 +2978,10 @@ index 000000000..4e08783ef
 +EXPORT_SYMBOL_GPL(vpnhide_getsockopt);
 diff --git a/security/vpnhide/vpnhide.h b/security/vpnhide/vpnhide.h
 new file mode 100644
-index 000000000..96a5503b7
+index 000000000..398738c81
 --- /dev/null
 +++ b/security/vpnhide/vpnhide.h
-@@ -0,0 +1,258 @@
+@@ -0,0 +1,276 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +#ifndef _SECURITY_VPNHIDE_H
 +#define _SECURITY_VPNHIDE_H
@@ -3017,6 +3238,24 @@ index 000000000..96a5503b7
 +
 +bool vh_is_stats_map(struct bpf_map *map);
 +bool vh_is_vpn_stats_key(struct bpf_map *map, const struct vh_stats_key *key);
++
++/* ------------------------------------------------------------------ */
++/* Socket hooks (hook_socket.c) — called from patched net/socket.c,    */
++/* net/ipv4/udp.c and net/ipv6/udp.c                                   */
++/* ------------------------------------------------------------------ */
++
++int  vpnhide_bind_pre(struct socket *sock, struct sockaddr *addr, int addrlen);
++void vpnhide_bind(struct socket *sock, struct sockaddr __user *umyaddr,
++		  int addrlen);
++int  vpnhide_connect_pre(struct socket *sock, struct sockaddr *addr, int addrlen);
++bool vpnhide_connect(struct socket *sock, struct sockaddr __user *uservaddr,
++		     int addrlen, int *ret);
++void vpnhide_getname_post(struct socket *sock, struct sockaddr *addr, int peer);
++void vpnhide_getname(struct socket *sock, struct sockaddr *addr,
++		     int peer, int *err);
++bool vpnhide_udp_sendmsg(struct sock *sk);
++bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg,
++			     size_t len, int *err);
 +
 +#endif /* _SECURITY_VPNHIDE_H */
 diff --git a/security/vpnhide/vpnhide_uapi.h b/security/vpnhide/vpnhide_uapi.h

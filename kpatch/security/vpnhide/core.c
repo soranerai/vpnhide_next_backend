@@ -27,6 +27,11 @@
 bool          debug_enabled;
 unsigned int  active_hooks_mask = 0xFFFFFFFF;
 
+/* Fast-path flags — checked before any RCU section.  Written under their
+ * respective update locks; read with READ_ONCE on the hot path. */
+static bool g_has_targets;
+static bool g_has_app_masks;
+
 struct vpnhide_app_hook_masks __rcu *global_app_hook_masks;
 spinlock_t app_hook_masks_update_lock;
 
@@ -183,6 +188,8 @@ bool is_target_uid_val(uid_t uid)
 
 	if (uid == 0 || uid == 1000)
 		return false;
+	if (!READ_ONCE(g_has_targets))
+		return false;
 
 	rcu_read_lock();
 	t = rcu_dereference(global_targets);
@@ -239,15 +246,14 @@ bool lookup_app_kernel_mask(uid_t uid, unsigned int *out)
 
 bool is_hook_active(enum vpnhide_hook_idx index, uid_t uid)
 {
-	unsigned int mask;
 	unsigned int bit = BIT(index);
+	unsigned int mask;
 
-	/* A per-app kernel mask, when present, fully overrides the global
-	 * mask for that uid — it does not additionally require the global
-	 * bit to be set. This matches kmod's is_hook_active(); "is this hook
-	 * active" is a policy question and must not be conflated with
-	 * "is this uid a target" (that check belongs in the caller, e.g.
-	 * BPF laundering explicitly skips target uids itself). */
+	/* Fast path: no per-app masks configured — skip RCU entirely. */
+	if (!READ_ONCE(g_has_app_masks))
+		return !!(READ_ONCE(active_hooks_mask) & bit);
+
+	/* Per-app mask fully overrides the global for that uid. */
 	if (lookup_app_kernel_mask(uid, &mask))
 		return !!(mask & bit);
 
@@ -575,6 +581,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		old = rcu_dereference_protected(global_targets,
 				lockdep_is_held(&targets_update_lock));
 		rcu_assign_pointer(global_targets, nt);
+		WRITE_ONCE(g_has_targets, nt->count > 0);
 		spin_unlock(&targets_update_lock);
 		if (old) { synchronize_rcu(); kfree(old); }
 		atomic_inc(&vpnhide_config_generation);
@@ -817,6 +824,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		old = rcu_dereference_protected(global_app_hook_masks,
 				lockdep_is_held(&app_hook_masks_update_lock));
 		rcu_assign_pointer(global_app_hook_masks, nm);
+		WRITE_ONCE(g_has_app_masks, nm->count > 0);
 		spin_unlock(&app_hook_masks_update_lock);
 		if (old) { synchronize_rcu(); kfree(old); }
 		break;
@@ -1109,6 +1117,7 @@ static void __exit vpnhide_exit(void)
 
 	t  = rcu_dereference_protected(global_targets, 1);
 	rcu_assign_pointer(global_targets, NULL);
+	WRITE_ONCE(g_has_targets, false);
 
 	pt = rcu_dereference_protected(global_port_targets, 1);
 	rcu_assign_pointer(global_port_targets, NULL);
@@ -1127,6 +1136,7 @@ static void __exit vpnhide_exit(void)
 
 	am = rcu_dereference_protected(global_app_hook_masks, 1);
 	rcu_assign_pointer(global_app_hook_masks, NULL);
+	WRITE_ONCE(g_has_app_masks, false);
 
 	synchronize_rcu();
 	kfree(t);
