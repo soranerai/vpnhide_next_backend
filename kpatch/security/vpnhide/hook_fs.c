@@ -18,17 +18,29 @@
 /* BPF helpers                                                         */
 /* ------------------------------------------------------------------ */
 
-#define VH_STATS_MAP_PREFIX  "iface_stat_"
-#define VH_UID_MAP_PREFIX    "uid_stats"
+/* "stats_map_*" / "map_netd_stats*" maps key by the wide struct
+ * (uid+tag+counterSet+ifaceIndex); "iface_stats*" / "tether_stats*" /
+ * "map_netd_iface_*" key by a bare u32 ifindex. */
+static bool vh_is_wide_stats_map(struct bpf_map *map)
+{
+	return !strncmp(map->name, "stats_map_", 10) ||
+	       !strncmp(map->name, "map_netd_stats", 14);
+}
+
+static bool vh_is_iface_stats_map(struct bpf_map *map)
+{
+	return !strncmp(map->name, "iface_stats", 11) ||
+	       !strncmp(map->name, "map_netd_iface_", 15) ||
+	       !strncmp(map->name, "tether_stats", 12);
+}
 
 bool vh_is_stats_map(struct bpf_map *map)
 {
 	if (!map || !map->name[0])
 		return false;
-	return !strncmp(map->name, VH_STATS_MAP_PREFIX,
-			strlen(VH_STATS_MAP_PREFIX)) ||
-	       !strncmp(map->name, VH_UID_MAP_PREFIX,
-			strlen(VH_UID_MAP_PREFIX));
+	return vh_is_wide_stats_map(map) || vh_is_iface_stats_map(map) ||
+	       !strncmp(map->name, "uid_stats", 9) ||
+	       !strncmp(map->name, "app_uid_stats", 13);
 }
 
 bool vh_is_vpn_stats_key(struct bpf_map *map, const struct vh_stats_key *key)
@@ -37,66 +49,142 @@ bool vh_is_vpn_stats_key(struct bpf_map *map, const struct vh_stats_key *key)
 	       is_target_uid_val(key->uid);
 }
 
-/* Zero a single BPF map entry for a VPN/target UID key */
+/* Sum current byte/packet counters for every active VPN ifindex in `map`. */
+static void vh_collect_vpn_traffic_sum(struct bpf_map *map,
+				       struct vh_stats_value *vpn_sum)
+{
+	struct vpnhide_active_vpns *vpns;
+	int idx;
+
+	rcu_read_lock();
+	vpns = rcu_dereference(global_active_vpns);
+	if (vpns) {
+		for (idx = 0; idx < vpns->count; idx++) {
+			u32 vpn_idx = vpns->vpns[idx].ifindex;
+			void *map_val = map->ops->map_lookup_elem(map, &vpn_idx);
+
+			if (map_val)
+				sv_add(vpn_sum, (struct vh_stats_value *)map_val);
+		}
+	}
+	rcu_read_unlock();
+}
+
+/* Zero a single BPF map entry for a VPN/target UID key, or — for the
+ * configured cover interface — add the summed VPN traffic on top of its
+ * real counters so the laundered total looks organic. */
 void vpnhide_bpf_lookup_elem(struct bpf_map *map, void *key, void *value)
 {
-	const struct vh_stats_key *sk = key;
 	struct vh_stats_value *sv = value;
 
 	if (!map || !key || !value)
 		return;
-	if (!vh_is_stats_map(map))
+	/* The target process itself must see its own real traffic — only
+	 * OTHER processes (e.g. netd, settings) get the laundered view. */
+	if (is_target_uid())
 		return;
-	if (!vh_is_vpn_stats_key(map, sk))
+	if (!is_hook_active(HOOK_BPF, from_kuid(&init_user_ns, current_uid())))
 		return;
 
-	memset(sv, 0, sizeof(*sv));
-	vpnhide_dbg("zeroed bpf elem uid=%u ifidx=%u\n",
-		    sk->uid, sk->ifaceIndex);
+	if (vh_is_wide_stats_map(map)) {
+		const struct vh_stats_key *sk = key;
+
+		if (vh_is_vpn_stats_key(map, sk)) {
+			memset(sv, 0, sizeof(*sv));
+			vpnhide_dbg("zeroed bpf elem uid=%u ifidx=%u\n",
+				    sk->uid, sk->ifaceIndex);
+		}
+		return;
+	}
+
+	if (vh_is_iface_stats_map(map)) {
+		u32 ifindex = *(u32 *)key;
+		u32 cover_idx;
+
+		if (is_active_vpn_ifindex(ifindex)) {
+			memset(sv, 0, sizeof(*sv));
+			vpnhide_dbg("zeroed bpf iface elem ifidx=%u\n", ifindex);
+			return;
+		}
+
+		cover_idx = (u32)atomic_read(&global_cover_ifindex);
+		if (cover_idx && ifindex == cover_idx) {
+			struct vh_stats_value vpn_sum;
+
+			memset(&vpn_sum, 0, sizeof(vpn_sum));
+			vh_collect_vpn_traffic_sum(map, &vpn_sum);
+			if (sv_rx_bytes(&vpn_sum) || sv_tx_bytes(&vpn_sum)) {
+				sv_add(sv, &vpn_sum);
+				vpnhide_dbg("laundered cover elem ifidx=%u\n",
+					    ifindex);
+			}
+		}
+	}
 }
 EXPORT_SYMBOL_GPL(vpnhide_bpf_lookup_elem);
 
-/* Zero all VPN entries in a batch lookup result */
+/* Zero all VPN entries in a batch lookup result. Keys/values are laid out
+ * back-to-back using the map's own key_size/value_size — NOT
+ * sizeof(struct vh_stats_key/value) which only applies to "wide" maps and
+ * would both misparse "iface_stats" (u32-keyed) maps and over-read the
+ * user buffer. */
 void vpnhide_bpf_lookup_batch(struct bpf_map *map,
 			      const union bpf_attr *attr,
 			      union bpf_attr __user *uattr)
 {
-	struct vh_stats_key  *keys_buf  = NULL;
-	struct vh_stats_value *vals_buf = NULL;
+	void *keys_buf  = NULL;
+	void *vals_buf  = NULL;
+	u32 key_size, value_size;
 	u32 count = 0;
 	u32 i;
+	bool wide, iface;
 
 	if (!map || !attr || !uattr)
 		return;
-	if (!vh_is_stats_map(map))
+	/* The target process itself must see its own real traffic. */
+	if (is_target_uid())
 		return;
+	if (!is_hook_active(HOOK_BPF, from_kuid(&init_user_ns, current_uid())))
+		return;
+	wide  = vh_is_wide_stats_map(map);
+	iface = vh_is_iface_stats_map(map);
+	if (!wide && !iface)
+		return;
+
+	key_size   = map->key_size;
+	value_size = map->value_size;
 
 	if (get_user(count, &uattr->batch.count))
 		return;
 	if (!count || count > 4096)
 		return;
 
-	keys_buf = kvmalloc_array(count, sizeof(*keys_buf), GFP_KERNEL);
-	vals_buf = kvmalloc_array(count, sizeof(*vals_buf), GFP_KERNEL);
+	keys_buf = kvmalloc_array(count, key_size, GFP_KERNEL);
+	vals_buf = kvmalloc_array(count, value_size, GFP_KERNEL);
 	if (!keys_buf || !vals_buf)
 		goto out;
 
 	if (copy_from_user(keys_buf,
 			   u64_to_user_ptr(attr->batch.keys),
-			   count * sizeof(*keys_buf)))
+			   (size_t)count * key_size))
 		goto out;
 	if (copy_from_user(vals_buf,
 			   u64_to_user_ptr(attr->batch.values),
-			   count * sizeof(*vals_buf)))
+			   (size_t)count * value_size))
 		goto out;
 
 	for (i = 0; i < count; i++) {
-		if (vh_is_vpn_stats_key(map, &keys_buf[i]))
-			memset(&vals_buf[i], 0, sizeof(vals_buf[i]));
+		void *k = (char *)keys_buf + (size_t)i * key_size;
+		void *v = (char *)vals_buf + (size_t)i * value_size;
+		bool hide = wide ? vh_is_vpn_stats_key(map, k)
+				 : is_active_vpn_ifindex(*(u32 *)k);
+
+		if (hide)
+			memset(v, 0, value_size);
 	}
 
 	copy_to_user(u64_to_user_ptr(attr->batch.values),
-		     vals_buf, count * sizeof(*vals_buf));
+		     vals_buf, (size_t)count * value_size);
 out:
 	kvfree(keys_buf);
 	kvfree(vals_buf);
@@ -119,6 +207,8 @@ bool vpnhide_getdents64(unsigned int fd,
 	if (nbytes <= 0)
 		return false;
 	if (!is_hook_active(HOOK_GETDENTS64, uid))
+		return false;
+	if (!is_target_uid())
 		return false;
 
 	kbuf = kvmalloc(nbytes, GFP_KERNEL);

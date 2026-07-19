@@ -239,14 +239,19 @@ bool lookup_app_kernel_mask(uid_t uid, unsigned int *out)
 
 bool is_hook_active(enum vpnhide_hook_idx index, uid_t uid)
 {
-	unsigned int app_mask;
+	unsigned int mask;
 	unsigned int bit = BIT(index);
 
-	if (!(READ_ONCE(active_hooks_mask) & bit))
-		return false;
-	if (lookup_app_kernel_mask(uid, &app_mask))
-		return !!(app_mask & bit);
-	return is_target_uid_val(uid);
+	/* A per-app kernel mask, when present, fully overrides the global
+	 * mask for that uid — it does not additionally require the global
+	 * bit to be set. This matches kmod's is_hook_active(); "is this hook
+	 * active" is a policy question and must not be conflated with
+	 * "is this uid a target" (that check belongs in the caller, e.g.
+	 * BPF laundering explicitly skips target uids itself). */
+	if (lookup_app_kernel_mask(uid, &mask))
+		return !!(mask & bit);
+
+	return !!(READ_ONCE(active_hooks_mask) & bit);
 }
 
 /* ------------------------------------------------------------------ */

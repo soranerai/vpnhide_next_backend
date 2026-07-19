@@ -36,6 +36,8 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_SETSOCKOPT, uid))
 		return 0;
+	if (!is_target_uid())
+		return 0;
 
 	sk = sock->sk;
 
@@ -52,7 +54,7 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 				break;
 			if (devname[0] && is_active_vpn_ifname(devname)) {
 				record_kmod_intercept(uid, HOOK_SETSOCKOPT);
-				return -EPERM;
+				return -ENODEV;
 			}
 			break;
 		}
@@ -64,7 +66,7 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 				break;
 			if (ifindex && is_active_vpn_ifindex(ifindex)) {
 				record_kmod_intercept(uid, HOOK_SETSOCKOPT);
-				return -EPERM;
+				return -ENODEV;
 			}
 			break;
 		}
@@ -133,6 +135,8 @@ void vpnhide_getsockopt_post(struct socket *sock, int level, int optname,
 
 	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_GETSOCKOPT, uid))
+		return;
+	if (!is_target_uid())
 		return;
 
 	if (get_user(len, optlen))
@@ -344,6 +348,8 @@ void vpnhide_getname_post(struct socket *sock, struct sockaddr *addr, int peer)
 	if (!is_hook_active(HOOK_GETNAME_INET, uid) &&
 	    !is_hook_active(HOOK_GETNAME_INET6, uid))
 		return;
+	if (!is_target_uid())
+		return;
 
 	/* Don't spoof sockets explicitly bound to a non-VPN interface —
 	 * that would replace a valid physical IP with a VPN IP and expose
@@ -353,8 +359,6 @@ void vpnhide_getname_post(struct socket *sock, struct sockaddr *addr, int peer)
 		return;
 
 	get_spoof_ip(&sip);
-	if (!sip.has_ipv4 && !sip.has_ipv6)
-		return;
 
 	family = addr->sa_family;
 
@@ -363,10 +367,11 @@ void vpnhide_getname_post(struct socket *sock, struct sockaddr *addr, int peer)
 
 		if (!is_hook_active(HOOK_GETNAME_INET, uid))
 			return;
-		if (sip.has_ipv4 && sip.ipv4_addr) {
-			sin->sin_addr.s_addr = sip.ipv4_addr;
-			record_kmod_intercept(uid, HOOK_GETNAME_INET);
-		}
+		/* Spoof: use configured IP, or fall back to INADDR_ANY so the
+		 * real VPN address is never returned to a target process. */
+		sin->sin_addr.s_addr = (sip.has_ipv4 && sip.ipv4_addr)
+			? sip.ipv4_addr : 0;
+		record_kmod_intercept(uid, HOOK_GETNAME_INET);
 	} else if (family == AF_INET6) {
 		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
 
@@ -406,6 +411,8 @@ int vpnhide_inet6_bind_ll(struct sock *sk,
 		return 0;
 	if (!is_hook_active(HOOK_INET6_BIND_LL, uid))
 		return 0;
+	if (!is_target_uid())
+		return 0;
 	if (!is_active_vpn_ifindex(sin6->sin6_scope_id))
 		return 0;
 
@@ -424,6 +431,8 @@ bool vpnhide_udpv6_sendmsg_ll(struct sock *sk)
 	uid_t uid = from_kuid(&init_user_ns, current_uid());
 
 	if (!is_hook_active(HOOK_UDPV6_SENDMSG, uid))
+		return false;
+	if (!is_target_uid())
 		return false;
 
 	np = inet6_sk(sk);
@@ -476,8 +485,7 @@ bool vpnhide_udp_sendmsg(struct sock *sk)
 
 	if (!is_hook_active(HOOK_UDP_SENDMSG, uid))
 		return false;
-
-	if (!is_active_vpn_ifindex(sk->sk_bound_dev_if))
+	if (!is_target_uid_val(uid))
 		return false;
 
 	spin_lock(&rl_lock);
@@ -513,7 +521,10 @@ bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg,
 {
 	if (!vpnhide_udp_sendmsg(sk))
 		return false;
-	*err = -EPERM;
+	/* Look like a saturated send queue (EAGAIN), not a permission
+	 * failure — otherwise userspace can fingerprint the shim by its
+	 * distinct errno. */
+	*err = -EAGAIN;
 	return true;
 }
 EXPORT_SYMBOL_GPL(vpnhide_udp_sendmsg_pre);
@@ -530,6 +541,10 @@ void vpnhide_bind(struct socket *sock, struct sockaddr __user *umyaddr,
 	if (move_addr_to_kernel(umyaddr, addrlen, &kaddr))
 		return;
 	vpnhide_bind_pre(sock, (struct sockaddr *)&kaddr, addrlen);
+	/* Write back — vpnhide_bind_pre may have zeroed the port to trigger
+	 * ephemeral allocation.  The syscall uses umyaddr, so we must reflect
+	 * the change back to user space. */
+	copy_to_user(umyaddr, &kaddr, addrlen);
 }
 EXPORT_SYMBOL_GPL(vpnhide_bind);
 

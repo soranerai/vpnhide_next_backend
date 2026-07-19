@@ -255,4 +255,22 @@ static inline void sv_add(struct vh_stats_value *dst,
 bool vh_is_stats_map(struct bpf_map *map);
 bool vh_is_vpn_stats_key(struct bpf_map *map, const struct vh_stats_key *key);
 
+/* ------------------------------------------------------------------ */
+/* Socket hooks (hook_socket.c) — called from patched net/socket.c,    */
+/* net/ipv4/udp.c and net/ipv6/udp.c                                   */
+/* ------------------------------------------------------------------ */
+
+int  vpnhide_bind_pre(struct socket *sock, struct sockaddr *addr, int addrlen);
+void vpnhide_bind(struct socket *sock, struct sockaddr __user *umyaddr,
+		  int addrlen);
+int  vpnhide_connect_pre(struct socket *sock, struct sockaddr *addr, int addrlen);
+bool vpnhide_connect(struct socket *sock, struct sockaddr __user *uservaddr,
+		     int addrlen, int *ret);
+void vpnhide_getname_post(struct socket *sock, struct sockaddr *addr, int peer);
+void vpnhide_getname(struct socket *sock, struct sockaddr *addr,
+		     int peer, int *err);
+bool vpnhide_udp_sendmsg(struct sock *sk);
+bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg,
+			     size_t len, int *err);
+
 #endif /* _SECURITY_VPNHIDE_H */

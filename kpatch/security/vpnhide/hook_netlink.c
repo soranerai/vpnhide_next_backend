@@ -8,6 +8,8 @@ bool vpnhide_should_hide_dev(const struct net_device *dev)
 
 	if (!is_hook_active(HOOK_RTNL_FILL, uid))
 		return false;
+	if (!is_target_uid())
+		return false;
 	if (!is_active_vpn_ifindex(dev->ifindex))
 		return false;
 

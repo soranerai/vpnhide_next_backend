@@ -14,6 +14,7 @@ import re
 
 # Global configurations
 DEV_FIELD = 'nh_dev'
+HAS_FIB_RULE_UID = False  # set by main() after reading include/net/fib_rules.h
 
 # ---------------------------------------------------------------------------
 # Low-level helpers
@@ -122,12 +123,15 @@ def patch_net_socket_c(content):
             sys.exit(1)
         changed = True
 
-    # 2. __sys_bind: hook before ops->bind
+    # 2. __sys_bind: hook before ops->bind. `address` is the kernel-space
+    # copy already produced by move_addr_to_kernel() — ops->bind() uses
+    # `address`, not umyaddr, so we must mutate `address` directly rather
+    # than round-tripping through user space.
     bind_anchor = '\t\t\terr = sock->ops->bind(sock,'
     bind_hook = guard(
-        '\t\tvpnhide_bind(sock, umyaddr, addrlen);\n'
+        '\t\tvpnhide_bind_pre(sock, (struct sockaddr *)&address, addrlen);\n'
     )
-    if 'vpnhide_bind' not in content:
+    if 'vpnhide_bind_pre' not in content:
         content, ok = insert_before(content, bind_anchor, bind_hook)
         if not ok:
             # Try single-tab variant (different kernel versions)
@@ -173,31 +177,54 @@ def patch_net_socket_c(content):
         else:
             print("WARNING: __sys_connect definition not found in net/socket.c")
 
-    # 4. __sys_getsockname: hook after move_addr_to_user (first occurrence)
+    # 4. __sys_getsockname: hook BEFORE move_addr_to_user so the spoofed
+    # address (not the real one) gets copied to user space.
     getsockname_anchor = 'err = move_addr_to_user(&address, err, usockaddr, usockaddr_len);'
     getsockname_hook = guard(
         '\tvpnhide_getname(sock, (struct sockaddr *)&address, 0, &err);\n'
     )
     if 'vpnhide_getname(sock, (struct sockaddr *)&address, 0' not in content:
-        content, ok = insert_after(content, getsockname_anchor, getsockname_hook)
-        if ok:
+        sockname_idx = content.find('int __sys_getsockname(')
+        anchor_idx = content.find(getsockname_anchor, sockname_idx) if sockname_idx != -1 else -1
+        if anchor_idx != -1:
+            content = content[:anchor_idx] + getsockname_hook + content[anchor_idx:]
             changed = True
         else:
             print("WARNING: getsockname anchor not found")
 
-    # 5. __sys_getpeername: hook before fput_light — 5.10 splits move_addr_to_user across lines
-    getpeername_hook = guard(
-        '\tvpnhide_getname(sock, (struct sockaddr *)&address, 1, &err);\n'
-    )
+    # 5. __sys_getpeername: hook BEFORE move_addr_to_user, inside the
+    # `if (err >= 0)` success branch. That branch has no braces in the
+    # original source (`if (err >= 0)\n\t\t\t/* comment */\n\t\t\terr = ...;`)
+    # — inserting a second statement without adding braces would pull
+    # move_addr_to_user() out from under the if, running it unconditionally
+    # and tripping BUG_ON(klen > sizeof(sockaddr_storage)) when err < 0.
     if 'vpnhide_getname(sock, (struct sockaddr *)&address, 1' not in content:
         peer_idx = content.find('int __sys_getpeername(')
         if peer_idx != -1:
-            fput_idx = content.find('\tfput_light(sock->file, fput_needed);', peer_idx)
-            if fput_idx != -1:
-                content = content[:fput_idx] + getpeername_hook + content[fput_idx:]
+            if_idx = content.find('\t\terr = sock->ops->getname(sock, (struct sockaddr *)&address, 1);',
+                                   peer_idx)
+            if_idx = content.find('if (err >= 0)', if_idx) if if_idx != -1 else -1
+            err_assign_idx = content.find('\t\t\terr = move_addr_to_user(&address, err, usockaddr,',
+                                          if_idx) if if_idx != -1 else -1
+            stmt_end = content.find(';\n', err_assign_idx) + 2 if err_assign_idx != -1 else -1
+            if if_idx != -1 and err_assign_idx != -1:
+                # Everything between the `if (...)` line and the `err = ...;`
+                # statement (e.g. a comment line) stays as-is; we only need
+                # to add braces around the (previously single-statement) body
+                # so the inserted hook line doesn't fall outside the if.
+                if_line_end = content.find('\n', if_idx) + 1
+                body_prefix = content[if_line_end:err_assign_idx]
+                new_block = (
+                    'if (err >= 0) {\n'
+                    + body_prefix
+                    + '\t\t\tvpnhide_getname(sock, (struct sockaddr *)&address, 1, &err);\n'
+                    + content[err_assign_idx:stmt_end]
+                    + '\t\t}\n'
+                )
+                content = content[:if_idx] + new_block + content[stmt_end:]
                 changed = True
             else:
-                print("WARNING: fput_light anchor not found inside __sys_getpeername")
+                print("WARNING: move_addr_to_user anchor not found inside __sys_getpeername")
         else:
             print("WARNING: __sys_getpeername not found in net/socket.c")
 
@@ -283,8 +310,13 @@ def patch_fs_readdir_c(content):
             if ok:
                 changed = True
 
-    # SYSCALL_DEFINE3(getdents64): hook after iterate_dir call.
-    anchor_iter = 'error = iterate_dir(f.file, &buf.ctx);\n        if (error >= 0)'
+    # SYSCALL_DEFINE3(getdents64): hook right before the final
+    # `fdput_pos(f); return error;` — NOT right after iterate_dir(). The
+    # syscall body still overwrites `error` twice after iterate_dir()
+    # returns (`error = buf.error;`, then possibly
+    # `error = count - buf.count;` inside the `buf.prev_reclen` block), so
+    # hooking earlier gets our filtered byte count clobbered by the
+    # original unfiltered one before it reaches userspace.
     hook_iter = (
         '#ifdef CONFIG_VPNHIDE\n'
         '        {\n'
@@ -297,13 +329,14 @@ def patch_fs_readdir_c(content):
     if 'vpnhide_getdents64' not in content:
         sys_idx = content.find('SYSCALL_DEFINE3(getdents64,')
         if sys_idx != -1:
-            iter_idx = content.find('error = iterate_dir(f.file, &buf.ctx);', sys_idx)
-            if iter_idx != -1:
-                pos = iter_idx + len('error = iterate_dir(f.file, &buf.ctx);')
-                content = content[:pos] + '\n' + hook_iter + content[pos:]
+            fdput_anchor = '\tfdput_pos(f);\n\treturn error;'
+            fdput_idx = content.find(fdput_anchor, sys_idx)
+            if fdput_idx != -1:
+                content = (content[:fdput_idx] + hook_iter +
+                           content[fdput_idx:])
                 changed = True
             else:
-                print("WARNING: getdents64 iterate_dir anchor not found")
+                print("WARNING: getdents64 fdput_pos/return anchor not found")
         else:
             print("WARNING: SYSCALL_DEFINE3(getdents64 not found in readdir.c")
 
@@ -320,23 +353,28 @@ def patch_net_core_rtnetlink_c(content):
         if ok:
             changed = True
 
-    # rtnl_dump_ifinfo: skip hidden devices in the for_each_netdev loop
-    for anchor in [
-        'for_each_netdev_dump(net, dev, ctx->ifindex)',
-        'for_each_netdev(net, dev)',
-        'for_each_netdev_rcu(net, dev)',
-    ]:
-        if anchor in content and 'vpnhide_should_hide_dev(dev)' not in content:
-            hook = guard(
-                '\t\tif (vpnhide_should_hide_dev(dev))\n'
-                '\t\t\tcontinue;\n'
-            )
-            content, ok = insert_after(content, anchor + ' {', hook)
-            if not ok:
-                content, ok = insert_after(content, anchor, hook)
-            if ok:
+    # rtnl_fill_ifinfo builds every RTM_NEWLINK message (dump, single-device
+    # get, and change notifications) — hooking it directly covers all of
+    # those call sites in one place. The dump loop itself walks
+    # hlist_for_each_entry(dev, head, index_hlist), not for_each_netdev(),
+    # so hooking the loop (as before) missed RTM_GETLINK dumps entirely.
+    # Insert before nlh = nlmsg_put() (after local declarations, C90-safe)
+    # so a hidden device never reserves skb space.
+    if 'vpnhide_should_hide_dev(dev)' not in content:
+        func_idx = content.find('static int rtnl_fill_ifinfo(')
+        if func_idx != -1:
+            nlh_idx = content.find('\tnlh = nlmsg_put(skb, pid, seq, type, sizeof(*ifm), flags);', func_idx)
+            if nlh_idx != -1:
+                hook = guard(
+                    '\tif (dev && vpnhide_should_hide_dev(dev))\n'
+                    '\t\treturn 0;\n'
+                )
+                content = content[:nlh_idx] + hook + content[nlh_idx:]
                 changed = True
-            break
+            else:
+                print("WARNING: rtnl_fill_ifinfo nlmsg_put anchor not found")
+        else:
+            print("WARNING: rtnl_fill_ifinfo not found in rtnetlink.c")
 
     return content, changed
 
@@ -372,24 +410,50 @@ def patch_net_ipv4_devinet_c(content):
         '\t\tgoto done;\n'
         '\t}\n'
     )
-    if 'devinet_ioctl' in content and 'vpnhide_should_hide_dev(dev)' not in content:
+    if 'devinet_ioctl' in content:
         func_idx = content.find('int devinet_ioctl(')
         if func_idx != -1:
-            nodev_idx = content.find(nodev_anchor, func_idx)
-            if nodev_idx != -1:
-                pos = nodev_idx + len(nodev_anchor)
-                content = content[:pos] + devinet_hook + content[pos:]
-                changed = True
-            else:
-                # fallback: simpler anchor without goto
-                alt_anchor = '\tdev = __dev_get_by_name(net, ifr->ifr_name);\n'
-                alt_idx = content.find(alt_anchor, func_idx)
-                if alt_idx != -1:
-                    pos = alt_idx + len(alt_anchor)
+            func_end = content.find('\nstatic ', func_idx + 1)
+            func_slice = content[func_idx:func_end] if func_end != -1 else content[func_idx:]
+            if 'vpnhide_should_hide_dev(dev)' not in func_slice:
+                nodev_idx = content.find(nodev_anchor, func_idx)
+                if nodev_idx != -1:
+                    pos = nodev_idx + len(nodev_anchor)
                     content = content[:pos] + devinet_hook + content[pos:]
                     changed = True
                 else:
-                    print("WARNING: devinet_ioctl __dev_get_by_name anchor not found")
+                    # fallback: simpler anchor without goto
+                    alt_anchor = '\tdev = __dev_get_by_name(net, ifr->ifr_name);\n'
+                    alt_idx = content.find(alt_anchor, func_idx)
+                    if alt_idx != -1:
+                        pos = alt_idx + len(alt_anchor)
+                        content = content[:pos] + devinet_hook + content[pos:]
+                        changed = True
+                    else:
+                        print("WARNING: devinet_ioctl __dev_get_by_name anchor not found")
+
+    # inet_fill_ifaddr: hide VPN addresses from RTM_GETADDR dumps (ip addr show).
+    # The for_each_netdev loop above may not cover all callers; hook the fill
+    # function directly so any dump path is filtered.
+    # Insert before nlh = nlmsg_put to stay after local declarations (C90 compat).
+    inet_fill_hook = guard(
+        '\tif (ifa->ifa_dev && ifa->ifa_dev->dev &&\n'
+        '\t    vpnhide_should_hide_dev(ifa->ifa_dev->dev))\n'
+        '\t\treturn 0;\n'
+    )
+    if 'inet_fill_ifaddr' in content and 'vpnhide_should_hide_dev(ifa->ifa_dev->dev)' not in content:
+        fill_idx = content.find('static int inet_fill_ifaddr(')
+        if fill_idx != -1:
+            nlh_idx = content.find('\tnlh = nlmsg_put(', fill_idx)
+            if nlh_idx == -1:
+                nlh_idx = content.find('\tnlh = nlmsg_new(', fill_idx)
+            if nlh_idx != -1:
+                content = content[:nlh_idx] + inet_fill_hook + content[nlh_idx:]
+                changed = True
+            else:
+                print("WARNING: inet_fill_ifaddr nlmsg_put anchor not found")
+        else:
+            print("WARNING: inet_fill_ifaddr not found in devinet.c")
 
     return content, changed
 
@@ -417,32 +481,36 @@ def patch_net_ipv6_addrconf_c(content):
             break
 
     # if6_seq_show: hide VPN interfaces from /proc/net/if_inet6
-    # inject at top of function body, before seq_printf
-    if6_anchor = 'static int if6_seq_show(struct seq_file *seq, void *v)\n{\n'
+    # Inject AFTER the existing 'ifp' declaration so our if-statement doesn't
+    # precede a declaration (C90 forbids declarations after statements).
+    if6_anchor = 'static int if6_seq_show(struct seq_file *seq, void *v)\n{\n\tstruct inet6_ifaddr *ifp = (struct inet6_ifaddr *)v;\n'
     if6_hook = guard(
-        '\t{\n'
-        '\t\tstruct inet6_ifaddr *_ifp = (struct inet6_ifaddr *)v;\n'
-        '\t\tif (_ifp->idev && _ifp->idev->dev &&\n'
-        '\t\t    vpnhide_should_hide_dev(_ifp->idev->dev))\n'
-        '\t\t\treturn 0;\n'
-        '\t}\n'
+        '\tif (ifp->idev && ifp->idev->dev &&\n'
+        '\t    vpnhide_should_hide_dev(ifp->idev->dev))\n'
+        '\t\treturn 0;\n'
     )
     if 'vpnhide_should_hide_dev' not in content or 'if6_seq_show' in content:
         if 'if6_seq_show' in content and 'if6_seq_show_vpnhide' not in content:
             func_idx = content.find(if6_anchor)
             if func_idx != -1:
                 pos = func_idx + len(if6_anchor)
-                # Only inject if not already guarded
                 if '#ifdef CONFIG_VPNHIDE' not in content[pos:pos+60]:
                     content = content[:pos] + if6_hook + content[pos:]
                     changed = True
             else:
-                # Fallback: any if6_seq_show signature
+                # Fallback: find function body opening brace, then skip past
+                # any leading declaration so we stay C90-compliant.
                 func_idx2 = content.find('static int if6_seq_show(')
                 if func_idx2 != -1:
                     brace_idx = content.find('\n{', func_idx2)
                     if brace_idx != -1:
-                        pos = brace_idx + len('\n{') + 1  # after newline
+                        body_start = content.find('\n', brace_idx + 2) + 1
+                        # skip past first declaration line if present
+                        line_end = content.find('\n', body_start)
+                        if line_end != -1 and 'inet6_ifaddr' in content[body_start:line_end]:
+                            pos = line_end + 1
+                        else:
+                            pos = body_start
                         content = content[:pos] + if6_hook + content[pos:]
                         changed = True
                 else:
@@ -684,7 +752,12 @@ def patch_net_core_fib_rules_c(content):
     if c:
         changed = True
 
-    # fib_nl_fill_rule: skip rules for VPN interfaces before building the netlink msg
+    # fib_nl_fill_rule: skip rules for VPN interfaces before building the netlink msg.
+    # Also filter uid-range rules that target a shielded UID (e.g. uidrange
+    # 5555-5555 added for VPN split-routing) — they have no iifname/oifname
+    # to match against. Gated on is_target_uid() (the CALLING process, e.g.
+    # `ip rule show`) — matching against the rule's own uid_range would hide
+    # the rule from everyone, including root.
     if 'vpnhide_should_hide_ifname' not in content:
         func_idx = content.find('static int fib_nl_fill_rule(')
         if func_idx != -1:
@@ -693,9 +766,14 @@ def patch_net_core_fib_rules_c(content):
                 func_idx
             )
             if nlh_idx != -1:
+                uid_cond = (' ||\n'
+                            '\t    is_target_uid_val(from_kuid(&init_user_ns, rule->uid_range.start))'
+                            if HAS_FIB_RULE_UID else '')
                 hook = guard(
-                    '\tif ((rule->iifname[0] && vpnhide_should_hide_ifname(rule->iifname)) ||\n'
-                    '\t    (rule->oifname[0] && vpnhide_should_hide_ifname(rule->oifname)))\n'
+                    '\tif (is_target_uid() &&\n'
+                    '\t    ((rule->iifname[0] && vpnhide_should_hide_ifname(rule->iifname)) ||\n'
+                    '\t     (rule->oifname[0] && vpnhide_should_hide_ifname(rule->oifname))'
+                    + uid_cond + '))\n'
                     '\t\treturn 0;\n'
                 )
                 content = content[:nlh_idx] + hook + content[nlh_idx:]
@@ -824,7 +902,7 @@ def patch_net_core_net_procfs_c(content):
             brace_idx = content.find('\n{', func_idx)
             if brace_idx == -1:
                 brace_idx = content.find(' {', func_idx)
-            body_start = content.find('\n', brace_idx) + 1 if brace_idx != -1 else -1
+            body_start = content.find('\n', brace_idx + 2) + 1 if brace_idx != -1 else -1
             if body_start > 0:
                 content = content[:body_start] + hook + content[body_start:]
                 changed = True
@@ -869,7 +947,7 @@ def patch_net_sched_sch_api_c(content):
                 # fallback: inject at start of function body
                 brace_idx = content.find('\n{', func_idx)
                 if brace_idx != -1:
-                    body_start = content.find('\n', brace_idx) + 1
+                    body_start = content.find('\n', brace_idx + 2) + 1
                     content = content[:body_start] + hook + content[body_start:]
                     changed = True
                 else:
@@ -939,7 +1017,7 @@ def main():
 
     # Automatically check the nexthop device field from the target source tree header
     ip_fib_h_path = os.path.join(d, "include/net/ip_fib.h")
-    global DEV_FIELD
+    global DEV_FIELD, HAS_FIB_RULE_UID
     if os.path.exists(ip_fib_h_path):
         ip_fib_h = read(ip_fib_h_path)
         if 'fib_nh_dev' in ip_fib_h:
@@ -947,6 +1025,16 @@ def main():
         else:
             DEV_FIELD = 'nh_dev'
         print(f"Detected DEV_FIELD: {DEV_FIELD}")
+
+    # Check if struct fib_rule carries a uid range (field is
+    # `struct fib_kuid_range uid_range;` on modern kernels; the uapi type
+    # `struct fib_rule_uid_range` is only the netlink wire format and is not
+    # the in-kernel field name — don't match against that).
+    fib_rules_h_path = os.path.join(d, "include/net/fib_rules.h")
+    if os.path.exists(fib_rules_h_path):
+        fib_rules_h = read(fib_rules_h_path)
+        HAS_FIB_RULE_UID = 'fib_kuid_range' in fib_rules_h and 'uid_range' in fib_rules_h
+        print(f"Detected HAS_FIB_RULE_UID: {HAS_FIB_RULE_UID}")
 
     print(f"=== VPNHide patcher: {d} ===")
 
