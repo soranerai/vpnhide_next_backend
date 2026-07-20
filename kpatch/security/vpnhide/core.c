@@ -96,6 +96,20 @@ struct vpnhide_dev_reader {
 /* FNV-1a hash                                                         */
 /* ------------------------------------------------------------------ */
 
+/* call_rcu callbacks for structs whose rcu_head offset exceeds the
+ * kfree_rcu() compile-time limit of 4096 bytes (kernel 5.10). */
+static void vh_free_port_targets_rcu(struct rcu_head *head)
+{
+	kfree(container_of(head, struct vpnhide_port_targets, rcu));
+}
+
+static void vh_free_app_hook_masks_rcu(struct rcu_head *head)
+{
+	kfree(container_of(head, struct vpnhide_app_hook_masks, rcu));
+}
+
+/* ------------------------------------------------------------------ */
+
 u32 fnv1a_name(const char *s, int maxlen)
 {
 	u32 h = 2166136261u;
@@ -133,10 +147,8 @@ void vh_rebuild_name_cache(const struct vpnhide_vpn_ifindexes *idata)
 	rcu_assign_pointer(g_vpn_name_cache, nc);
 	spin_unlock(&g_vpn_name_cache_lock);
 
-	if (old) {
-		synchronize_rcu();
-		kfree(old);
-	}
+	if (old)
+		kfree_rcu(old, rcu);
 }
 
 bool vpnhide_should_hide_ifname(const char *ifname)
@@ -350,10 +362,8 @@ int update_spoof_ip(const struct vpnhide_spoof_ip *sip)
 	rcu_assign_pointer(global_spoof_ip, n);
 	spin_unlock(&spoof_ip_lock);
 
-	if (old) {
-		synchronize_rcu();
-		kfree(old);
-	}
+	if (old)
+		kfree_rcu(old, rcu);
 	return 0;
 }
 
@@ -583,7 +593,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		rcu_assign_pointer(global_targets, nt);
 		WRITE_ONCE(g_has_targets, nt->count > 0);
 		spin_unlock(&targets_update_lock);
-		if (old) { synchronize_rcu(); kfree(old); }
+		if (old) kfree_rcu(old, rcu);
 		atomic_inc(&vpnhide_config_generation);
 		wake_up_all(&vpnhide_config_wait);
 		break;
@@ -645,7 +655,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 				lockdep_is_held(&lsposed_targets_update_lock));
 		rcu_assign_pointer(global_lsposed_targets, nt);
 		spin_unlock(&lsposed_targets_update_lock);
-		if (old) { synchronize_rcu(); kfree(old); }
+		if (old) kfree_rcu(old, rcu);
 		break;
 	}
 
@@ -679,7 +689,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 				lockdep_is_held(&port_targets_update_lock));
 		rcu_assign_pointer(global_port_targets, np);
 		spin_unlock(&port_targets_update_lock);
-		if (old) { synchronize_rcu(); kfree(old); }
+		if (old) call_rcu(&old->rcu, vh_free_port_targets_rcu);
 		break;
 	}
 
@@ -706,7 +716,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 				lockdep_is_held(&active_vpns_lock));
 		rcu_assign_pointer(global_active_vpns, nav);
 		spin_unlock(&active_vpns_lock);
-		if (old) { synchronize_rcu(); kfree(old); }
+		if (old) kfree_rcu(old, rcu);
 
 		vh_rebuild_name_cache(&idata);
 		atomic_inc(&vpnhide_config_generation);
@@ -763,7 +773,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 				lockdep_is_held(&iface_prefixes_lock));
 		rcu_assign_pointer(global_iface_prefixes, np);
 		spin_unlock(&iface_prefixes_lock);
-		if (old) { synchronize_rcu(); kfree(old); }
+		if (old) kfree_rcu(old, rcu);
 		break;
 	}
 
@@ -826,7 +836,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		rcu_assign_pointer(global_app_hook_masks, nm);
 		WRITE_ONCE(g_has_app_masks, nm->count > 0);
 		spin_unlock(&app_hook_masks_update_lock);
-		if (old) { synchronize_rcu(); kfree(old); }
+		if (old) call_rcu(&old->rcu, vh_free_app_hook_masks_rcu);
 		break;
 	}
 
@@ -998,7 +1008,7 @@ found:
 				lockdep_is_held(&port_targets_update_lock));
 		rcu_assign_pointer(global_port_targets, np);
 		spin_unlock(&port_targets_update_lock);
-		if (old) { synchronize_rcu(); kfree(old); }
+		if (old) call_rcu(&old->rcu, vh_free_port_targets_rcu);
 		break;
 	}
 
