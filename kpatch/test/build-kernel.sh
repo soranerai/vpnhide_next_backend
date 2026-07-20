@@ -2,9 +2,9 @@
 # Build a QEMU-bootable GKI kernel with VPNHide baked in (kpatch) for <kmi>.
 #
 # Differences from kmod/test/build-kernel.sh:
-#   - patch_kernel.py is applied to the cloned source tree before building.
-#   - kpatch/security/vpnhide/ and kpatch/include/linux/vpnhide.h are copied
-#     into the tree so the compiler finds them.
+#   - kpatch/scripts/apply.sh is applied to the cloned source tree before building
+#     (copies security/vpnhide/ + include/linux/vpnhide.h and applies the
+#      versions/<ver>/*.patch set for the KMI's kernel version).
 #   - CONFIG_VPNHIDE=y is set via qemu.config (no .ko produced or needed).
 #
 # Usage:  kpatch/test/build-kernel.sh <kmi>          e.g. android14-6.1
@@ -34,15 +34,18 @@ docker run --rm \
 		https://android.googlesource.com/kernel/common /tmp/linux
 	cd /tmp/linux
 
-	# 2. Copy VPNHide kpatch sources into the tree
-	#    security/vpnhide/ — the built-in subsystem
-	cp -r /repo/kpatch/security/vpnhide security/vpnhide
-	#    include/linux/vpnhide.h — the public API / stub header
-	cp /repo/kpatch/include/linux/vpnhide.h include/linux/vpnhide.h
-
-	# 3. Apply all in-tree patches via patch_kernel.py
-	#    (patches net/socket.c, fs/namei.c, fs/readdir.c, net/core/*, ...)
-	python3 /repo/scripts/patch_kernel.py /tmp/linux
+	# 2. Apply VPNHide in-tree patches via apply.sh (copies security/vpnhide +
+	#    include/linux/vpnhide.h and applies versions/<ver>/*.patch).
+	#    The kernel version (KMI suffix) selects the patchset.
+	case "$KMI" in
+		*-5.10)  PATCHVER=android12-5.10 ;;
+		*-5.15)  PATCHVER=android13-5.15 ;;
+		*-6.1)   PATCHVER=android14-6.1  ;;
+		*-6.6)   PATCHVER=android15-6.6  ;;
+		*-6.12)  PATCHVER=android16-6.12 ;;
+		*) echo "ERROR: no VPNHide patchset for KMI $KMI"; exit 1 ;;
+	esac
+	bash /repo/kpatch/scripts/apply.sh /tmp/linux "$PATCHVER"
 
 	# 4. Build kernel with CONFIG_VPNHIDE=y (and virtio/PL011/DUMMY from qemu.config)
 	make ARCH=arm64 LLVM=1 gki_defconfig

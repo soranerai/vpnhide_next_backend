@@ -115,12 +115,21 @@ for KMI in "${KMIS[@]}"; do
             export PATH="$CLANG_BIN:$PATH"
             KSRC="$VPNHIDE_QEMU_KSRC"   # /opt/qemu/linux (pre-built, writable in container)
 
-            echo "[kpatch/$KMI] Injecting vpnhide sources into kernel tree…"
-            cp -r /repo/kpatch/security/vpnhide "$KSRC/security/vpnhide"
-            cp /repo/kpatch/include/linux/vpnhide.h "$KSRC/include/linux/vpnhide.h"
+            # Map the KMI to a version patchset directory. The kernel version
+            # (suffix) selects the patchset, not the android generation.
+            case "$KMI" in
+                *-5.10)  PATCHVER=android12-5.10 ;;
+                *-5.15)  PATCHVER=android13-5.15 ;;
+                *-6.1)   PATCHVER=android14-6.1  ;;
+                *-6.6)   PATCHVER=android15-6.6  ;;
+                *-6.12)  PATCHVER=android16-6.12 ;;
+                *) echo "ERROR: no VPNHide patchset for KMI $KMI"; exit 1 ;;
+            esac
 
-            echo "[kpatch/$KMI] Applying in-tree hooks via patch_kernel.py…"
-            python3 /repo/scripts/patch_kernel.py "$KSRC"
+            echo "[kpatch/$KMI] Applying VPNHide in-tree patches (apply.sh, $PATCHVER)…"
+            # apply.sh copies security/vpnhide + include/linux/vpnhide.h and
+            # applies versions/$PATCHVER/*.patch into the tree.
+            bash /repo/kpatch/scripts/apply.sh "$KSRC" "$PATCHVER"
 
             echo "[kpatch/$KMI] Enabling CONFIG_VPNHIDE=y (incremental)…"
             cd "$KSRC"
