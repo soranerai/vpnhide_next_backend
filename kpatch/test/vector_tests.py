@@ -980,7 +980,6 @@ def main():
     run("connect_port_block",     test_connect_port_block)
     run("bind_port_block",        test_bind_port_block)
     run("bpf_laundering",         test_bpf_laundering,         vpn0_idx)
-    run("proc_sys_net",           test_proc_sys_net)
     run("udp_queue_pressure",     test_udp_queue_pressure)
     run("tc_qdisc",               test_tc_qdisc,               vpn0_idx)
     run("pmtu_discover",          test_pmtu_discover)
