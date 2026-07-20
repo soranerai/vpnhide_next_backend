@@ -156,6 +156,59 @@ log "--- Applying KSU+SUSFS to staging tree ---"
 bash "$VPNHIDE_PRIVATE/scripts/apply_ksu_susfs.sh" \
     "$STAGING_DIR/common" "$SRC_DIR" "$VERSION"
 
+# ----------------------------- Step 3b: Fix kernel version string -------------
+# Wild kernel approach: remove dirty suffixes, then hardcode setlocalversion
+# so uname -r stays at e.g. "6.1.157-android14-Wild" — matching the vermagic
+# of cfg80211.ko and other GKI modules already on the device.
+# Override the branding suffix via KERNEL_LOCALVERSION env var (default: -Wild).
+log "--- Fixing kernel version string (branding) ---"
+SETLOCALVER="$STAGING_DIR/common/scripts/setlocalversion"
+STAMP_BZL="$STAGING_DIR/build/kernel/kleaf/impl/stamp.bzl"
+
+# 1. Strip -maybe-dirty from bazel stamp (kleaf builds)
+if [ -f "$STAMP_BZL" ]; then
+    sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" "$STAMP_BZL"
+fi
+# 2. Strip -dirty from setlocalversion (both build systems)
+if [ -f "$SETLOCALVER" ]; then
+    sed -i 's/-dirty//' "$SETLOCALVER"
+fi
+# 3. Replace the last line of setlocalversion with a hardcoded version string,
+#    exactly as Wild does — so git-describe never runs and adds extra commits.
+ANDROID_PART="${VERSION%%-*}"   # e.g. android14
+BRANDING="${KERNEL_LOCALVERSION:-"-Wild"}"
+if [ -f "$SETLOCALVER" ]; then
+    # Remove last line, append hardcoded echo
+    sed -i '$d' "$SETLOCALVER"
+    echo "echo \"-${ANDROID_PART}${BRANDING}\"" >> "$SETLOCALVER"
+    chmod +x "$SETLOCALVER"
+    log "setlocalversion -> uname will show: $(uname -r | cut -d- -f1-2)-${ANDROID_PART}${BRANDING}"
+fi
+
+# ----------------------------- Step 3c: Bypass module version check -----------
+# Same as Wild kernel "bypass hack": patch bad_version: label in module/version.c
+# to return 1 instead of 0, so the kernel accepts vendor *.ko files regardless
+# of CRC/vermagic mismatch (needed for WiFi/BT modules on stock vendor_dlkm).
+log "--- Applying module version bypass patch ---"
+if [[ "$VERSION" == "android14-6.1" || "$VERSION" == "android15-6.6" || "$VERSION" == "android16-6.12" ]]; then
+    MODULE_VERSION_C="$STAGING_DIR/common/kernel/module/version.c"
+else
+    MODULE_VERSION_C="$STAGING_DIR/common/kernel/module.c"
+fi
+
+if [ -f "$MODULE_VERSION_C" ]; then
+    # Break hardlink before sed -i
+    cp "$MODULE_VERSION_C" "$MODULE_VERSION_C.unshare" && mv "$MODULE_VERSION_C.unshare" "$MODULE_VERSION_C"
+    sed -i '/bad_version:/{:a;n;/return 0;/{s/return 0;/return 1;/;b};ba}' "$MODULE_VERSION_C"
+    if grep -A 5 "bad_version:" "$MODULE_VERSION_C" | grep -q "return 1;"; then
+        log "Module version bypass: applied to ${MODULE_VERSION_C#$STAGING_DIR/}"
+    else
+        die "Module version bypass: patch failed — 'return 1' not found after bad_version:"
+    fi
+else
+    log "WARNING: $MODULE_VERSION_C not found, skipping bypass patch"
+fi
+
 # ----------------------------- Step 4: Apply VPNHide patches ------------------
 log "--- Applying VPNHide static patches for $VERSION ---"
 bash "$VPNHIDE_PRIVATE/kpatch/scripts/apply.sh" "$STAGING_DIR/common" "$VERSION"
