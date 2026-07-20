@@ -191,8 +191,10 @@ void vpnhide_bpf_lookup_batch(struct bpf_map *map,
 			memset(v, 0, value_size);
 	}
 
-	copy_to_user(u64_to_user_ptr(attr->batch.values),
-		     vals_buf, (size_t)count * value_size);
+	if (copy_to_user(u64_to_user_ptr(attr->batch.values),
+			 vals_buf, (size_t)count * value_size)) {
+		/* ignore copy error as we are in void post-hook and memory is already updated */
+	}
 out:
 	kvfree(keys_buf);
 	kvfree(vals_buf);
@@ -256,7 +258,10 @@ bool vpnhide_getdents64(unsigned int fd,
 		}
 	}
 
-	copy_to_user(dirent, kbuf, nbytes);
+	if (copy_to_user(dirent, kbuf, nbytes)) {
+		kvfree(kbuf);
+		return false;
+	}
 	kvfree(kbuf);
 	*retval = nbytes;
 	return true;

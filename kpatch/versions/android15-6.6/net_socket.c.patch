@@ -24,7 +24,7 @@ index 3bfb48143..ecb683a38 100644
  				err = READ_ONCE(sock->ops)->bind(sock,
  						      (struct sockaddr *)
  						      &address, addrlen);
-@@ -2068,6 +2074,23 @@ int __sys_connect(int fd, struct sockaddr __user *uservaddr, int addrlen)
+@@ -2068,6 +2074,22 @@ int __sys_connect(int fd, struct sockaddr __user *uservaddr, int addrlen)
  	int ret = -EBADF;
  	struct fd f;
  
@@ -32,8 +32,7 @@ index 3bfb48143..ecb683a38 100644
 +	{
 +		struct fd _f = fdget(fd);
 +		if (_f.file) {
-+			int _err = 0;
-+			struct socket *_sock = sock_from_file(_f.file, &_err);
++			struct socket *_sock = sock_from_file(_f.file);
 +			if (_sock) {
 +				int _ret = 0;
 +				if (vpnhide_connect(_sock, uservaddr, addrlen, &_ret)) {

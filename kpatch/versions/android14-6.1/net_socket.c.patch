@@ -26,7 +26,7 @@ index 6f39f7b0c..1fa000ae5 100644
  						      (struct sockaddr *)
  						      &address, addrlen);
  		}
-@@ -2004,6 +2012,23 @@ int __sys_connect(int fd, struct sockaddr __user *uservaddr, int addrlen)
+@@ -2004,6 +2012,22 @@ int __sys_connect(int fd, struct sockaddr __user *uservaddr, int addrlen)
  	int ret = -EBADF;
  	struct fd f;
  
@@ -34,8 +34,7 @@ index 6f39f7b0c..1fa000ae5 100644
 +	{
 +		struct fd _f = fdget(fd);
 +		if (_f.file) {
-+			int _err = 0;
-+			struct socket *_sock = sock_from_file(_f.file, &_err);
++			struct socket *_sock = sock_from_file(_f.file);
 +			if (_sock) {
 +				int _ret = 0;
 +				if (vpnhide_connect(_sock, uservaddr, addrlen, &_ret)) {
@@ -62,21 +61,23 @@ index 6f39f7b0c..1fa000ae5 100644
  
  out_put:
  	fput_light(sock->file, fput_needed);
-@@ -2082,10 +2110,12 @@ int __sys_getpeername(int fd, struct sockaddr __user *usockaddr,
+@@ -2082,10 +2110,14 @@ int __sys_getpeername(int fd, struct sockaddr __user *usockaddr,
  		}
  
  		err = sock->ops->getname(sock, (struct sockaddr *)&address, 1);
 -		if (err >= 0)
 +		if (err >= 0) {
  			/* "err" is actually length in this case */
++#ifdef CONFIG_VPNHIDE
 +			vpnhide_getname(sock, (struct sockaddr *)&address, 1, &err);
++#endif
  			err = move_addr_to_user(&address, err, usockaddr,
  						usockaddr_len);
 +		}
  		fput_light(sock->file, fput_needed);
  	}
  	return err;
-@@ -2265,7 +2295,18 @@ int __sys_setsockopt(int fd, int level, int optname, char __user *user_optval,
+@@ -2265,7 +2295,19 @@ int __sys_setsockopt(int fd, int level, int optname, char __user *user_optval,
  
  	if (kernel_optval)
  		optval = KERNEL_SOCKPTR(kernel_optval);

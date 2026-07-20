@@ -180,8 +180,8 @@ void vpnhide_getsockopt_post(struct socket *sock, int level, int optname,
 			int zero = 0;
 
 			if (len >= (int)sizeof(zero)) {
-				copy_to_user(optval, &zero, sizeof(zero));
-				record_kmod_intercept(uid, HOOK_GETSOCKOPT);
+				if (!copy_to_user(optval, &zero, sizeof(zero)))
+					record_kmod_intercept(uid, HOOK_GETSOCKOPT);
 			}
 			break;
 		}
@@ -192,8 +192,8 @@ void vpnhide_getsockopt_post(struct socket *sock, int level, int optname,
 			int mtu = 1500;
 
 			if (len >= (int)sizeof(mtu)) {
-				copy_to_user(optval, &mtu, sizeof(mtu));
-				record_kmod_intercept(uid, HOOK_GETSOCKOPT);
+				if (!copy_to_user(optval, &mtu, sizeof(mtu)))
+					record_kmod_intercept(uid, HOOK_GETSOCKOPT);
 			}
 			break;
 		}
@@ -201,8 +201,8 @@ void vpnhide_getsockopt_post(struct socket *sock, int level, int optname,
 			int val = IP_PMTUDISC_DONT;
 
 			if (len >= (int)sizeof(val)) {
-				copy_to_user(optval, &val, sizeof(val));
-				record_kmod_intercept(uid, HOOK_GETSOCKOPT);
+				if (!copy_to_user(optval, &val, sizeof(val)))
+					record_kmod_intercept(uid, HOOK_GETSOCKOPT);
 			}
 			break;
 		}
@@ -212,8 +212,8 @@ void vpnhide_getsockopt_post(struct socket *sock, int level, int optname,
 			int mtu = 1500;
 
 			if (len >= (int)sizeof(mtu)) {
-				copy_to_user(optval, &mtu, sizeof(mtu));
-				record_kmod_intercept(uid, HOOK_GETSOCKOPT);
+				if (!copy_to_user(optval, &mtu, sizeof(mtu)))
+					record_kmod_intercept(uid, HOOK_GETSOCKOPT);
 			}
 		}
 	} else if (level == SOL_TCP) {
@@ -222,8 +222,8 @@ void vpnhide_getsockopt_post(struct socket *sock, int level, int optname,
 			int mss = 1460;
 
 			if (len >= (int)sizeof(mss)) {
-				copy_to_user(optval, &mss, sizeof(mss));
-				record_kmod_intercept(uid, HOOK_GETSOCKOPT);
+				if (!copy_to_user(optval, &mss, sizeof(mss)))
+					record_kmod_intercept(uid, HOOK_GETSOCKOPT);
 			}
 			break;
 		}
@@ -241,9 +241,9 @@ void vpnhide_getsockopt_post(struct socket *sock, int level, int optname,
 				break;
 			info.tcpi_snd_mss = 1460;
 			info.tcpi_rcv_mss = 1460;
-			copy_to_user(optval, &info,
-				     min_t(int, len, (int)sizeof(info)));
-			record_kmod_intercept(uid, HOOK_GETSOCKOPT);
+			if (!copy_to_user(optval, &info,
+					  min_t(int, len, (int)sizeof(info))))
+				record_kmod_intercept(uid, HOOK_GETSOCKOPT);
 			break;
 		}
 		}
@@ -617,7 +617,9 @@ void vpnhide_bind(struct socket *sock, struct sockaddr __user *umyaddr,
 	/* Write back — vpnhide_bind_pre may have zeroed the port to trigger
 	 * ephemeral allocation.  The syscall uses umyaddr, so we must reflect
 	 * the change back to user space. */
-	copy_to_user(umyaddr, &kaddr, addrlen);
+	if (copy_to_user(umyaddr, &kaddr, addrlen)) {
+		/* ignore failure since bind already succeeded or we are in post-hook */
+	}
 }
 EXPORT_SYMBOL_GPL(vpnhide_bind);
 
@@ -645,12 +647,18 @@ bool vpnhide_setsockopt(int fd, int level, int optname,
 {
 	struct fd f = fdget(fd);
 	struct socket *sock;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
 	int err = 0;
+#endif
 	int r;
 
 	if (!f.file)
 		return false;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+	sock = sock_from_file(f.file);
+#else
 	sock = sock_from_file(f.file, &err);
+#endif
 	if (!sock) {
 		fdput(f);
 		return false;
