@@ -647,17 +647,22 @@ bool vpnhide_setsockopt(int fd, int level, int optname,
 {
 	struct fd f = fdget(fd);
 	struct socket *sock;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+	struct file *ffile = fd_file(f);
+#else
+	struct file *ffile = f.file;
+#endif
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
 	int err = 0;
 #endif
 	int r;
 
-	if (!f.file)
+	if (!ffile)
 		return false;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
-	sock = sock_from_file(f.file);
+	sock = sock_from_file(ffile);
 #else
-	sock = sock_from_file(f.file, &err);
+	sock = sock_from_file(ffile, &err);
 #endif
 	if (!sock) {
 		fdput(f);

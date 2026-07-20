@@ -137,7 +137,7 @@ void vh_rebuild_name_cache(const struct vpnhide_vpn_ifindexes *idata)
 
 	nc->count = min(idata->count, MAX_ACTIVE_VPNS);
 	for (i = 0; i < nc->count; i++) {
-		strlcpy(nc->names[i], idata->vpns[i].name, MAX_IFACE_LEN);
+		strscpy(nc->names[i], idata->vpns[i].name, MAX_IFACE_LEN);
 		nc->hashes[i] = fnv1a_name(idata->vpns[i].name, MAX_IFACE_LEN);
 	}
 
@@ -535,7 +535,7 @@ static ssize_t vpnhide_dev_write(struct file *file, const char __user *buf,
 		if (len == 0 || strcmp(val, "none") == 0)
 			global_cover_ifname[0] = '\0';
 		else
-			strlcpy(global_cover_ifname, val, IFNAMSIZ);
+			strscpy(global_cover_ifname, val, IFNAMSIZ);
 		spin_unlock(&cover_ifname_lock);
 		atomic_inc(&vpnhide_config_generation);
 		wake_up_all(&vpnhide_config_wait);
@@ -708,7 +708,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		nav->count = min(idata.count, MAX_ACTIVE_VPNS);
 		for (i = 0; i < nav->count; i++) {
 			nav->vpns[i].ifindex = idata.vpns[i].ifindex;
-			strlcpy(nav->vpns[i].name,
+			strscpy(nav->vpns[i].name,
 				idata.vpns[i].name, MAX_IFACE_LEN);
 		}
 		spin_lock(&active_vpns_lock);

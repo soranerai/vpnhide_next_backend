@@ -18,12 +18,12 @@ index ba2df3d2ac15..3e51c6a4792f 100644
  	struct rtmsg *rtm;
  
 -	nlh = nlmsg_put(skb, portid, seq, event, sizeof(*rtm), flags);
-+	#ifdef CONFIG_VPNHIDE
-+	if (fi && fi->fib_nh[0].nh_dev &&
-+	    vpnhide_should_hide_dev(fi->fib_nh[0].nh_dev))
++#ifdef CONFIG_VPNHIDE
++	if (fi && !fi->nh && fi->fib_nh[0].fib_nh_dev &&
++	    vpnhide_should_hide_dev(fi->fib_nh[0].fib_nh_dev))
 +		return 0;
 +#endif
-+nlh = nlmsg_put(skb, portid, seq, event, sizeof(*rtm), flags);
++	nlh = nlmsg_put(skb, portid, seq, event, sizeof(*rtm), flags);
  	if (!nlh)
  		return -EMSGSIZE;
  

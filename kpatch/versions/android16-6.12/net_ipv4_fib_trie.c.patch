@@ -18,8 +18,8 @@ index 09e31757e96c..c65de511e1f0 100644
  		__be32 mask = inet_make_mask(KEYLENGTH - fa->fa_slen);
  		unsigned int flags = fib_flag_trans(fa->fa_type, mask, fi);
 +#ifdef CONFIG_VPNHIDE
-+		if (fi && fi->fib_nh[0].nh_dev &&
-+		    vpnhide_should_hide_dev(fi->fib_nh[0].nh_dev))
++		if (fi && !fi->nh && fi->fib_nh[0].fib_nh_dev &&
++		    vpnhide_should_hide_dev(fi->fib_nh[0].fib_nh_dev))
 +			continue;
 +#endif
 +
