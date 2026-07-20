@@ -65,7 +65,8 @@ diff --git a/net/socket.c b/net/socket.c
 +							   _sp, optlen);
 +			if (_ret) {
 +				fput_light(sock->file, fput_needed);
-+				return _ret;
++				/* >0 = intercepted, success; <0 = real errno */
++				return _ret > 0 ? 0 : _ret;
 +			}
 +		}
 +

@@ -19,10 +19,19 @@
 
 #include "vpnhide.h"
 
+/*
+ * Internal socket marker: set on sockets where we have already intercepted
+ * IP_MTU_DISCOVER or UDP_SEGMENT to indicate this is a diagnostic probe.
+ * The UDP rate-limiter skips these sockets to avoid dropping probe sends.
+ * BIT(31) is unused by normal routing; we preserve it across SO_MARK resets.
+ */
+#define VH_SK_PROBE_MARK  BIT(31)
+
 /* ------------------------------------------------------------------ */
 /* setsockopt — called BEFORE the real handler                         */
 /*   returns 0  → allow                                                */
 /*   returns <0 → kernel returns that errno to userspace               */
+/*   returns 1  → intercepted; caller maps this to 0 (success)         */
 /* ------------------------------------------------------------------ */
 
 int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
@@ -72,9 +81,12 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 			break;
 		}
 		case SO_MARK: {
-			/* Force mark to 0 — prevents routing via VPN table */
-			if (sk->sk_mark != 0) {
-				sk->sk_mark = 0;
+			/* Force mark to 0 — prevents routing via VPN table.
+			 * Preserve VH_SK_PROBE_MARK (bit 31): it is our internal
+			 * flag, never a real routing mark. */
+			u32 probe_bit = sk->sk_mark & VH_SK_PROBE_MARK;
+			if (sk->sk_mark != probe_bit) {
+				sk->sk_mark = probe_bit;
 				record_kmod_intercept(uid, HOOK_SETSOCKOPT);
 			}
 			/* swallow the setsockopt normally — just pre-zero */
@@ -97,14 +109,17 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 	} else if (level == SOL_IP) {
 		if (optname == IP_MTU_DISCOVER) {
 			/* Force PMTUDISC_DONT; set directly on sk, skip real handler.
-			 * Return 1 = "intercepted, return 0 to userspace". */
+			 * Mark socket as a probe so the UDP rate-limiter won't drop
+			 * the subsequent test send (check_udp_pmtu). */
 			inet_sk(sk)->pmtudisc = IP_PMTUDISC_DONT;
+			sk->sk_mark |= VH_SK_PROBE_MARK;
 			record_kmod_intercept(uid, HOOK_SETSOCKOPT);
 			return 1;
 		}
 	} else if (level == SOL_IPV6) {
 		if (optname == IPV6_MTU_DISCOVER) {
 			inet6_sk(sk)->pmtudisc = IPV6_PMTUDISC_DONT;
+			sk->sk_mark |= VH_SK_PROBE_MARK;
 			record_kmod_intercept(uid, HOOK_SETSOCKOPT);
 			return 1;
 		}
@@ -112,8 +127,10 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 		if (optname == UDP_SEGMENT) {
 			/* Zero gso_size directly; skip the real handler so it
 			 * cannot restore the user-supplied non-zero value.
-			 * Return 1 = "intercepted, return 0 to userspace". */
+			 * Mark socket as a probe so the rate-limiter won't drop
+			 * the subsequent large test send (check_gso_asymmetry). */
 			udp_sk(sk)->gso_size = 0;
+			sk->sk_mark |= VH_SK_PROBE_MARK;
 			record_kmod_intercept(uid, HOOK_SETSOCKOPT);
 			return 1;
 		}
@@ -529,6 +546,14 @@ bool vpnhide_udp_sendmsg(struct sock *sk)
 
 	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_UDP_SENDMSG)))
 		return false;
+
+	/* Probe sockets (IP_MTU_DISCOVER / UDP_SEGMENT intercepted) must not
+	 * be rate-limited: dropping their test send would cause check_udp_pmtu
+	 * to return "check error" and check_gso_asymmetry to return "VPN
+	 * detected" even when all other hooks are working correctly. */
+	if (READ_ONCE(sk->sk_mark) & VH_SK_PROBE_MARK)
+		return false;
+
 	uid = from_kuid(&init_user_ns, current_uid());
 
 	if (!is_hook_active(HOOK_UDP_SENDMSG, uid))

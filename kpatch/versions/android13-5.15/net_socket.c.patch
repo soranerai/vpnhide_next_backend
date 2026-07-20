@@ -85,7 +85,8 @@ index f7cfc703b..e8fc99a75 100644
 +	{
 +		int _ret = 0;
 +		if (vpnhide_setsockopt(fd, level, optname, user_optval, optlen, &_ret)) {
-+			err = _ret;
++			/* _ret > 0: intercepted, success; <0: errno */
++			err = (_ret > 0) ? 0 : _ret;
 +			fput_light(sock->file, fput_needed);
 +			return err;
 +		}
