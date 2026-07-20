@@ -13,15 +13,17 @@ index 137a7ba5f..2b0fa8263 100644
  #include <linux/slab.h>
  #include <net/tcp_states.h>
  #include <linux/skbuff.h>
-@@ -1059,6 +1063,11 @@ EXPORT_SYMBOL_GPL(udp_cmsg_send);
- 
+@@ -1059,6 +1063,13 @@ EXPORT_SYMBOL_GPL(udp_cmsg_send);
+
  int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
  {
 +#ifdef CONFIG_VPNHIDE
-+	if (unlikely(vpnhide_udp_sendmsg(sk)))
-+		return -ENOBUFS;
++	{
++		int _err = 0;
++		if (vpnhide_udp_sendmsg_pre(sk, msg, len, &_err))
++			return _err;
++	}
 +#endif
-+
  	struct inet_sock *inet = inet_sk(sk);
  	struct udp_sock *up = udp_sk(sk);
  	DECLARE_SOCKADDR(struct sockaddr_in *, usin, msg->msg_name);
