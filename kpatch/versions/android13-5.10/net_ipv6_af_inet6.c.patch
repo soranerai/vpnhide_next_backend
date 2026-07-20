@@ -1,0 +1,30 @@
+diff --git a/net/ipv6/af_inet6.c b/net/ipv6/af_inet6.c
+index 002f3dacb..de2a11439 100644
+--- a/net/ipv6/af_inet6.c
++++ b/net/ipv6/af_inet6.c
+@@ -52,6 +52,10 @@
+ #include <net/transp_v6.h>
+ #include <net/ip6_route.h>
+ #include <net/addrconf.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ #include <net/ipv6_stubs.h>
+ #include <net/ndisc.h>
+ #ifdef CONFIG_IPV6_TUNNEL
+@@ -297,6 +301,14 @@ static int __inet6_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len,
+ 	if (addr->sin6_family != AF_INET6)
+ 		return -EAFNOSUPPORT;
+ 
++#ifdef CONFIG_VPNHIDE
++	{
++		int _r = vpnhide_inet6_bind_ll(sk, uaddr, addr_len);
++		if (_r)
++			return _r;
++	}
++#endif
++
+ 	addr_type = ipv6_addr_type(&addr->sin6_addr);
+ 	if ((addr_type & IPV6_ADDR_MULTICAST) && sk->sk_type == SOCK_STREAM)
+ 		return -EINVAL;

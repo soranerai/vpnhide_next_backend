@@ -1,0 +1,29 @@
+diff --git a/net/ipv6/udp.c b/net/ipv6/udp.c
+index d5d254ca2..0e333282b 100644
+--- a/net/ipv6/udp.c
++++ b/net/ipv6/udp.c
+@@ -54,6 +54,10 @@
+ #include <linux/seq_file.h>
+ #include <trace/events/skb.h>
+ #include "udp_impl.h"
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ 
+ static void udpv6_destruct_sock(struct sock *sk)
+ {
+@@ -1342,6 +1346,13 @@ int udpv6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
+ 	int is_udplite = IS_UDPLITE(sk);
+ 	int (*getfrag)(void *, char *, int, int, int, struct sk_buff *);
+ 
++#ifdef CONFIG_VPNHIDE
++	{
++		int _err = 0;
++		if (vpnhide_udp_sendmsg_pre(sk, msg, len, &_err))
++			return _err;
++	}
++#endif
+ 	ipcm6_init(&ipc6);
+ 	ipc6.gso_size = READ_ONCE(up->gso_size);
+ 	ipc6.sockc.tsflags = sk->sk_tsflags;
