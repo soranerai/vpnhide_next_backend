@@ -64,8 +64,13 @@ die()  { echo "[build] ERROR: $*" >&2; exit 1; }
 
 # ----------------------------- Version -> source dir --------------------------
 case "$VERSION" in
-    android12-5.10) SRC_DIR="$GKI_ROOT/kernel-build-local";        BUILD_SYS="legacy" ;;
+    # android12-5.10 uses its own dedicated tree (AOSP branch predates kleaf).
+    # android13-5.10 shares the same 5.10 kernel + identical patchset; once its
+    # tree is set up at the ksu+susfs baseline, android12-5.10 can be pointed there.
+    android12-5.10) SRC_DIR="$GKI_ROOT/kernel-build-android12-5.10"; BUILD_SYS="legacy" ;;
+    android13-5.10) SRC_DIR="$GKI_ROOT/kernel-build-android13-5.10"; BUILD_SYS="kleaf" ;;
     android13-5.15) SRC_DIR="$GKI_ROOT/kernel-build-android13-5.15"; BUILD_SYS="kleaf" ;;
+    android14-5.15) SRC_DIR="$GKI_ROOT/kernel-build-android13-5.15"; BUILD_SYS="kleaf" ;;
     android14-6.1)  SRC_DIR="$GKI_ROOT/kernel-build-android14-6.1";  BUILD_SYS="kleaf" ;;
     android15-6.6)  SRC_DIR="$GKI_ROOT/kernel-build-android15-6.6";  BUILD_SYS="kleaf" ;;
     android16-6.12) SRC_DIR="$GKI_ROOT/kernel-build-android16-6.12"; BUILD_SYS="kleaf" ;;
@@ -87,19 +92,16 @@ cd "$SRC_DIR/common"
 git config user.email "ci@vpnhide" 2>/dev/null || true
 git config user.name  "VPNHide CI"  2>/dev/null || true
 
-BASELINE_SUBJECT="$(git log --oneline -1 2>/dev/null || echo '')"
-grep -q "ksu+susfs baseline" <<< "$BASELINE_SUBJECT" \
-    || die "source common/ is not at the 'ksu+susfs baseline' commit (HEAD: $BASELINE_SUBJECT).
-        Roll it back before building so staging starts from a pristine tree."
+HEAD_SUBJECT="$(git log --oneline -1 2>/dev/null || echo '')"
 
-DIRTY_COUNT="$(git status --porcelain | wc -l)"
+DIRTY_COUNT="$(git diff --name-only HEAD | wc -l)"
 if [ "$DIRTY_COUNT" -ne 0 ]; then
     die "source common/ is dirty ($DIRTY_COUNT changed files). VPNHide patches must NOT
         live in the source tree — they belong in staging only. Run:
           git -C '$SRC_DIR/common' reset --hard HEAD && git -C '$SRC_DIR/common' clean -fd security/vpnhide
           rm -f '$SRC_DIR/common/include/linux/vpnhide.h'"
 fi
-log "Source tree verified pristine (baseline: ${BASELINE_SUBJECT%% *})."
+log "Source tree: ${HEAD_SUBJECT}"
 cd "$SRC_DIR"
 
 # ----------------------------- Step 2: Create staging clone -------------------
@@ -149,11 +151,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ----------------------------- Step 3: Apply VPNHide patches ------------------
+# ----------------------------- Step 3: Apply KSU+SUSFS -----------------------
+log "--- Applying KSU+SUSFS to staging tree ---"
+bash "$VPNHIDE_PRIVATE/scripts/apply_ksu_susfs.sh" \
+    "$STAGING_DIR/common" "$SRC_DIR" "$VERSION"
+
+# ----------------------------- Step 4: Apply VPNHide patches ------------------
 log "--- Applying VPNHide static patches for $VERSION ---"
 bash "$VPNHIDE_PRIVATE/kpatch/scripts/apply.sh" "$STAGING_DIR/common" "$VERSION"
 
-# ----------------------------- Step 4: Append config fragment -----------------
+# ----------------------------- Step 5: Append config fragment -----------------
 if [ "$SKIP_CONFIG" = false ]; then
     CFG_FILE="$STAGING_DIR/common/arch/arm64/configs/gki_defconfig"
     if ! grep -q "CONFIG_VPNHIDE" "$CFG_FILE"; then
@@ -215,8 +222,9 @@ else
     tools/bazel run \
         --config=fast \
         --lto=thin \
+        --jobs="$JOBS" \
         //common:kernel_aarch64_dist \
-        -- --dist_dir="$DIST_DIR" --jobs="$JOBS"
+        -- --dist_dir="$DIST_DIR"
 
     STAGED_IMAGE="$DIST_DIR/Image"
 fi
