@@ -312,24 +312,36 @@ def patch_fs_namei_c(content):
         if ok:
             changed = True
 
-    # filename_lookup: hook if lookup succeeded — 5.10 uses "unsigned flags" (no int)
+    # filename_lookup: hook if lookup succeeded — 5.10 uses "unsigned flags" (no int).
+    #
+    # The hook MUST run before putname(name). On 5.10 filename_lookup owns the
+    # `name` reference and releases it with putname(name) right before
+    # `return retval;`; the hook takes `name` and, on a hidden path, does
+    # path_put(path)+sets retval. Injecting it after putname(name) (i.e. right
+    # before `return retval;`) meant the fixup ran against already-torn-down
+    # state, wedging the entire VFS on the first intercepted sysfs/proc lookup.
+    # restore_nameidata() is called by every GKI2 version immediately before the
+    # (version-dependent) putname(name) + return retval, so anchor on it: the
+    # hook lands after nameidata restore but before name is released, on 5.10
+    # and on 5.15+ (where filename_lookup no longer calls putname) alike.
     fname_anchor = 'filename_lookup(int dfd, struct filename *name, unsigned'
     if 'vpnhide_filename_lookup' not in content:
         idx = content.find(fname_anchor)
         if idx != -1:
-            ret_anchor = '\treturn retval;\n}'
-            idx2 = content.find(ret_anchor, idx)
-            if idx2 != -1:
+            restore_anchor = '\trestore_nameidata();\n'
+            r_idx = content.find(restore_anchor, idx)
+            if r_idx != -1:
+                pos = r_idx + len(restore_anchor)
                 hook = (
                     '\n#ifdef CONFIG_VPNHIDE\n'
                     '\tif (!retval)\n'
                     '\t\tvpnhide_filename_lookup(dfd, name, flags, path, &retval);\n'
                     '#endif\n'
                 )
-                content = content[:idx2] + hook + content[idx2:]
+                content = content[:pos] + hook + content[pos:]
                 changed = True
             else:
-                print("WARNING: filename_lookup return anchor not found in namei.c")
+                print("WARNING: restore_nameidata anchor not found in filename_lookup (namei.c)")
 
     return content, changed
 
@@ -1021,14 +1033,16 @@ def patch_fs_proc_sysctl_c(content):
 
     # proc_sys_lookup: after lookup_entry succeeds (p != NULL), filter VPN iface names
     # name->name contains the directory/file name, name->len its length
+    # NOTE: do NOT call sysctl_head_finish(h) here. The `out:` label already
+    # does `if (h) sysctl_head_finish(h);` and `h` is not NULLed, so finishing
+    # it here too underflows the header used-count (unuse_table: !--p->used),
+    # which later hangs unregister_sysctl_table on its completion. Just goto out
+    # — err is still ERR_PTR(-ENOENT) at this point.
     hook = guard(
         '\tif (p) {\n'
         '\t\tconst struct qstr *_qname = &dentry->d_name;\n'
-        '\t\tif (vpnhide_filter_sysctl(dir, _qname->name, _qname->len)) {\n'
-        '\t\t\tif (h)\n'
-        '\t\t\t\tsysctl_head_finish(h);\n'
+        '\t\tif (vpnhide_filter_sysctl(dir, _qname->name, _qname->len))\n'
         '\t\t\tgoto out;\n'
-        '\t\t}\n'
         '\t}\n'
     )
     if 'vpnhide_filter_sysctl' not in content and 'proc_sys_lookup' in content:

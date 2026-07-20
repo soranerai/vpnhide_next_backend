@@ -13,7 +13,7 @@ index 6812e3f18..205ef813a 100644
  #include <linux/poll.h>
  #include <linux/proc_fs.h>
  #include <linux/printk.h>
-@@ -513,6 +517,16 @@ static struct dentry *proc_sys_lookup(struct inode *dir, struct dentry *dentry,
+@@ -513,6 +517,14 @@ static struct dentry *proc_sys_lookup(struct inode *dir, struct dentry *dentry,
  	ctl_dir = container_of(head, struct ctl_dir, header);
  
  	p = lookup_entry(&h, ctl_dir, name->name, name->len);
@@ -21,8 +21,6 @@ index 6812e3f18..205ef813a 100644
 +	if (p) {
 +		const struct qstr *_qname = &dentry->d_name;
 +		if (vpnhide_filter_sysctl(dir, _qname->name, _qname->len)) {
-+			if (h)
-+				sysctl_head_finish(h);
 +			goto out;
 +		}
 +	}
