@@ -13,12 +13,13 @@ index c33b1ecc5..a55988fe3 100644
  #include <linux/etherdevice.h>
  #include <linux/skbuff.h>
  #include <linux/init.h>
-@@ -1688,6 +1692,11 @@ static int put_cacheinfo(struct sk_buff *skb, unsigned long cstamp,
+@@ -1688,6 +1692,12 @@ static int put_cacheinfo(struct sk_buff *skb, unsigned long cstamp,
  static int inet_fill_ifaddr(struct sk_buff *skb, struct in_ifaddr *ifa,
  			    struct inet_fill_args *args)
  {
 +#ifdef CONFIG_VPNHIDE
-+	if (unlikely(vpnhide_skip_inet_ifaddr(skb, ifa)))
++	if (ifa->ifa_dev && ifa->ifa_dev->dev &&
++	    unlikely(vpnhide_should_hide_dev(ifa->ifa_dev->dev)))
 +		return 0;
 +#endif
 +

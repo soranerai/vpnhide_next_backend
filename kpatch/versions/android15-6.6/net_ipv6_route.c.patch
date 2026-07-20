@@ -13,15 +13,17 @@ index f6a6a426f..dad369fd5 100644
  #include <linux/in6.h>
  #include <linux/mroute6.h>
  #include <linux/init.h>
-@@ -138,6 +142,11 @@ static DEFINE_PER_CPU_ALIGNED(struct uncached_list, rt6_uncached_list);
+@@ -5638,5 +5642,13 @@ static int rt6_fill_node(struct net *net, struct sk_buff *skb,
+ 	struct nlmsghdr *nlh;
+ 	struct rtmsg *rtm;
+ 	long expires = 0;
  
- void rt6_uncached_list_add(struct rt6_info *rt)
- {
 +#ifdef CONFIG_VPNHIDE
-+	if (unlikely(vpnhide_skip_rt6(skb, rt)))
-+		return 0;
++	{
++		struct net_device *_dev = dst ? dst->dev : rt->fib6_nh->fib_nh_dev;
++		if (_dev && vpnhide_should_hide_dev(_dev))
++			return 0;
++	}
 +#endif
 +
- 	struct uncached_list *ul = raw_cpu_ptr(&rt6_uncached_list);
- 
- 	rt->dst.rt_uncached_list = ul;
+ 	nlh = nlmsg_put(skb, portid, seq, type, sizeof(*rtm), flags);

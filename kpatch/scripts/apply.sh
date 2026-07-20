@@ -46,7 +46,7 @@ cp "$HEADER" "$KERNEL_DIR/include/linux/vpnhide.h"
 PATCH_COUNT=0
 for p in $(ls "$PATCHES_DIR"/*.patch 2>/dev/null | sort); do
     log "Applying $(basename "$p")..."
-    patch -p1 --forward --no-backup-if-mismatch -d "$KERNEL_DIR" < "$p" \
+    patch -p1 --forward --fuzz=3 --no-backup-if-mismatch -d "$KERNEL_DIR" < "$p" \
         || die "patch failed: $p"
     PATCH_COUNT=$(( PATCH_COUNT + 1 ))
 done
