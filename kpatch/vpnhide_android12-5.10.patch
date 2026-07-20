@@ -301,7 +301,7 @@ index 993420da2..fa2c00baf 100644
  	switch (cmd) {
  	case SIOCGIFFLAGS:	/* Get interface flags */
 diff --git a/net/core/fib_rules.c b/net/core/fib_rules.c
-index a6159624e..e0aadc537 100644
+index a6159624e..988b30adc 100644
 --- a/net/core/fib_rules.c
 +++ b/net/core/fib_rules.c
 @@ -13,6 +13,10 @@
@@ -315,20 +315,23 @@ index a6159624e..e0aadc537 100644
  #include <net/ip_tunnels.h>
  #include <linux/indirect_call_wrapper.h>
  
-@@ -991,6 +995,13 @@ static int fib_nl_fill_rule(struct sk_buff *skb, struct fib_rule *rule,
+@@ -990,6 +994,16 @@ static int fib_nl_fill_rule(struct sk_buff *skb, struct fib_rule *rule,
+ {
  	struct nlmsghdr *nlh;
  	struct fib_rule_hdr *frh;
- 
 +#ifdef CONFIG_VPNHIDE
 +	if (is_target_uid() &&
 +	    ((rule->iifname[0] && vpnhide_should_hide_ifname(rule->iifname)) ||
 +	     (rule->oifname[0] && vpnhide_should_hide_ifname(rule->oifname)) ||
-+	    is_target_uid_val(from_kuid(&init_user_ns, rule->uid_range.start))))
++	    is_target_uid_val(from_kuid(&init_user_ns,
++					  rule->uid_range.start)) ||
++	    is_target_uid_val(from_kuid(&init_user_ns,
++					  rule->uid_range.end))))
 +		return 0;
 +#endif
+ 
  	nlh = nlmsg_put(skb, pid, seq, type, sizeof(*frh), flags);
  	if (nlh == NULL)
- 		return -EMSGSIZE;
 diff --git a/net/core/net-procfs.c b/net/core/net-procfs.c
 index eadb69636..9ebbe7951 100644
 --- a/net/core/net-procfs.c
@@ -355,7 +358,7 @@ index eadb69636..9ebbe7951 100644
  		seq_puts(seq, "Inter-|   Receive                            "
  			      "                    |  Transmit\n"
 diff --git a/net/core/rtnetlink.c b/net/core/rtnetlink.c
-index 021dcfdae..e4bd8f254 100644
+index 021dcfdae..25ac6ef68 100644
 --- a/net/core/rtnetlink.c
 +++ b/net/core/rtnetlink.c
 @@ -49,6 +49,10 @@
@@ -369,17 +372,17 @@ index 021dcfdae..e4bd8f254 100644
  #include <net/pkt_sched.h>
  #include <net/fib_rules.h>
  #include <net/rtnetlink.h>
-@@ -1714,6 +1718,10 @@ static int rtnl_fill_ifinfo(struct sk_buff *skb,
+@@ -1712,6 +1716,10 @@ static int rtnl_fill_ifinfo(struct sk_buff *skb,
+ 	struct ifinfomsg *ifm;
+ 	struct nlmsghdr *nlh;
  	struct Qdisc *qdisc;
- 
- 	ASSERT_RTNL();
 +#ifdef CONFIG_VPNHIDE
 +	if (dev && vpnhide_should_hide_dev(dev))
 +		return 0;
 +#endif
+ 
+ 	ASSERT_RTNL();
  	nlh = nlmsg_put(skb, pid, seq, type, sizeof(*ifm), flags);
- 	if (nlh == NULL)
- 		return -EMSGSIZE;
 diff --git a/net/ipv4/devinet.c b/net/ipv4/devinet.c
 index da1ca8081..e8d40251a 100644
 --- a/net/ipv4/devinet.c

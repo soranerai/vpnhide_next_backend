@@ -1,0 +1,29 @@
+diff --git a/fs/readdir.c b/fs/readdir.c
+index 70c4fbcc4..0c3bdeec7 100644
+--- a/fs/readdir.c
++++ b/fs/readdir.c
+@@ -17,6 +17,10 @@
+ #include <linux/fsnotify.h>
+ #include <linux/dirent.h>
+ #include <linux/security.h>
++#ifdef CONFIG_VPNHIDE
++#include "../security/vpnhide/vpnhide.h"
++#endif
++
+ #include <linux/syscalls.h>
+ #include <linux/unistd.h>
+ #include <linux/compat.h>
+@@ -448,6 +452,13 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
+ 		else
+ 			error = count - buf.count;
+ 	}
++#ifdef CONFIG_VPNHIDE
++        {
++                int _g64 = error;
++                if (vpnhide_getdents64(fd, dirent, count, &_g64))
++                        error = _g64;
++        }
++#endif
+ 	fdput_pos(f);
+ 	return error;
+ }

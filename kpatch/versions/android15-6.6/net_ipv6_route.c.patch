@@ -1,0 +1,27 @@
+diff --git a/net/ipv6/route.c b/net/ipv6/route.c
+index f6a6a426f..dad369fd5 100644
+--- a/net/ipv6/route.c
++++ b/net/ipv6/route.c
+@@ -32,6 +32,10 @@
+ #include <linux/net.h>
+ #include <linux/route.h>
+ #include <linux/netdevice.h>
++#ifdef CONFIG_VPNHIDE
++#include <linux/vpnhide.h>
++#endif
++
+ #include <linux/in6.h>
+ #include <linux/mroute6.h>
+ #include <linux/init.h>
+@@ -138,6 +142,11 @@ static DEFINE_PER_CPU_ALIGNED(struct uncached_list, rt6_uncached_list);
+ 
+ void rt6_uncached_list_add(struct rt6_info *rt)
+ {
++#ifdef CONFIG_VPNHIDE
++	if (unlikely(vpnhide_skip_rt6(skb, rt)))
++		return 0;
++#endif
++
+ 	struct uncached_list *ul = raw_cpu_ptr(&rt6_uncached_list);
+ 
+ 	rt->dst.rt_uncached_list = ul;

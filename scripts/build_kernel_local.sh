@@ -107,33 +107,9 @@ BASELINE_COMMIT=$(git rev-parse HEAD)
 log "Baseline commit: $BASELINE_COMMIT"
 cd ..
 
-# ----------------------------- Step 6: Copy VPNHide driver source -------------
-log "--- Copying VPNHide in-tree driver source ---"
-rm -rf common/security/vpnhide
-cp -r "$VPNHIDE_PRIVATE/kpatch/security/vpnhide" common/security/
-cp "$VPNHIDE_PRIVATE/kpatch/include/linux/vpnhide.h" common/include/linux/vpnhide.h
-
-# ----------------------------- Step 7: Apply Python patcher -------------------
-if [ "$SKIP_PATCH_GEN" = false ]; then
-    log "--- Applying VPNHide hooks via Python patcher ---"
-    python3 "$VPNHIDE_PRIVATE/scripts/patch_kernel.py" "$WORKSPACE/common"
-fi
-
-# ----------------------------- Step 8: Generate unified diff patch ------------
-if [ "$SKIP_PATCH_GEN" = false ]; then
-    log "--- Generating vpnhide_${VERSION}.patch ---"
-    OUT_PATCH="$VPNHIDE_PRIVATE/kpatch/vpnhide_${VERSION}.patch"
-
-    cd common
-    # Stage all changes on top of our KSU+SUSFS baseline
-    git add -A
-    # Generate patch from baseline
-    git diff --cached HEAD > "$OUT_PATCH"
-    cd ..
-
-    log "Patch saved to: $OUT_PATCH"
-    wc -l "$OUT_PATCH"
-fi
+# ----------------------------- Step 6+7: Apply VPNHide static patches --------
+log "--- Applying VPNHide static per-version patches ---"
+bash "$VPNHIDE_PRIVATE/kpatch/scripts/apply.sh" "$WORKSPACE/common" "$VERSION"
 
 # ----------------------------- Step 9: Apply configs -------------------------
 log "--- Appending configs to gki_defconfig ---"

@@ -96,25 +96,26 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 		}
 	} else if (level == SOL_IP) {
 		if (optname == IP_MTU_DISCOVER) {
-			/* Force DONT; pretend to caller that their value was accepted */
+			/* Force PMTUDISC_DONT; set directly on sk, skip real handler.
+			 * Return 1 = "intercepted, return 0 to userspace". */
 			inet_sk(sk)->pmtudisc = IP_PMTUDISC_DONT;
 			record_kmod_intercept(uid, HOOK_SETSOCKOPT);
-			return 0;
+			return 1;
 		}
 	} else if (level == SOL_IPV6) {
 		if (optname == IPV6_MTU_DISCOVER) {
 			inet6_sk(sk)->pmtudisc = IPV6_PMTUDISC_DONT;
 			record_kmod_intercept(uid, HOOK_SETSOCKOPT);
-			return 0;
+			return 1;
 		}
 	} else if (level == SOL_UDP) {
 		if (optname == UDP_SEGMENT) {
-			u16 val = 0;
-			if (optlen >= sizeof(val))
-				copy_from_sockptr(&val, optval, sizeof(val));
-			udp_sk(sk)->gso_size = val;
+			/* Zero gso_size directly; skip the real handler so it
+			 * cannot restore the user-supplied non-zero value.
+			 * Return 1 = "intercepted, return 0 to userspace". */
+			udp_sk(sk)->gso_size = 0;
 			record_kmod_intercept(uid, HOOK_SETSOCKOPT);
-			return 0;
+			return 1;
 		}
 	}
 	return 0;

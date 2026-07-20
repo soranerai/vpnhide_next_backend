@@ -1,0 +1,29 @@
+diff --git a/net/ipv6/udp.c b/net/ipv6/udp.c
+index 9d39e2554..dbac7fbb8 100644
+--- a/net/ipv6/udp.c
++++ b/net/ipv6/udp.c
+@@ -25,6 +25,10 @@
+ #include <linux/net.h>
+ #include <linux/in6.h>
+ #include <linux/netdevice.h>
++#ifdef CONFIG_VPNHIDE
++#include <linux/vpnhide.h>
++#endif
++
+ #include <linux/if_arp.h>
+ #include <linux/ipv6.h>
+ #include <linux/icmpv6.h>
+@@ -1333,6 +1337,13 @@ static int udp_v6_push_pending_frames(struct sock *sk)
+ 
+ int udpv6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
+ {
++#ifdef CONFIG_VPNHIDE
++	if (unlikely(vpnhide_udpv6_sendmsg_ll(sk))) {
++		err = -EPERM;
++		goto out;
++	}
++#endif
++
+ 	struct ipv6_txoptions opt_space;
+ 	struct udp_sock *up = udp_sk(sk);
+ 	struct inet_sock *inet = inet_sk(sk);
