@@ -12,20 +12,26 @@ index e4de560b95e2..71f597104f93 100644
  #include <linux/kmod.h>
  #include <linux/audit.h>
  #include <linux/wireless.h>
-@@ -1843,6 +1846,9 @@ int __sys_bind_socket(struct socket *sock, struct sockaddr_storage *address,
+@@ -1843,7 +1846,11 @@ int __sys_bind_socket(struct socket *sock, struct sockaddr_storage *address,
  	err = security_socket_bind(sock, (struct sockaddr *)address,
  				   addrlen);
- 	if (!err)
-+		#ifdef CONFIG_VPNHIDE
-+		vpnhide_bind_pre(sock, (struct sockaddr *)&address, addrlen);
+-	if (!err)
+-		err = READ_ONCE(sock->ops)->bind(sock,
+-						 (struct sockaddr *)address,
+-						 addrlen);
++	if (!err) {
++#ifdef CONFIG_VPNHIDE
++		vpnhide_bind_pre(sock, (struct sockaddr *)address, addrlen);
 +#endif
- 		err = READ_ONCE(sock->ops)->bind(sock,
- 						 (struct sockaddr *)address,
- 						 addrlen);
++		err = READ_ONCE(sock->ops)->bind(sock,
++						 (struct sockaddr *)address,
++						 addrlen);
++	}
+ 	return err;
 @@ -2082,6 +2088,22 @@ int __sys_connect(int fd, struct sockaddr __user *uservaddr, int addrlen)
  	int ret = -EBADF;
  	struct fd f;
- 
+
 +#ifdef CONFIG_VPNHIDE
 +	{
 +		struct fd _f = fdget(fd);
@@ -45,7 +51,7 @@ index e4de560b95e2..71f597104f93 100644
  	f = fdget(fd);
  	if (fd_file(f)) {
  		struct sockaddr_storage address;
-@@ -2124,6 +2147,9 @@ int __sys_getsockname(int fd, struct sockaddr __user *usockaddr,
+@@ -2124,5 +2147,8 @@ int __sys_getsockname(int fd, struct sockaddr __user *usockaddr,
  	err = READ_ONCE(sock->ops)->getname(sock, (struct sockaddr *)&address, 0);
  	if (err < 0)
  		goto out_put;
@@ -54,7 +60,6 @@ index e4de560b95e2..71f597104f93 100644
 +#endif
  	/* "err" is actually length in this case */
  	err = move_addr_to_user(&address, err, usockaddr, usockaddr_len);
- 
 @@ -2162,10 +2188,14 @@ int __sys_getpeername(int fd, struct sockaddr __user *usockaddr,
  		}
  
