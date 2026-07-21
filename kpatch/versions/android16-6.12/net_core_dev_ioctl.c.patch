@@ -13,6 +13,19 @@ index 473c437b6b53..252e115fc90e 100644
  
  #include "dev.h"
  
+@@ -27,5 +31,11 @@ static int dev_ifname(struct net *net, struct ifreq *ifr)
+ {
++	int _ret;
+ 	ifr->ifr_name[IFNAMSIZ-1] = 0;
+-	return netdev_get_name(net, ifr->ifr_name, ifr->ifr_ifindex);
++	_ret = netdev_get_name(net, ifr->ifr_name, ifr->ifr_ifindex);
++#ifdef CONFIG_VPNHIDE
++	if (_ret == 0 && vpnhide_should_hide_ifname(ifr->ifr_name))
++		return -ENODEV;
++#endif
++	return _ret;
+ }
+ 
 @@ -66,6 +70,11 @@ int dev_ifconf(struct net *net, struct ifconf __user *uifc)
  	/* Loop over the interfaces, and write an info block for each. */
  	rtnl_lock();

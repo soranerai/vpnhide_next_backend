@@ -155,6 +155,8 @@ bool vpnhide_should_hide_ifname(const char *ifname)
 {
 	if (!ifname || !ifname[0])
 		return false;
+	if (!is_target_uid())
+		return false;
 	return is_active_vpn_ifname(ifname);
 }
 EXPORT_SYMBOL_GPL(vpnhide_should_hide_ifname);
