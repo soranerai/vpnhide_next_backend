@@ -1,0 +1,48 @@
+From: vpnhide <vpnhide@intree>
+Subject: [PATCH] net: dev_seq_show, sch_api tc_fill_qdisc — proc/netlink hiding
+
+dev_seq_show is the per-device callback for /proc/net/dev.
+Early-return before seq_printf so no data is written for VPN interfaces.
+
+tc_fill_qdisc builds the RTM_NEWQDISC netlink message. Early return
+before nlmsg_put so no message is built.
+
+diff --git a/net/core/dev.c b/net/core/dev.c
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -10140,6 +10140,7 @@
+ #include <linux/netfilter.h>
+ #include <linux/seq_file.h>
+ #include <linux/proc_fs.h>
++#include <linux/vpnhide.h>
+
+ static void *dev_seq_start(struct seq_file *seq, loff_t *pos)
+ {
+@@ -10170,6 +10173,9 @@ static int dev_seq_show(struct seq_file *seq, void *v)
+ 	if (v == SEQ_START_TOKEN)
+ 		seq_puts(seq, "Inter-|   Receive     ...\n");
+ 	else {
+ 		const struct net_device *dev = v;
++
++		if (unlikely(vpnhide_skip_dev_seq(seq, dev)))
++			return 0;
++
+ 		const struct net_device_stats *stats = dev_get_stats(dev,
+ 						&temp);
+diff --git a/net/sched/sch_api.c b/net/sched/sch_api.c
+--- a/net/sched/sch_api.c
++++ b/net/sched/sch_api.c
+@@ -25,6 +25,7 @@
+ #include <linux/slab.h>
+ #include <linux/list.h>
+ #include <linux/module.h>
++#include <linux/vpnhide.h>
+ #include <net/sch_generic.h>
+ #include <net/pkt_sched.h>
+ #include <net/netlink.h>
+@@ -1185,2 +1185,5 @@ static int tc_fill_qdisc(struct sk_buff *skb, struct Qdisc *q, u32 clid,
+ 			  struct netlink_ext_ack *extack)
+ {
++	if (unlikely(vpnhide_skip_tc_qdisc(skb, q)))
++		return 0;
++

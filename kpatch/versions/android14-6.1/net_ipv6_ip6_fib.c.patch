@@ -1,0 +1,27 @@
+diff --git a/net/ipv6/ip6_fib.c b/net/ipv6/ip6_fib.c
+index 1840735e9..2bcd07e17 100644
+--- a/net/ipv6/ip6_fib.c
++++ b/net/ipv6/ip6_fib.c
+@@ -36,6 +36,10 @@
+ #include <net/ip_fib.h>
+ #include <net/ip6_fib.h>
+ #include <net/ip6_route.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ 
+ static struct kmem_cache *fib6_node_kmem __read_mostly;
+ 
+@@ -2505,6 +2509,11 @@ static int ipv6_route_native_seq_show(struct seq_file *seq, void *v)
+ 	}
+ 
+ 	dev = fib6_nh->fib_nh_dev;
++#ifdef CONFIG_VPNHIDE
++	if (dev && vpnhide_should_hide_dev(dev))
++		return 0;
++#endif
++
+ 	seq_printf(seq, " %08x %08x %08x %08x %8s\n",
+ 		   rt->fib6_metric, refcount_read(&rt->fib6_ref), 0,
+ 		   flags, dev ? dev->name : "");

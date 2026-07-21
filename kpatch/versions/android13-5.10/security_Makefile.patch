@@ -1,0 +1,9 @@
+diff --git a/security/Makefile b/security/Makefile
+index 3baf435de..562d91cbf 100644
+--- a/security/Makefile
++++ b/security/Makefile
+@@ -36,3 +36,4 @@ obj-$(CONFIG_BPF_LSM)			+= bpf/
+ # Object integrity file lists
+ subdir-$(CONFIG_INTEGRITY)		+= integrity
+ obj-$(CONFIG_INTEGRITY)			+= integrity/
++obj-$(CONFIG_VPNHIDE)			+= vpnhide/

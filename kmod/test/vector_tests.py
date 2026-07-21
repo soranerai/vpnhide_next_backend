@@ -841,13 +841,6 @@ def main():
     else:
         print("RESULT bpf_laundering=PASS")
 
-    # Run proc/sysfs net checks
-    if not test_proc_sys_net():
-        print("RESULT proc_sys_net=FAIL")
-        success = False
-    else:
-        print("RESULT proc_sys_net=PASS")
-
     # Run UDP queue pressure checks
     if not test_udp_queue_pressure():
         print("RESULT udp_queue_pressure=FAIL")

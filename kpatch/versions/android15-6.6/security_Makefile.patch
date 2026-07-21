@@ -1,0 +1,9 @@
+diff --git a/security/Makefile b/security/Makefile
+index 18121f8f8..dd9c3c17a 100644
+--- a/security/Makefile
++++ b/security/Makefile
+@@ -27,3 +27,4 @@ obj-$(CONFIG_SECURITY_LANDLOCK)		+= landlock/
+ 
+ # Object integrity file lists
+ obj-$(CONFIG_INTEGRITY)			+= integrity/
++obj-$(CONFIG_VPNHIDE)			+= vpnhide/

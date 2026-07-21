@@ -1,0 +1,41 @@
+diff --git a/net/ipv4/devinet.c b/net/ipv4/devinet.c
+index c33b1ecc5..a55988fe3 100644
+--- a/net/ipv4/devinet.c
++++ b/net/ipv4/devinet.c
+@@ -40,6 +40,10 @@
+ #include <linux/if_ether.h>
+ #include <linux/inet.h>
+ #include <linux/netdevice.h>
++#ifdef CONFIG_VPNHIDE
++#include <linux/vpnhide.h>
++#endif
++
+ #include <linux/etherdevice.h>
+ #include <linux/skbuff.h>
+ #include <linux/init.h>
+@@ -600,6 +604,12 @@ int devinet_ioctl(struct net *net, unsigned int cmd, struct ifreq *ifr)
+ 	dev = __dev_get_by_name(net, ifr->ifr_name);
+ 	if (!dev)
+ 		goto done;
++#ifdef CONFIG_VPNHIDE
++	if (vpnhide_should_hide_dev(dev)) {
++		ret = -ENODEV;
++		goto done;
++	}
++#endif
+
+ 	if (colon)
+ 		*colon = ':';
+@@ -1688,6 +1698,12 @@ static int put_cacheinfo(struct sk_buff *skb, unsigned long cstamp,
+ static int inet_fill_ifaddr(struct sk_buff *skb, struct in_ifaddr *ifa,
+ 			    struct inet_fill_args *args)
+ {
++#ifdef CONFIG_VPNHIDE
++	if (ifa->ifa_dev && ifa->ifa_dev->dev &&
++	    unlikely(vpnhide_should_hide_dev(ifa->ifa_dev->dev)))
++		return 0;
++#endif
++
+ 	struct ifaddrmsg *ifm;
+ 	struct nlmsghdr  *nlh;
+ 	u32 preferred, valid;

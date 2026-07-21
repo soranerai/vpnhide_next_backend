@@ -1,0 +1,143 @@
+From: vpnhide <vpnhide@intree>
+Subject: [PATCH] net: fib_semantics, fib_trie, fib_rules, ipv6/route — route hiding
+
+diff --git a/net/ipv4/fib_semantics.c b/net/ipv4/fib_semantics.c
+--- a/net/ipv4/fib_semantics.c
++++ b/net/ipv4/fib_semantics.c
+@@ -20,6 +20,7 @@
+ #include <linux/slab.h>
+ #include <net/ip.h>
+ #include <net/ip_fib.h>
++#include <linux/vpnhide.h>
+ #include <net/ip6_fib.h>
+ #include <net/rtnetlink.h>
+
+@@ -1200,6 +1203,9 @@ int fib_dump_info(struct sk_buff *skb, u32 portid, u32 seq, int event,
+ 		  struct fib_info *fi, unsigned int flags)
+ {
+ 	int nhsel;
++
++	if (unlikely(vpnhide_skip_fib_dump(skb, fi, 0)))
++		return 0;
++
+ 	struct rtmsg *rtm;
+ 	struct nlmsghdr *nlh;
+
+diff --git a/net/ipv4/fib_trie.c b/net/ipv4/fib_trie.c
+--- a/net/ipv4/fib_trie.c
++++ b/net/ipv4/fib_trie.c
+@@ -20,6 +20,7 @@
+ #include <linux/bitops.h>
+ #include <linux/rcupdate.h>
+ #include <linux/slab.h>
++#include <linux/vpnhide.h>
+ #include <net/net_namespace.h>
+ #include <net/ip.h>
+ #include <net/ip_fib.h>
+@@ -1900,11 +1903,20 @@ static int fib_route_seq_show(struct seq_file *seq, void *v)
+ 	struct fib_route_iter *iter = seq->private;
+ 	struct fib_table *tb = iter->main_tbl;
+ 	int saved_count;
++	int ret;
+
+ 	if (v == SEQ_START_TOKEN) {
+ 		seq_puts(seq, "Iface\tDestination\tGateway\t"
+ 			      "Flags\tRefCnt\tUse\tMetric\tMask\t"
+ 			      "MTU\tWindow\tIRTT\n");
+ 		return 0;
+ 	}
++
++	saved_count = seq->count;
++	ret = fib_route_seq_show_orig(seq, v);
++	vpnhide_filter_seq_line(seq, saved_count);
++	return ret;
++
++/* NOTE: patch wraps the original show function — rename original
+ * to fib_route_seq_show_orig and call from this wrapper. */
+
+@@ -1960,8 +1975,17 @@ static int fib_trie_seq_show(struct seq_file *seq, void *v)
+ 	struct fib_trie_iter *iter = seq->private;
+ 	struct key_vector *n = (struct key_vector *)v;
++	int saved_count = seq->count;
++	int ret;
+
+ 	if (!node_parent_rcu(n)) {
+ 		if (IS_TRIE(iter->tnode)) {
+ 			seq_puts(seq, "<root>\n");
+ 		}
+ 	}
++
++	ret = fib_trie_seq_show_orig(seq, v);
++	vpnhide_filter_seq_line(seq, saved_count);
++	return ret;
++/* NOTE: rename original to fib_trie_seq_show_orig */
+
+diff --git a/net/core/fib_rules.c b/net/core/fib_rules.c
+--- a/net/core/fib_rules.c
++++ b/net/core/fib_rules.c
+@@ -18,6 +18,7 @@
+ #include <linux/list.h>
+ #include <linux/module.h>
+ #include <linux/notifier.h>
++#include <linux/vpnhide.h>
+ #include <net/sock.h>
+ #include <net/fib_rules.h>
+
+@@ -620,6 +623,9 @@ int fib_nl_fill_rule(struct sk_buff *skb, struct fib_rule *rule,
+ 		     u32 pid, u32 seq, int type, int flags,
+ 		     struct fib_rules_ops *ops)
+ {
++	if (unlikely(vpnhide_skip_fib_rule(skb, rule)))
++		return 0;
++
+ 	struct fib_rule_hdr *frh;
+ 	struct nlmsghdr *nlh;
+
+diff --git a/net/ipv6/route.c b/net/ipv6/route.c
+--- a/net/ipv6/route.c
++++ b/net/ipv6/route.c
+@@ -72,6 +72,7 @@ static int ip6_rt_type_to_error(u8 fib6_type);
+
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/fib6.h>
++#include <linux/vpnhide.h>
+ EXPORT_TRACEPOINT_SYMBOL_GPL(fib6_table_lookup);
+ #undef CREATE_TRACE_POINTS
+
+@@ -5476,6 +5479,9 @@ static int rt6_fill_node(struct net *net, struct sk_buff *skb,
+ 	struct rtmsg *rtm;
+ 	long expires = 0;
+
++	if (unlikely(vpnhide_skip_rt6(skb, rt)))
++		return 0;
++
+ 	nlh = nlmsg_put(skb, portid, seq, type, sizeof(*rtm), flags);
+ 	if (!nlh)
+ 		return -EMSGSIZE;
+diff --git a/net/ipv6/ip6_fib.c b/net/ipv6/ip6_fib.c
+--- a/net/ipv6/ip6_fib.c
++++ b/net/ipv6/ip6_fib.c
+@@ -28,6 +28,7 @@
+ #include <linux/seq_file.h>
+ #include <linux/slab.h>
+ #include <linux/export.h>
++#include <linux/vpnhide.h>
+ #include <net/sock.h>
+ #include <net/snmp.h>
+ #include <net/ipv6.h>
+@@ -520,8 +523,17 @@ static int ipv6_route_seq_show(struct seq_file *seq, void *v)
+ 	struct fib6_info *rt = v;
+ 	struct ipv6_route_iter *iter = seq->private;
+ 	const struct net_device *dev;
++	int saved_count = seq->count;
++	int ret;
+
+ 	dev = rt->fib6_nh ? rt->fib6_nh->fib_nh_dev : NULL;
++
++	if (dev && unlikely(vpnhide_skip_dev_seq(seq, dev)))
++		return 0;
++
++	ret = ipv6_route_seq_show_orig(seq, v);
++	vpnhide_filter_seq_line(seq, saved_count);
++	return ret;
++/* NOTE: rename original to ipv6_route_seq_show_orig */

@@ -1,0 +1,31 @@
+diff --git a/net/ipv4/fib_semantics.c b/net/ipv4/fib_semantics.c
+index 233d9d043..91d60a33c 100644
+--- a/net/ipv4/fib_semantics.c
++++ b/net/ipv4/fib_semantics.c
+@@ -39,6 +39,10 @@
+ #include <net/route.h>
+ #include <net/tcp.h>
+ #include <net/sock.h>
++#ifdef CONFIG_VPNHIDE
++#include <linux/vpnhide.h>
++#endif
++
+ #include <net/ip_fib.h>
+ #include <net/ip6_fib.h>
+ #include <net/nexthop.h>
+@@ -1779,6 +1783,15 @@ static int fib_add_multipath(struct sk_buff *skb, struct fib_info *fi)
+ int fib_dump_info(struct sk_buff *skb, u32 portid, u32 seq, int event,
+ 		  const struct fib_rt_info *fri, unsigned int flags)
+ {
++#ifdef CONFIG_VPNHIDE
++	{
++		struct fib_info *_fi = fri->fi;
++		if (_fi && !_fi->nh && _fi->fib_nh[0].fib_nh_dev &&
++		    vpnhide_should_hide_dev(_fi->fib_nh[0].fib_nh_dev))
++			return 0;
++	}
++#endif
++
+ 	unsigned int nhs = fib_info_num_path(fri->fi);
+ 	struct fib_info *fi = fri->fi;
+ 	u32 tb_id = fri->tb_id;

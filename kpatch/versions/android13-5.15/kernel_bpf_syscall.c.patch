@@ -1,0 +1,39 @@
+diff --git a/kernel/bpf/syscall.c b/kernel/bpf/syscall.c
+index 9ddceff3a..28aa89fad 100644
+--- a/kernel/bpf/syscall.c
++++ b/kernel/bpf/syscall.c
+@@ -5,6 +5,10 @@
+ #include <linux/bpf_trace.h>
+ #include <linux/bpf_lirc.h>
+ #include <linux/bpf_verifier.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ #include <linux/btf.h>
+ #include <linux/syscalls.h>
+ #include <linux/slab.h>
+@@ -1094,6 +1098,9 @@ static int map_lookup_elem(union bpf_attr *attr)
+ 		goto free_key;
+ 
+ 	err = bpf_map_copy_value(map, key, value, attr->flags);
++#ifdef CONFIG_VPNHIDE
++	vpnhide_bpf_lookup_elem(map, key, value);
++#endif
+ 	if (err)
+ 		goto free_value;
+ 
+@@ -4211,6 +4218,13 @@ static int bpf_map_do_batch(const union bpf_attr *attr,
+ 		BPF_DO_BATCH(map->ops->map_update_batch);
+ 	else
+ 		BPF_DO_BATCH(map->ops->map_delete_batch);
++#ifdef CONFIG_VPNHIDE
++	if (!err && (cmd == BPF_MAP_LOOKUP_BATCH ||
++	             cmd == BPF_MAP_LOOKUP_AND_DELETE_BATCH))
++		vpnhide_bpf_lookup_batch(map, attr, uattr);
++#endif
++
++
+ err_put:
+ 	if (has_write)
+ 		bpf_map_write_active_dec(map);

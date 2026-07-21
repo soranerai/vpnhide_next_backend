@@ -1,0 +1,29 @@
+diff --git a/net/ipv4/udp.c b/net/ipv4/udp.c
+index 137a7ba5f..2b0fa8263 100644
+--- a/net/ipv4/udp.c
++++ b/net/ipv4/udp.c
+@@ -92,6 +92,10 @@
+ #include <linux/mm.h>
+ #include <linux/inet.h>
+ #include <linux/netdevice.h>
++#ifdef CONFIG_VPNHIDE
++#include <linux/vpnhide.h>
++#endif
++
+ #include <linux/slab.h>
+ #include <net/tcp_states.h>
+ #include <linux/skbuff.h>
+@@ -1059,6 +1063,13 @@ EXPORT_SYMBOL_GPL(udp_cmsg_send);
+
+ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
+ {
++#ifdef CONFIG_VPNHIDE
++	{
++		int _err = 0;
++		if (vpnhide_udp_sendmsg_pre(sk, msg, len, &_err))
++			return _err;
++	}
++#endif
+ 	struct inet_sock *inet = inet_sk(sk);
+ 	struct udp_sock *up = udp_sk(sk);
+ 	DECLARE_SOCKADDR(struct sockaddr_in *, usin, msg->msg_name);

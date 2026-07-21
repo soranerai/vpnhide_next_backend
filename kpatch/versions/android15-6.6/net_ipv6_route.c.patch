@@ -1,0 +1,29 @@
+diff --git a/net/ipv6/route.c b/net/ipv6/route.c
+index f6a6a426f..dad369fd5 100644
+--- a/net/ipv6/route.c
++++ b/net/ipv6/route.c
+@@ -32,6 +32,10 @@
+ #include <linux/net.h>
+ #include <linux/route.h>
+ #include <linux/netdevice.h>
++#ifdef CONFIG_VPNHIDE
++#include <linux/vpnhide.h>
++#endif
++
+ #include <linux/in6.h>
+ #include <linux/mroute6.h>
+ #include <linux/init.h>
+@@ -5638,5 +5642,13 @@ static int rt6_fill_node(struct net *net, struct sk_buff *skb,
+ 	struct nlmsghdr *nlh;
+ 	struct rtmsg *rtm;
+ 	long expires = 0;
+ 
++#ifdef CONFIG_VPNHIDE
++	{
++		struct net_device *_dev = dst ? dst->dev : rt->fib6_nh->fib_nh_dev;
++		if (_dev && vpnhide_should_hide_dev(_dev))
++			return 0;
++	}
++#endif
++
+ 	nlh = nlmsg_put(skb, portid, seq, type, sizeof(*rtm), flags);

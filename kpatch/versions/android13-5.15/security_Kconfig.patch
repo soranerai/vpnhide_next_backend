@@ -1,0 +1,12 @@
+diff --git a/security/Kconfig b/security/Kconfig
+index 5d412b3dd..4578bddca 100644
+--- a/security/Kconfig
++++ b/security/Kconfig
+@@ -284,5 +284,7 @@ config LSM
+ 
+ source "security/Kconfig.hardening"
+ 
++source "security/vpnhide/Kconfig"
++
+ endmenu
+ 
