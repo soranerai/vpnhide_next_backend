@@ -223,7 +223,9 @@ if [ "$SKIP_CONFIG" = false ]; then
         # Break the hardlink first by materialising a private copy.
         cp "$CFG_FILE" "$CFG_FILE.unshare" && mv "$CFG_FILE.unshare" "$CFG_FILE"
         cat >> "$CFG_FILE" <<'EOF'
+# --- KernelSU-Next ---
 CONFIG_KSU=y
+# --- SUSFS ---
 CONFIG_KSU_SUSFS=y
 CONFIG_KSU_SUSFS_SUS_PATH=y
 CONFIG_KSU_SUSFS_SUS_MOUNT=y
@@ -234,13 +236,99 @@ CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
 CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
 CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
 CONFIG_KSU_SUSFS_SUS_MAP=y
+# --- VPNHide ---
 CONFIG_VPNHIDE=y
+# --- Misc (Wild kernel parity) ---
+CONFIG_OVERLAY_FS=y
+CONFIG_TMPFS_XATTR=y
+CONFIG_TMPFS_POSIX_ACL=y
+CONFIG_KALLSYMS=y
+CONFIG_KALLSYMS_ALL=y
+CONFIG_BTF=y
+CONFIG_BPF_EVENTS=y
+CONFIG_FUSE_BPF=y
+# --- rfkill built-in: cfg80211 depends on rfkill symbols at load time;
+#     if rfkill.ko is not yet loaded, cfg80211 fails with Unknown symbol ---
+CONFIG_RFKILL=y
+# --- BT HCI core built-in: bt_drv_6878 depends on hci_* symbols;
+#     if bluetooth.ko is not yet loaded, bt_drv fails with Unknown symbol ---
+CONFIG_BT=y
+# --- ARC4 built-in: mac80211 depends on arc4_setkey/arc4_crypt symbols;
+#     if libarc4.ko is not yet loaded, mac80211 fails with Unknown symbol ---
+CONFIG_CRYPTO_LIB_ARC4=y
+# --- Networking (Wild kernel parity) ---
+CONFIG_IP_SET=y
+CONFIG_IP_SET_MAX=65534
+CONFIG_IP_SET_BITMAP_IP=y
+CONFIG_IP_SET_BITMAP_IPMAC=y
+CONFIG_IP_SET_BITMAP_PORT=y
+CONFIG_IP_SET_HASH_IP=y
+CONFIG_IP_SET_HASH_IPMARK=y
+CONFIG_IP_SET_HASH_IPPORT=y
+CONFIG_IP_SET_HASH_IPPORTIP=y
+CONFIG_IP_SET_HASH_IPPORTNET=y
+CONFIG_IP_SET_HASH_IPMAC=y
+CONFIG_IP_SET_HASH_MAC=y
+CONFIG_IP_SET_HASH_NETPORTNET=y
+CONFIG_IP_SET_HASH_NET=y
+CONFIG_IP_SET_HASH_NETNET=y
+CONFIG_IP_SET_HASH_NETPORT=y
+CONFIG_IP_SET_HASH_NETIFACE=y
+CONFIG_IP_SET_LIST_SET=y
+CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+CONFIG_NETFILTER_XT_SET=y
+CONFIG_NETFILTER_XT_TARGET_LOG=y
+CONFIG_NETFILTER_XT_MATCH_RECENT=y
+CONFIG_IP6_NF_NAT=y
+CONFIG_IP6_NF_TARGET_MASQUERADE=y
+CONFIG_TCP_CONG_ADVANCED=y
+CONFIG_TCP_CONG_BBR=y
+CONFIG_TCP_CONG_BBR3=y
+CONFIG_TCP_CONG_CUBIC=y
+CONFIG_TCP_CONG_BIC=y
+CONFIG_TCP_CONG_WESTWOOD=y
+CONFIG_TCP_CONG_HTCP=y
+CONFIG_DEFAULT_BBR=y
+CONFIG_DEFAULT_TCP_CONG="bbr"
+CONFIG_NET_SCH_FQ=y
+CONFIG_NET_SCH_FQ_CODEL=y
+CONFIG_NET_SCH_CAKE=y
+CONFIG_NET_ACT_CONNMARK=y
+CONFIG_IP_NF_TARGET_TTL=y
+CONFIG_IP6_NF_TARGET_HL=y
+CONFIG_IP6_NF_MATCH_HL=y
+CONFIG_WIREGUARD=y
+CONFIG_CIFS=y
+CONFIG_NETWORK_FILESYSTEMS=y
+CONFIG_NETFS_SUPPORT=y
+CONFIG_KEYS=y
+CONFIG_CIFS_XATTR=y
+CONFIG_CIFS_POSIX=y
 EOF
     fi
     # Same hardlink hazard: sed -i writes a new inode, so this is safe, but only
     # touch the file if the marker is present.
     if [ -f "$STAGING_DIR/common/build.config.gki" ]; then
         sed -i 's/check_defconfig//' "$STAGING_DIR/common/build.config.gki" || true
+    fi
+    # CONFIG_RFKILL=y builds rfkill into vmlinux — remove rfkill.ko from the
+    # bazel module list, otherwise the build fails with "Unable to find rfkill.ko".
+    # Same pattern as Wild's CIFS fix for netfs.ko on android16-6.12.
+    MODULES_BZL="$STAGING_DIR/common/modules.bzl"
+    if [ -f "$MODULES_BZL" ]; then
+        cp "$MODULES_BZL" "$MODULES_BZL.unshare" && mv "$MODULES_BZL.unshare" "$MODULES_BZL"
+        if grep -q '"net/rfkill/rfkill.ko"' "$MODULES_BZL"; then
+            sed -i '/"net\/rfkill\/rfkill.ko",/d' "$MODULES_BZL"
+            log "Removed rfkill.ko from modules.bzl (built-in via CONFIG_RFKILL=y)"
+        fi
+        if grep -q '"net/bluetooth/bluetooth.ko"' "$MODULES_BZL"; then
+            sed -i '/"net\/bluetooth\/bluetooth.ko",/d' "$MODULES_BZL"
+            log "Removed bluetooth.ko from modules.bzl (built-in via CONFIG_BT=y)"
+        fi
+        if grep -q '"lib/crypto/libarc4.ko"' "$MODULES_BZL"; then
+            sed -i '/"lib\/crypto\/libarc4.ko",/d' "$MODULES_BZL"
+            log "Removed libarc4.ko from modules.bzl (built-in via CONFIG_CRYPTO_LIB_ARC4=y)"
+        fi
     fi
 fi
 
