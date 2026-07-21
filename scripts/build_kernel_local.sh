@@ -386,12 +386,16 @@ if [ "$BUILD_SYS" = "legacy" ]; then
 else
     log "--- Building (kleaf: //common:kernel_aarch64_dist) ---"
     DIST_DIR="$STAGING_DIR/dist"
+    DIST_ARG="--dist_dir=$DIST_DIR"
+    if [[ "$VERSION" == "android16-6.12" ]]; then
+        DIST_ARG="--destdir=$DIST_DIR"
+    fi
     tools/bazel run \
         --config=fast \
         --lto=thin \
         --jobs="$JOBS" \
         //common:kernel_aarch64_dist \
-        -- --dist_dir="$DIST_DIR"
+        -- "$DIST_ARG"
 
     STAGED_IMAGE="$DIST_DIR/Image"
 fi
