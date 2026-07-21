@@ -59,9 +59,13 @@ if [ ! -d "$KSU_NEXT_DST/kernel" ]; then
 fi
 
 # ── 2. Apply KernelSU SUSFS integration patch ─────────────────────────────────
-log "Applying KernelSU SUSFS patch ..."
-patch -d "$KSU_NEXT_DST/kernel" -p1 --forward --fuzz=3 \
-    < "$KSU_SUSFS_PATCH" 2>&1 | grep -v '^Hunk .* succeeded' || true
+if grep -q "config KSU_SUSFS" "$KSU_NEXT_DST/kernel/Kconfig"; then
+    log "KernelSU-Next is already patched with SUSFS, skipping patch application."
+else
+    log "Applying KernelSU SUSFS patch ..."
+    patch -d "$KSU_NEXT_DST" -p1 --forward --fuzz=3 \
+        < "$KSU_SUSFS_PATCH" 2>&1 | grep -v '^Hunk .* succeeded' || true
+fi
 
 # ── 3. Wire KernelSU into drivers/ ────────────────────────────────────────────
 log "Wiring KernelSU into drivers/ ..."

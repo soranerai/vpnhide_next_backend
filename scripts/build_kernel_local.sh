@@ -180,9 +180,13 @@ BRANDING="${KERNEL_LOCALVERSION:-"-Wild"}"
 if [ -f "$SETLOCALVER" ]; then
     # Remove last line, append hardcoded echo
     sed -i '$d' "$SETLOCALVER"
-    echo "echo \"-${ANDROID_PART}${BRANDING}\"" >> "$SETLOCALVER"
+    if [[ "$VERSION" == "android15-6.6" || "$VERSION" == "android16-6.12" ]]; then
+        echo "echo \"\${KERNELVERSION}-${ANDROID_PART}${BRANDING}\"" >> "$SETLOCALVER"
+    else
+        echo "echo \"-${ANDROID_PART}${BRANDING}\"" >> "$SETLOCALVER"
+    fi
     chmod +x "$SETLOCALVER"
-    log "setlocalversion -> uname will show: $(uname -r | cut -d- -f1-2)-${ANDROID_PART}${BRANDING}"
+    log "setlocalversion -> uname will show: \$(uname -r 2>/dev/null || echo \"version\")-${ANDROID_PART}${BRANDING}"
 fi
 
 # ----------------------------- Step 3c: Bypass module version check -----------
@@ -328,6 +332,12 @@ EOF
         if grep -q '"lib/crypto/libarc4.ko"' "$MODULES_BZL"; then
             sed -i '/"lib\/crypto\/libarc4.ko",/d' "$MODULES_BZL"
             log "Removed libarc4.ko from modules.bzl (built-in via CONFIG_CRYPTO_LIB_ARC4=y)"
+            CRYPTO_KCONFIG="$STAGING_DIR/common/lib/crypto/Kconfig"
+            if [ -f "$CRYPTO_KCONFIG" ]; then
+                cp "$CRYPTO_KCONFIG" "$CRYPTO_KCONFIG.unshare" && mv "$CRYPTO_KCONFIG.unshare" "$CRYPTO_KCONFIG"
+                sed -i '/config CRYPTO_LIB_ARC4/{n;s/tristate/bool/}' "$CRYPTO_KCONFIG"
+                log "Patched CRYPTO_LIB_ARC4 to be bool in Kconfig"
+            fi
         fi
     fi
 fi
