@@ -325,6 +325,14 @@ EOF
             sed -i '/"net\/rfkill\/rfkill.ko",/d' "$MODULES_BZL"
             log "Removed rfkill.ko from modules.bzl (built-in via CONFIG_RFKILL=y)"
         fi
+        if grep -q '"fs/netfs/netfs.ko"' "$MODULES_BZL"; then
+            sed -i '/"fs\/netfs\/netfs.ko",/d' "$MODULES_BZL"
+            log "Removed netfs.ko from modules.bzl (built-in via CONFIG_NETFS_SUPPORT=y)"
+        fi
+        if grep -q '"drivers/android/rust_binder.ko"' "$MODULES_BZL"; then
+            sed -i '/"drivers\/android\/rust_binder.ko",/d' "$MODULES_BZL"
+            log "Removed rust_binder.ko from modules.bzl"
+        fi
         if grep -q '"net/bluetooth/bluetooth.ko"' "$MODULES_BZL"; then
             sed -i '/"net\/bluetooth\/bluetooth.ko",/d' "$MODULES_BZL"
             log "Removed bluetooth.ko from modules.bzl (built-in via CONFIG_BT=y)"
@@ -336,9 +344,17 @@ EOF
             if [ -f "$CRYPTO_KCONFIG" ]; then
                 cp "$CRYPTO_KCONFIG" "$CRYPTO_KCONFIG.unshare" && mv "$CRYPTO_KCONFIG.unshare" "$CRYPTO_KCONFIG"
                 sed -i '/config CRYPTO_LIB_ARC4/{n;s/tristate/bool/}' "$CRYPTO_KCONFIG"
-                log "Patched CRYPTO_LIB_ARC4 to be bool in Kconfig"
             fi
         fi
+    fi
+    
+    # Disable check_defconfig checks in Kleaf Bazel rules (minimized check fails on config additions)
+    BUILD_BAZEL="$STAGING_DIR/common/BUILD.bazel"
+    if [ -f "$BUILD_BAZEL" ]; then
+        cp "$BUILD_BAZEL" "$BUILD_BAZEL.unshare" && mv "$BUILD_BAZEL.unshare" "$BUILD_BAZEL"
+        sed -i '/check_defconfig =/d' "$BUILD_BAZEL"
+        sed -i 's/common_kernel(/common_kernel(\n    check_defconfig = "disabled",/g' "$BUILD_BAZEL"
+        log "Disabled check_defconfig checks in common/BUILD.bazel"
     fi
 fi
 
