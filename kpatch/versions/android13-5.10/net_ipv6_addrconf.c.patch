@@ -40,11 +40,11 @@ index 5d9752221..173a58f1f 100644
 @@ -5018,5 +5032,11 @@ static int inet6_fill_ifaddr(struct sk_buff *skb, struct inet6_ifaddr *ifa,
  			     struct inet6_fill_args *args)
  {
+	struct nlmsghdr  *nlh;
+ 	u32 preferred, valid;
++
 +#ifdef CONFIG_VPNHIDE
 +	if (ifa->idev && ifa->idev->dev &&
 +	    unlikely(vpnhide_should_hide_dev(ifa->idev->dev)))
 +		return 0;
 +#endif
-+
- 	struct nlmsghdr  *nlh;
- 	u32 preferred, valid;
