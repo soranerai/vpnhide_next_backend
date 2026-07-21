@@ -19,7 +19,7 @@ index 538503720..340409d0e 100644
  
 +#ifdef CONFIG_VPNHIDE
 +	if (vpnhide_udpv6_sendmsg_ll(sk, msg))
-+		return -ENOBUFS;
++		return -ENODEV;
 +#endif
  	ipcm6_init(&ipc6);
  	ipc6.gso_size = READ_ONCE(up->gso_size);

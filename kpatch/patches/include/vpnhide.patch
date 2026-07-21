@@ -55,7 +55,7 @@ new file mode 100644
 +void vpnhide_getname_post(struct socket *sock, struct sockaddr *addr, int peer);
 +int  vpnhide_inet6_bind_ll(struct sock *sk,
 +			   struct sockaddr *uaddr, int addr_len);
-+bool vpnhide_udpv6_sendmsg_ll(struct sock *sk);
++bool vpnhide_udpv6_sendmsg_ll(struct sock *sk, struct msghdr *msg);
 +bool vpnhide_udp_sendmsg(struct sock *sk);
 +
 +void vpnhide_bpf_lookup_elem(struct bpf_map *map, void *key, void *value);
@@ -112,7 +112,7 @@ new file mode 100644
 +	struct sockaddr *a, int p) {}
 +static inline int vpnhide_inet6_bind_ll(struct sock *sk,
 +	struct sockaddr *a, int l) { return 0; }
-+static inline bool vpnhide_udpv6_sendmsg_ll(struct sock *sk) { return false; }
++static inline bool vpnhide_udpv6_sendmsg_ll(struct sock *sk, struct msghdr *msg) { return false; }
 +static inline bool vpnhide_udp_sendmsg(struct sock *sk) { return false; }
 +static inline void vpnhide_bpf_lookup_elem(struct bpf_map *m,
 +	void *k, void *v) {}

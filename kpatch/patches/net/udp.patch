@@ -39,8 +39,8 @@ diff --git a/net/ipv6/udp.c b/net/ipv6/udp.c
  	struct flowi6 fl6;
  	int err;
 
-+	if (unlikely(vpnhide_udpv6_sendmsg_ll(sk))) {
-+		err = -EPERM;
++	if (unlikely(vpnhide_udpv6_sendmsg_ll(sk, msg))) {
++		err = -ENODEV;
 +		goto out;
 +	}
 +

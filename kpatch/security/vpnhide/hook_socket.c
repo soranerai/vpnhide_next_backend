@@ -499,8 +499,21 @@ bool vpnhide_udpv6_sendmsg_ll(struct sock *sk, struct msghdr *msg)
 			oifindex = sin6->sin6_scope_id;
 	}
 
-	if (!is_active_vpn_ifindex(oifindex))
-		return false;
+	if (!is_active_vpn_ifindex(oifindex)) {
+		/* ifindex not tracked by daemon yet — resolve name and check */
+		struct net_device *_dev;
+		bool _vpn;
+
+		if (!oifindex)
+			return false;
+		_dev = dev_get_by_index(sock_net(sk), oifindex);
+		if (!_dev)
+			return false;
+		_vpn = is_active_vpn_ifname(_dev->name);
+		dev_put(_dev);
+		if (!_vpn)
+			return false;
+	}
 
 	record_kmod_intercept(uid, HOOK_UDPV6_SENDMSG);
 	return true;
@@ -592,6 +605,11 @@ EXPORT_SYMBOL_GPL(vpnhide_udp_sendmsg);
 bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg,
 			     size_t len, int *err)
 {
+	if (sk->sk_family == AF_INET6 && vpnhide_udpv6_sendmsg_ll(sk, msg)) {
+		*err = -ENODEV;
+		return true;
+	}
+
 	if (!vpnhide_udp_sendmsg(sk))
 		return false;
 	/* Look like a saturated send queue (EAGAIN), not a permission

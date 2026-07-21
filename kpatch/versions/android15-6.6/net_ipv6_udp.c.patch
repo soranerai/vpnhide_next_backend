@@ -19,7 +19,7 @@ index 9d39e2554..dbac7fbb8 100644
  {
 +#ifdef CONFIG_VPNHIDE
 +	if (unlikely(vpnhide_udpv6_sendmsg_ll(sk, msg)))
-+		return -EPERM;
++		return -ENODEV;
 +#endif
 +
  	struct ipv6_txoptions opt_space;

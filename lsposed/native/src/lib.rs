@@ -301,6 +301,18 @@ fn is_vpn_iface(name: &str) -> bool {
     matches_vpn(name.as_bytes())
 }
 
+fn is_physical_non_vpn(name: &str) -> bool {
+    let name = name.to_lowercase();
+    name.starts_with("ccmni")
+        || name.starts_with("rmnet")
+        || name.starts_with("ipa")
+        || name.starts_with("epdg")
+        || name.starts_with("seth")
+        || name.starts_with("dummy")
+        || name.starts_with("wlan")
+        || name.starts_with("p2p")
+}
+
 fn clean_iface_name(word: &str) -> String {
     word.trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
         .to_string()
@@ -1222,7 +1234,7 @@ pub fn check_inet_diag() -> CheckOutput {
             CheckOutput::pass("not detected")
         } else {
             libc::close(fd);
-            CheckOutput::fail("VPN detected")
+            CheckOutput::fail(format!("VPN detected (socket opened successfully, fd={})", fd))
         }
     }
 }
@@ -2981,7 +2993,7 @@ pub fn check_ipv6_link_local_bruteforce() -> CheckOutput {
                         None
                     };
                     // ARPHRD_NONE = 65534, ARPHRD_PPP = 512
-                    let is_hw_tunnel = arphrd.is_some_and(|t| t == 65534 || t == 512);
+                    let is_hw_tunnel = arphrd.is_some_and(|t| t == 65534 || t == 512) && !is_physical_non_vpn(name);
                     let arphrd_note = arphrd.map_or(String::new(), |t| format!(",arphrd={t}"));
                     if is_hw_tunnel || (is_vpn_iface(name) && is_interface_up(name)) {
                         named_vpn.push(format!("idx={i}({name}{arphrd_note})"));
@@ -3143,7 +3155,10 @@ pub fn check_ipv6_link_local_bruteforce() -> CheckOutput {
             || !qdisc_tunnel.is_empty()
             || !probably_tunnel_indices.is_empty()
         {
-            CheckOutput::fail("VPN detected")
+            CheckOutput::fail(format!(
+                "VPN detected (named_vpn={:?}, ndp_tunnel={:?}, qdisc_tunnel={:?}, probably_tunnel_indices={:?})",
+                named_vpn, ndp_tunnel, qdisc_tunnel, probably_tunnel_indices
+            ))
         } else {
             CheckOutput::pass("not detected")
         }
