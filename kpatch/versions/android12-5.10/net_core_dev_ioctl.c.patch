@@ -28,18 +28,7 @@ index 993420da2..8e318e847 100644
  }
  
  /*
-@@ -53,6 +62,10 @@ int dev_ifconf(struct net *net, struct ifconf *ifc, int size)
- 	total = 0;
- 	for_each_netdev(net, dev) {
- 		int done;
-+#ifdef CONFIG_VPNHIDE
-+		if (vpnhide_should_hide_dev(dev))
-+			continue;
-+#endif
- 		if (!pos)
- 			done = inet_gifconf(dev, NULL, 0, size);
- 		else
-@@ -85,6 +98,11 @@ static int dev_ifsioc_locked(struct net *net, struct ifreq *ifr, unsigned int cm
+@@ -85,6 +95,10 @@ static int dev_ifsioc_locked(struct net *net, struct ifreq *ifr, unsigned int cm
  	if (!dev)
  		return -ENODEV;
  

@@ -55,4 +55,25 @@ if [ "$PATCH_COUNT" -eq 0 ]; then
     die "No .patch files found in $PATCHES_DIR"
 fi
 
+# --------------------------------------------------------------------------
+# 4. Version-specific sed fixups for hooks that can't be reliably patched
+#    due to structural differences between kernel sublevels.
+# --------------------------------------------------------------------------
+
+# android12/13-5.10: dev_ifconf loop body varies between sublevels
+# (older: gifconf_list[i] loop; newer: inet_gifconf).
+# The patch only covers the inet_gifconf variant; apply the hook via sed
+# for all sublevels so it lands correctly regardless of sublevel.
+if [[ "$VERSION" == android12-5.10 || "$VERSION" == android13-5.10 ]]; then
+    DEV_IOCTL="$KERNEL_DIR/net/core/dev_ioctl.c"
+    if ! grep -q "vpnhide_should_hide_dev" "$DEV_IOCTL"; then
+        log "Applying sed fixup: dev_ifconf vpnhide hook in $DEV_IOCTL..."
+        sed -i '/for_each_netdev(net, dev) {/a\\t\tif (vpnhide_should_hide_dev(dev)) continue;' \
+            "$DEV_IOCTL" \
+            || die "sed fixup failed for $DEV_IOCTL"
+    else
+        log "dev_ifconf vpnhide hook already present, skipping sed fixup."
+    fi
+fi
+
 log "Done. Applied $PATCH_COUNT patches for $VERSION."
