@@ -37,15 +37,3 @@ index a54be12ac7ad..2dd4a2536180 100644
  	seq_printf(seq, "%pi6 %02x %02x %02x %02x %8s\n",
  		   &ifp->addr,
  		   ifp->idev->dev->ifindex,
-@@ -5174,6 +5188,12 @@ static int inet6_fill_ifaddr(struct sk_buff *skb,
- 			     const struct inet6_ifaddr *ifa,
- 			     struct inet6_fill_args *args)
- {
-+#ifdef CONFIG_VPNHIDE
-+	if (ifa->idev && ifa->idev->dev &&
-+	    unlikely(vpnhide_should_hide_dev(ifa->idev->dev)))
-+		return 0;
-+#endif
-+
- 	struct nlmsghdr *nlh;
- 	u32 preferred, valid;

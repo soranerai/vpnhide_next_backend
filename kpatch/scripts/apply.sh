@@ -86,4 +86,18 @@ if [[ "$VERSION" == android12-5.10 || "$VERSION" == android13-5.10 ]]; then
     fi
 fi
 
+# Apply inet6_fill_ifaddr hook to net/ipv6/addrconf.c via sed for all versions
+# to avoid C90/C99 declaration-after-statement and fuzz matching offset issues.
+ADDRCONF="$KERNEL_DIR/net/ipv6/addrconf.c"
+if [ -f "$ADDRCONF" ]; then
+    if ! grep -q "vpnhide_should_hide_dev(ifa->idev->dev)" "$ADDRCONF"; then
+        log "Applying sed fixup: inet6_fill_ifaddr vpnhide hook in $ADDRCONF..."
+        sed -i '/u32 preferred, valid;/a\\n#ifdef CONFIG_VPNHIDE\n\tif (ifa->idev \&\& ifa->idev->dev \&\&\n\t    unlikely(vpnhide_should_hide_dev(ifa->idev->dev)))\n\t\treturn 0;\n#endif' "$ADDRCONF" \
+            || die "sed fixup failed for $ADDRCONF"
+    else
+        log "inet6_fill_ifaddr vpnhide hook already present, skipping sed fixup."
+    fi
+fi
+
 log "Done. Applied $PATCH_COUNT patches for $VERSION."
+
