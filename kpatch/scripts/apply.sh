@@ -66,7 +66,7 @@ fi
 # for all sublevels so it lands correctly regardless of sublevel.
 if [[ "$VERSION" == android12-5.10 || "$VERSION" == android13-5.10 ]]; then
     DEV_IOCTL="$KERNEL_DIR/net/core/dev_ioctl.c"
-    if ! grep -q "vpnhide_should_hide_dev" "$DEV_IOCTL"; then
+    if ! grep -A1 "for_each_netdev(net, dev) {" "$DEV_IOCTL" | grep -q "vpnhide_should_hide_dev"; then
         log "Applying sed fixup: dev_ifconf vpnhide hook in $DEV_IOCTL..."
         sed -i '/for_each_netdev(net, dev) {/a\\t\tif (vpnhide_should_hide_dev(dev)) continue;' \
             "$DEV_IOCTL" \
