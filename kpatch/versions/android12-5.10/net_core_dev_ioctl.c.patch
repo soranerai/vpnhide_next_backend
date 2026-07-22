@@ -28,7 +28,7 @@ index 993420da2..8e318e847 100644
  }
  
  /*
-@@ -85,6 +95,10 @@ static int dev_ifsioc_locked(struct net *net, struct ifreq *ifr, unsigned int cm
+@@ -85,6 +94,11 @@ static int dev_ifsioc_locked(struct net *net, struct ifreq *ifr, unsigned int cm
  	if (!dev)
  		return -ENODEV;
  
