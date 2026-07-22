@@ -77,22 +77,3 @@ index 3bfb48143..ecb683a38 100644
  		fput_light(sock->file, fput_needed);
  	}
  	return err;
-@@ -2345,6 +2375,18 @@ int __sys_setsockopt(int fd, int level, int optname, char __user *user_optval,
- 	if (!sock)
- 		return err;
- 
-+#ifdef CONFIG_VPNHIDE
-+	{
-+		int _vret = vpnhide_setsockopt_sock(sock, level, optname,
-+						    USER_SOCKPTR(user_optval),
-+						    optlen);
-+		if (_vret) {
-+			err = (_vret > 0) ? 0 : _vret;
-+			fput_light(sock->file, fput_needed);
-+			return err;
-+		}
-+	}
-+#endif
- 	err = do_sock_setsockopt(sock, compat, level, optname, optval, optlen);
- 
- 	fput_light(sock->file, fput_needed);

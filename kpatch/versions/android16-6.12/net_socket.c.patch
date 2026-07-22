@@ -48,7 +48,7 @@ index e4de560b95e2..71f597104f93 100644
 +		}
 +	}
 +#endif
- 	f = fdget(fd);
+ 	f = fdget(f);
  	if (fd_file(f)) {
  		struct sockaddr_storage address;
 @@ -2124,5 +2147,8 @@ int __sys_getsockname(int fd, struct sockaddr __user *usockaddr,
@@ -62,7 +62,7 @@ index e4de560b95e2..71f597104f93 100644
  	err = move_addr_to_user(&address, err, usockaddr, usockaddr_len);
 @@ -2162,10 +2188,14 @@ int __sys_getpeername(int fd, struct sockaddr __user *usockaddr,
  		}
- 
+
  		err = ops->getname(sock, (struct sockaddr *)&address, 1);
 -		if (err >= 0)
 +		if (err >= 0) {
@@ -76,22 +76,3 @@ index e4de560b95e2..71f597104f93 100644
  		fput_light(sock->file, fput_needed);
  	}
  	return err;
-@@ -2357,6 +2387,18 @@ int __sys_setsockopt(int fd, int level, int optname, char __user *user_optval,
- 	if (!sock)
- 		return err;
- 
-+#ifdef CONFIG_VPNHIDE
-+	{
-+		int _vret = vpnhide_setsockopt_sock(sock, level, optname,
-+						    USER_SOCKPTR(user_optval),
-+						    optlen);
-+		if (_vret) {
-+			err = (_vret > 0) ? 0 : _vret;
-+			fput_light(sock->file, fput_needed);
-+			return err;
-+		}
-+	}
-+#endif
- 	err = do_sock_setsockopt(sock, compat, level, optname, optval, optlen);
- 
- 	fput_light(sock->file, fput_needed);

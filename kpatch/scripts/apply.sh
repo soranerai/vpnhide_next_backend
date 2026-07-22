@@ -99,13 +99,17 @@ if [ -f "$ADDRCONF" ]; then
     fi
 fi
 
-# Apply getsockopt hook to net/socket.c using Python script for all versions
-# to avoid fuzzy matching getsockopt hook into random syscalls (e.g. sendmsg)
+# Apply getsockopt/setsockopt hooks to net/socket.c using Python script
+# (setsockopt is injected dynamically via Python for android15-6.6 due to sublevel structure differences)
 SOCKET_C="$KERNEL_DIR/net/socket.c"
 if [ -f "$SOCKET_C" ]; then
-    log "Applying getsockopt vpnhide hook in $SOCKET_C..."
-    "$SCRIPT_DIR/fix_socket_getsockopt.py" "$SOCKET_C" \
-        || die "getsockopt hook injection failed for $SOCKET_C"
+    log "Applying socket vpnhide hooks in $SOCKET_C..."
+    EXTRA_FLAGS=()
+    if [[ "$VERSION" == "android15-6.6" ]]; then
+        EXTRA_FLAGS+=("--setsockopt")
+    fi
+    "$SCRIPT_DIR/fix_socket_getsockopt.py" "$SOCKET_C" "${EXTRA_FLAGS[@]}" \
+        || die "socket hook injection failed for $SOCKET_C"
 fi
 
 log "Done. Applied $PATCH_COUNT patches for $VERSION."
