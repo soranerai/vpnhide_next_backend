@@ -68,9 +68,19 @@ if [[ "$VERSION" == android12-5.10 || "$VERSION" == android13-5.10 ]]; then
     DEV_IOCTL="$KERNEL_DIR/net/core/dev_ioctl.c"
     if ! grep -A1 "for_each_netdev(net, dev) {" "$DEV_IOCTL" | grep -q "vpnhide_should_hide_dev"; then
         log "Applying sed fixup: dev_ifconf vpnhide hook in $DEV_IOCTL..."
-        sed -i '/for_each_netdev(net, dev) {/a\\t\tif (vpnhide_should_hide_dev(dev)) continue;' \
-            "$DEV_IOCTL" \
-            || die "sed fixup failed for $DEV_IOCTL"
+        if grep -A1 "for_each_netdev(net, dev) {" "$DEV_IOCTL" | grep -q "int done;"; then
+            # Older sublevel: 'int done;' is the very first line inside the loop.
+            # Insert the check AFTER it to avoid C90 declaration-after-statement.
+            sed -i '/for_each_netdev(net, dev) {/{n; s/\(.*int done;\)/\1\n\t\tif (vpnhide_should_hide_dev(dev)) continue;/}' \
+                "$DEV_IOCTL" \
+                || die "sed fixup (older) failed for $DEV_IOCTL"
+        else
+            # Newer sublevel: 'int done;' is in a nested block — safe to insert
+            # right after for_each_netdev without violating C90.
+            sed -i '/for_each_netdev(net, dev) {/a\\t\tif (vpnhide_should_hide_dev(dev)) continue;' \
+                "$DEV_IOCTL" \
+                || die "sed fixup (newer) failed for $DEV_IOCTL"
+        fi
     else
         log "dev_ifconf vpnhide hook already present, skipping sed fixup."
     fi
