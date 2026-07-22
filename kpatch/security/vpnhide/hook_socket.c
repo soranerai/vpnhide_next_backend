@@ -400,6 +400,9 @@ void vpnhide_getname_post(struct socket *sock, struct sockaddr *addr, int peer)
 
 		if (!is_hook_active(HOOK_GETNAME_INET, uid))
 			return;
+		if (sin->sin_addr.s_addr == 0 ||
+		    (ntohl(sin->sin_addr.s_addr) & 0xFF000000) == 0x7F000000)
+			return;
 		/* Spoof: use configured IP, or fall back to INADDR_ANY so the
 		 * real VPN address is never returned to a target process. */
 		sin->sin_addr.s_addr = (sip.has_ipv4 && sip.ipv4_addr)
@@ -409,6 +412,9 @@ void vpnhide_getname_post(struct socket *sock, struct sockaddr *addr, int peer)
 		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
 
 		if (!is_hook_active(HOOK_GETNAME_INET6, uid))
+			return;
+		if (ipv6_addr_any(&sin6->sin6_addr) ||
+		    ipv6_addr_loopback(&sin6->sin6_addr))
 			return;
 		if (sip.has_ipv6 &&
 		    !ipv6_addr_any((struct in6_addr *)sip.ipv6_addr)) {
