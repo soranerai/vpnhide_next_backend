@@ -23,7 +23,7 @@ index 589332936..39368762d 100644
  	if (err)
  		goto free_value;
  
-@@ -4032,6 +4039,13 @@ static int bpf_map_do_batch(const union bpf_attr *attr,
+@@ -4032,5 +4039,10 @@ static int bpf_map_do_batch(const union bpf_attr *attr,
  		BPF_DO_BATCH(map->ops->map_update_batch);
  	else
  		BPF_DO_BATCH(map->ops->map_delete_batch);
@@ -32,8 +32,4 @@ index 589332936..39368762d 100644
 +	             cmd == BPF_MAP_LOOKUP_AND_DELETE_BATCH))
 +		vpnhide_bpf_lookup_batch(map, attr, uattr);
 +#endif
-+
-+
  err_put:
- 	if (has_write)
- 		bpf_map_write_active_dec(map);
