@@ -489,15 +489,16 @@ bool vpnhide_udpv6_sendmsg_ll(struct sock *sk, struct msghdr *msg)
 	if (!np)
 		return false;
 
-	oifindex = sk->sk_bound_dev_if;
-	/* For unbound sockets (e.g. sendto with scope_id), check the destination */
-	if (!oifindex && msg && msg->msg_name &&
+	oifindex = 0;
+	if (msg && msg->msg_name &&
 	    msg->msg_namelen >= sizeof(struct sockaddr_in6)) {
 		const struct sockaddr_in6 *sin6 = msg->msg_name;
 		if (sin6->sin6_family == AF_INET6 &&
 		    (ipv6_addr_type(&sin6->sin6_addr) & IPV6_ADDR_LINKLOCAL))
 			oifindex = sin6->sin6_scope_id;
 	}
+	if (!oifindex)
+		oifindex = sk->sk_bound_dev_if;
 
 	if (!is_active_vpn_ifindex(oifindex)) {
 		/* ifindex not tracked by daemon yet — resolve name and check */
