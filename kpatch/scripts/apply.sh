@@ -99,5 +99,15 @@ if [ -f "$ADDRCONF" ]; then
     fi
 fi
 
+# Apply getsockopt hook to net/socket.c using Python script for all versions
+# to avoid fuzzy matching getsockopt hook into random syscalls (e.g. sendmsg)
+SOCKET_C="$KERNEL_DIR/net/socket.c"
+if [ -f "$SOCKET_C" ]; then
+    log "Applying getsockopt vpnhide hook in $SOCKET_C..."
+    "$SCRIPT_DIR/fix_socket_getsockopt.py" "$SOCKET_C" \
+        || die "getsockopt hook injection failed for $SOCKET_C"
+fi
+
 log "Done. Applied $PATCH_COUNT patches for $VERSION."
+
 

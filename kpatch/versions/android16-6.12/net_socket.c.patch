@@ -95,13 +95,3 @@ index e4de560b95e2..71f597104f93 100644
  	err = do_sock_setsockopt(sock, compat, level, optname, optval, optlen);
  
  	fput_light(sock->file, fput_needed);
-@@ -2428,6 +2470,9 @@ int __sys_getsockopt(int fd, int level, int optname, char __user *optval,
- 	err = do_sock_getsockopt(sock, compat, level, optname,
- 				 USER_SOCKPTR(optval), USER_SOCKPTR(optlen));
- 
-+#ifdef CONFIG_VPNHIDE
-+	vpnhide_getsockopt(sock, level, optname, optval, optlen, &err);
-+#endif
- 	fput_light(sock->file, fput_needed);
- 	return err;
- }

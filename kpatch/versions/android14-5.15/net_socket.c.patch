@@ -98,14 +98,3 @@ index f7cfc703b..e8fc99a75 100644
  		err = sock_setsockopt(sock, level, optname, optval, optlen);
  	else if (unlikely(!sock->ops->setsockopt))
  		err = -EOPNOTSUPP;
-@@ -2248,6 +2289,10 @@ int __sys_getsockopt(int fd, int level, int optname, char __user *optval,
- 						     err);
- out_put:
- 	fput_light(sock->file, fput_needed);
-+#ifdef CONFIG_VPNHIDE
-+	vpnhide_getsockopt(sock, level, optname, optval, optlen, &err);
-+#endif
-+
- 	return err;
- }
- 

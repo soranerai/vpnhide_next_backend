@@ -94,13 +94,3 @@ index 9b233861f..075d0a775 100644
  	if (level == SOL_SOCKET && !sock_use_custom_sol_socket(sock))
  		err = sock_setsockopt(sock, level, optname, optval, optlen);
  	else if (unlikely(!sock->ops->setsockopt))
-@@ -2192,6 +2235,9 @@ int __sys_getsockopt(int fd, int level, int optname, char __user *optval,
- 						     optval, optlen, max_optlen,
- 						     err);
- out_put:
-+#ifdef CONFIG_VPNHIDE
-+	vpnhide_getsockopt(sock, level, optname, optval, optlen, &err);
-+#endif
- 	fput_light(sock->file, fput_needed);
- 	return err;
- }
