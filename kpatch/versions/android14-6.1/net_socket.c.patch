@@ -16,40 +16,18 @@ index 6f39f7b0c..1fa000ae5 100644
 @@ -1793,7 +1797,11 @@ int __sys_bind(int fd, struct sockaddr __user *umyaddr, int addrlen)
  						   (struct sockaddr *)&address,
  						   addrlen);
- 			if (!err)
+-			if (!err)
 -				err = sock->ops->bind(sock,
-+	#ifdef CONFIG_VPNHIDE
-+		vpnhide_bind_pre(sock, (struct sockaddr *)&address, addrlen);
++			if (!err) {
++#ifdef CONFIG_VPNHIDE
++				vpnhide_bind_pre(sock, (struct sockaddr *)&address, addrlen);
 +#endif
-+
-+			err = sock->ops->bind(sock,
++				err = sock->ops->bind(sock,
  						      (struct sockaddr *)
  						      &address, addrlen);
- 		}
-@@ -2004,6 +2012,22 @@ int __sys_connect(int fd, struct sockaddr __user *uservaddr, int addrlen)
- 	int ret = -EBADF;
- 	struct fd f;
- 
-+#ifdef CONFIG_VPNHIDE
-+	{
-+		struct fd _f = fdget(fd);
-+		if (_f.file) {
-+			struct socket *_sock = sock_from_file(_f.file);
-+			if (_sock) {
-+				int _ret = 0;
-+				if (vpnhide_connect(_sock, uservaddr, addrlen, &_ret)) {
-+					fdput(_f);
-+					return _ret;
-+				}
 +			}
-+			fdput(_f);
-+		}
-+	}
-+#endif
- 	f = fdget(fd);
- 	if (f.file) {
- 		struct sockaddr_storage address;
-@@ -2047,7 +2072,10 @@ int __sys_getsockname(int fd, struct sockaddr __user *usockaddr,
+ 		}
+@@ -2047,7 +2056,10 @@ int __sys_getsockname(int fd, struct sockaddr __user *usockaddr,
  	if (err < 0)
  		goto out_put;
  	/* "err" is actually length in this case */
@@ -61,7 +39,7 @@ index 6f39f7b0c..1fa000ae5 100644
  
  out_put:
  	fput_light(sock->file, fput_needed);
-@@ -2082,10 +2110,14 @@ int __sys_getpeername(int fd, struct sockaddr __user *usockaddr,
+@@ -2082,10 +2094,14 @@ int __sys_getpeername(int fd, struct sockaddr __user *usockaddr,
  		}
  
  		err = sock->ops->getname(sock, (struct sockaddr *)&address, 1);
@@ -77,7 +55,7 @@ index 6f39f7b0c..1fa000ae5 100644
  		fput_light(sock->file, fput_needed);
  	}
  	return err;
-@@ -2265,7 +2295,19 @@ int __sys_setsockopt(int fd, int level, int optname, char __user *user_optval,
+@@ -2265,7 +2279,19 @@ int __sys_setsockopt(int fd, int level, int optname, char __user *user_optval,
  
  	if (kernel_optval)
  		optval = KERNEL_SOCKPTR(kernel_optval);

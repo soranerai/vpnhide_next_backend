@@ -10,6 +10,7 @@
 # match "close enough" at the wrong location once fuzz absorbs all of it).
 # These functions instead anchor on stable literal markers and adapt to
 # whichever shape is present.
+import re
 import sys
 
 
@@ -116,6 +117,34 @@ def fix_connect(lines):
         print("ERROR: could not find opening brace of __sys_connect")
         return lines
 
+    # struct fd's raw `.file` member became inaccessible once the kernel's
+    # fd-refcounting rework (which packs flags into the pointer) landed --
+    # from that point on you MUST go through the fd_file() accessor. Older
+    # trees don't have fd_file() at all. Detect which shape this tree is by
+    # checking whether fd_file( appears anywhere in the file, rather than
+    # hardcoding it per KMI version (that's what made the 6.12 patch brittle
+    # in the first place -- the same drift can happen on any branch).
+    full_text = ''.join(lines)
+    fd_expr = 'fd_file(_f)' if 'fd_file(' in full_text else '_f.file'
+
+    # sock_from_file() used to take an `int *err` out-param on older trees
+    # (e.g. 5.10) and was simplified to a single arg later. Its own
+    # definition is always present in this file, so sniff the arity there
+    # instead of hardcoding per version.
+    arity = 1
+    m = re.search(r'sock_from_file\(([^)]*)\)', full_text)
+    if m:
+        params = [p for p in m.group(1).split(',') if p.strip()]
+        if len(params) >= 2:
+            arity = 2
+
+    pre_decl = []
+    if arity == 2:
+        sock_from_file_call = f'sock_from_file({fd_expr}, &_err)'
+        pre_decl = ["\t\t\tint _err = 0;\n"]
+    else:
+        sock_from_file_call = f'sock_from_file({fd_expr})'
+
     # Fully self-contained: does its own fdget()/fdput(), so it doesn't
     # depend on whatever local variables the surrounding function shape
     # declares (old sockfd_lookup_light style vs. new CLASS(fd, f) style).
@@ -123,8 +152,9 @@ def fix_connect(lines):
         "#ifdef CONFIG_VPNHIDE\n",
         "\t{\n",
         "\t\tstruct fd _f = fdget(fd);\n",
-        "\t\tif (fd_file(_f)) {\n",
-        "\t\t\tstruct socket *_sock = sock_from_file(fd_file(_f));\n",
+        f"\t\tif ({fd_expr}) {{\n",
+    ] + pre_decl + [
+        f"\t\t\tstruct socket *_sock = {sock_from_file_call};\n",
         "\t\t\tif (_sock) {\n",
         "\t\t\t\tint _ret = 0;\n",
         "\t\t\t\tif (vpnhide_connect(_sock, uservaddr, addrlen, &_ret)) {\n",
@@ -138,7 +168,8 @@ def fix_connect(lines):
         "#endif\n",
     ]
     lines = lines[:brace_idx + 1] + hook + lines[brace_idx + 1:]
-    print(f"connect hook injected after opening brace at line {brace_idx + 1}")
+    print(f"connect hook injected after opening brace at line {brace_idx + 1} "
+          f"(fd_expr={fd_expr}, sock_from_file arity={arity})")
     return lines
 
 
@@ -379,12 +410,14 @@ def fix_setsockopt(lines):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: fix_socket_hooks.py <socket.c path> [--setsockopt] [--bind-connect-getname]")
+        print("Usage: fix_socket_hooks.py <socket.c path> [--setsockopt] [--connect] [--bind-getname]")
         sys.exit(1)
 
     file_path = sys.argv[1]
-    do_setsockopt = "--setsockopt" in sys.argv[2:]
-    do_bcg = "--bind-connect-getname" in sys.argv[2:]
+    flags = sys.argv[2:]
+    do_setsockopt = "--setsockopt" in flags
+    do_connect = "--connect" in flags
+    do_bind_getname = "--bind-getname" in flags
 
     with open(file_path, 'r') as f:
         lines = f.readlines()
@@ -392,9 +425,10 @@ def main():
     lines = fix_getsockopt(lines)
     if do_setsockopt:
         lines = fix_setsockopt(lines)
-    if do_bcg:
-        lines = fix_bind(lines)
+    if do_connect:
         lines = fix_connect(lines)
+    if do_bind_getname:
+        lines = fix_bind(lines)
         lines = fix_getname(lines, 'int __sys_getsockname(', 0)
         lines = fix_getname(lines, 'int __sys_getpeername(', 1)
 

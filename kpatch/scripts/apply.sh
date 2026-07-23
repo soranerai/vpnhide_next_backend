@@ -100,22 +100,32 @@ if [ -f "$ADDRCONF" ]; then
 fi
 
 # Apply getsockopt/setsockopt/bind/connect/getname hooks to net/socket.c
-# using a Python script instead of a context patch (setsockopt is injected
-# dynamically for android15-6.6 due to sublevel structure differences;
-# android16-6.12 needs all of bind/connect/getsockname/getpeername/setsockopt
-# done dynamically too, since that branch spans both the GKI shape
-# (sockfd_lookup_light/fput_light) and a CLASS(fd, f) scoped-cleanup shape
-# that some 6.12 sublevels have picked up from upstream -- a context diff
-# can't span both without silently mis-applying under --fuzz).
+# using a Python script instead of a context patch.
+#
+# connect is always dynamic: every version's connect hook is a pure-insertion
+# hunk with only ~3 lines of context on each side, which `patch --fuzz` can
+# match "close enough" at the wrong offset with no compile-time signal it
+# landed wrong (this is exactly what silently happened to some 6.12 hunks).
+# fix_connect() auto-detects the fd_file()/`.file` and sock_from_file() arity
+# shape from the tree itself, so it doesn't need a per-version flag.
+#
+# setsockopt is dynamic for android15-6.6 and android16-6.12 due to sublevel
+# structure differences (6.6 needed it first; 6.12 additionally spans both
+# the GKI shape (sockfd_lookup_light/fput_light) and a CLASS(fd, f)
+# scoped-cleanup shape some 6.12 sublevels have picked up from upstream).
+#
+# bind/getsockname/getpeername are dynamic only for android16-6.12 so far,
+# for the same CLASS(fd) reason -- not yet confirmed necessary on other
+# branches.
 SOCKET_C="$KERNEL_DIR/net/socket.c"
 if [ -f "$SOCKET_C" ]; then
     log "Applying socket vpnhide hooks in $SOCKET_C..."
-    EXTRA_FLAGS=()
+    EXTRA_FLAGS=("--connect")
     if [[ "$VERSION" == "android15-6.6" || "$VERSION" == "android16-6.12" ]]; then
         EXTRA_FLAGS+=("--setsockopt")
     fi
     if [[ "$VERSION" == "android16-6.12" ]]; then
-        EXTRA_FLAGS+=("--bind-connect-getname")
+        EXTRA_FLAGS+=("--bind-getname")
     fi
     "$SCRIPT_DIR/fix_socket_hooks.py" "$SOCKET_C" "${EXTRA_FLAGS[@]}" \
         || die "socket hook injection failed for $SOCKET_C"
