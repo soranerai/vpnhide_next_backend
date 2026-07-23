@@ -921,13 +921,19 @@ struct kretprobe inet6_bind_ll_krp = {
 
 struct udpv6_sendmsg_ll_data {
   bool should_deny;
+  struct sock *sk;
+  int orig_sndbuf;
+  bool rl_spoofed;
 };
 
 static int udpv6_sendmsg_ll_entry(struct kretprobe_instance *ri,
                                   struct pt_regs *regs) {
   struct udpv6_sendmsg_ll_data *data;
+  struct sock *sk;
   struct msghdr *msg;
   struct sockaddr_in6 sin6;
+  bool have_sin6 = false;
+  uid_t uid;
 
   if (!is_hook_active(HOOK_UDPV6_SENDMSG,
                       from_kuid(&init_user_ns, current_uid())))
@@ -936,37 +942,55 @@ static int udpv6_sendmsg_ll_entry(struct kretprobe_instance *ri,
   if (!is_target_uid())
     return 1;
 
+  sk = (struct sock *)regs->regs[0];
   msg = (struct msghdr *)regs->regs[1];
-  if (!msg || !msg->msg_name)
-    return 1;
-
-  if (msg->msg_namelen < (int)sizeof(sin6))
-    return 1;
-
-  if (copy_from_kernel_nofault(&sin6, msg->msg_name, sizeof(sin6)) != 0)
-    return 1;
-
-  if (sin6.sin6_family != AF_INET6)
-    return 1;
-
-  if (sin6.sin6_addr.s6_addr[0] != 0xfe ||
-      (sin6.sin6_addr.s6_addr[1] & 0xc0) != 0x80)
-    return 1;
-
-  if (sin6.sin6_scope_id == 0 || !is_active_vpn_ifindex(sin6.sin6_scope_id))
+  if (!sk || !msg)
     return 1;
 
   data = (void *)ri->data;
-  data->should_deny = true;
+  data->should_deny = false;
+  data->sk = sk;
+  data->orig_sndbuf = sk->sk_sndbuf;
+  data->rl_spoofed = false;
 
-  vpnhide_dbg("udpv6_sendmsg_ll: blocking ll sendto scope_id=%u uid=%u\n",
-              sin6.sin6_scope_id, from_kuid(&init_user_ns, current_uid()));
+  if (msg->msg_name && msg->msg_namelen >= (int)sizeof(sin6) &&
+      copy_from_kernel_nofault(&sin6, msg->msg_name, sizeof(sin6)) == 0 &&
+      sin6.sin6_family == AF_INET6)
+    have_sin6 = true;
+
+  if (have_sin6 && sin6.sin6_addr.s6_addr[0] == 0xfe &&
+      (sin6.sin6_addr.s6_addr[1] & 0xc0) == 0x80 &&
+      sin6.sin6_scope_id != 0 &&
+      is_active_vpn_ifindex(sin6.sin6_scope_id)) {
+    data->should_deny = true;
+    vpnhide_dbg("udpv6_sendmsg_ll: blocking ll sendto scope_id=%u uid=%u\n",
+                sin6.sin6_scope_id, from_kuid(&init_user_ns, current_uid()));
+    return 0;
+  }
+
+  /* Not a link-local VPN send — fall through to the same
+   * destination-scoped backpressure emulation used by v4 UDP
+   * (idx25/HOOK_UDP_SENDMSG), so v6 gets parity instead of never
+   * being rate-limited at all. */
+  uid = from_kuid(&init_user_ns, current_uid());
+  if ((msg->msg_flags & MSG_DONTWAIT) &&
+      vpnhide_udp_dst_is_vpn_bound(sk, msg)) {
+    if (udp_rate_limit_exceeded(uid)) {
+      sk->sk_sndbuf = 0;
+      data->rl_spoofed = true;
+      udelay(50);
+    }
+  }
+
   return 0;
 }
 
 static int udpv6_sendmsg_ll_ret(struct kretprobe_instance *ri,
                                 struct pt_regs *regs) {
   struct udpv6_sendmsg_ll_data *data = (void *)ri->data;
+
+  if (data->rl_spoofed && data->sk)
+    data->sk->sk_sndbuf = data->orig_sndbuf;
 
   if (!data->should_deny)
     return 0;

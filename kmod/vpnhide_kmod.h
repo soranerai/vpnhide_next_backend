@@ -247,6 +247,8 @@ bool is_active_vpn_ifindex(u32 ifindex);
 bool is_active_vpn_ifname(const char *name);
 bool is_target_uid_val(uid_t uid);
 bool is_target_uid(void);
+bool vpnhide_udp_dst_is_vpn_bound(struct sock *sk, struct msghdr *msg);
+bool udp_rate_limit_exceeded(uid_t uid);
 void record_kmod_intercept(uid_t uid, int type);
 void get_spoof_ip(struct vpnhide_spoof_ip *dst);
 int update_spoof_ip(const struct vpnhide_spoof_ip *sip);

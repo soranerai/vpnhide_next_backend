@@ -528,6 +528,43 @@ bool vpnhide_udpv6_sendmsg_ll(struct sock *sk, struct msghdr *msg)
 EXPORT_SYMBOL_GPL(vpnhide_udpv6_sendmsg_ll);
 
 /* ------------------------------------------------------------------ */
+/* UDP destination scoping — only rate-limit sends that actually       */
+/* egress through a currently-hidden VPN interface. Real physical      */
+/* interfaces produce genuine EAGAIN under sustained flood (BQL /      */
+/* netif_stop_queue hold sk_wmem_alloc up); loopback and other local    */
+/* traffic never experiences this, so throttling it unconditionally    */
+/* is itself a distinguishing artifact, not a faithful emulation.      */
+/* ------------------------------------------------------------------ */
+
+static bool vpnhide_udp_dst_is_vpn(struct sock *sk, struct msghdr *msg)
+{
+	struct dst_entry *dst;
+	bool vpn;
+
+	/* Unconnected sendto() resolves its route inside udp_sendmsg/
+	 * udpv6_sendmsg itself, after this hook already ran — there is no
+	 * cheap way to learn the egress device yet. Fail open rather than
+	 * duplicate the kernel's own route lookup from this context. */
+	if (msg && msg->msg_name)
+		return false;
+
+	if (sk->sk_family == AF_INET6) {
+		if (ipv6_addr_loopback(&sk->sk_v6_daddr))
+			return false;
+	} else {
+		if (ipv4_is_loopback(inet_sk(sk)->inet_daddr))
+			return false;
+	}
+
+	dst = sk_dst_get(sk);
+	if (!dst)
+		return false;
+	vpn = dst->dev && is_active_vpn_ifindex(dst->dev->ifindex);
+	dst_release(dst);
+	return vpn;
+}
+
+/* ------------------------------------------------------------------ */
 /* UDP rate limiter — token bucket per UID                             */
 /* ------------------------------------------------------------------ */
 
@@ -616,6 +653,9 @@ bool vpnhide_udp_sendmsg_pre(struct sock *sk, struct msghdr *msg,
 		*err = -ENODEV;
 		return true;
 	}
+
+	if (!vpnhide_udp_dst_is_vpn(sk, msg))
+		return false;
 
 	if (!vpnhide_udp_sendmsg(sk))
 		return false;

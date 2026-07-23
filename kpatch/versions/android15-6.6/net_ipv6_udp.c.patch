@@ -13,13 +13,16 @@ index 9d39e2554..dbac7fbb8 100644
  #include <linux/if_arp.h>
  #include <linux/ipv6.h>
  #include <linux/icmpv6.h>
-@@ -1333,6 +1337,11 @@ static int udp_v6_push_pending_frames(struct sock *sk)
+@@ -1333,6 +1337,14 @@ static int udp_v6_push_pending_frames(struct sock *sk)
  
  int udpv6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
  {
 +#ifdef CONFIG_VPNHIDE
-+	if (unlikely(vpnhide_udpv6_sendmsg_ll(sk, msg)))
-+		return -ENODEV;
++	{
++		int _err = 0;
++		if (vpnhide_udp_sendmsg_pre(sk, msg, len, &_err))
++			return _err;
++	}
 +#endif
 +
  	struct ipv6_txoptions opt_space;

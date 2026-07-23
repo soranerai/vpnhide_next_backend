@@ -99,16 +99,25 @@ if [ -f "$ADDRCONF" ]; then
     fi
 fi
 
-# Apply getsockopt/setsockopt hooks to net/socket.c using Python script
-# (setsockopt is injected dynamically via Python for android15-6.6 due to sublevel structure differences)
+# Apply getsockopt/setsockopt/bind/connect/getname hooks to net/socket.c
+# using a Python script instead of a context patch (setsockopt is injected
+# dynamically for android15-6.6 due to sublevel structure differences;
+# android16-6.12 needs all of bind/connect/getsockname/getpeername/setsockopt
+# done dynamically too, since that branch spans both the GKI shape
+# (sockfd_lookup_light/fput_light) and a CLASS(fd, f) scoped-cleanup shape
+# that some 6.12 sublevels have picked up from upstream -- a context diff
+# can't span both without silently mis-applying under --fuzz).
 SOCKET_C="$KERNEL_DIR/net/socket.c"
 if [ -f "$SOCKET_C" ]; then
     log "Applying socket vpnhide hooks in $SOCKET_C..."
     EXTRA_FLAGS=()
-    if [[ "$VERSION" == "android15-6.6" ]]; then
+    if [[ "$VERSION" == "android15-6.6" || "$VERSION" == "android16-6.12" ]]; then
         EXTRA_FLAGS+=("--setsockopt")
     fi
-    "$SCRIPT_DIR/fix_socket_getsockopt.py" "$SOCKET_C" "${EXTRA_FLAGS[@]}" \
+    if [[ "$VERSION" == "android16-6.12" ]]; then
+        EXTRA_FLAGS+=("--bind-connect-getname")
+    fi
+    "$SCRIPT_DIR/fix_socket_hooks.py" "$SOCKET_C" "${EXTRA_FLAGS[@]}" \
         || die "socket hook injection failed for $SOCKET_C"
 fi
 
