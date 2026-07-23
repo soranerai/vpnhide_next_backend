@@ -25,6 +25,28 @@ def _leading_ws(line):
     return line[:len(line) - len(line.lstrip())]
 
 
+_DECL_KEYWORDS = (
+    'struct ', 'union ', 'enum ', 'unsigned ', 'signed ', 'const ', 'static ',
+    'int ', 'long ', 'short ', 'char ', 'void ', 'bool ', 'size_t ', 'ssize_t ',
+    'sockptr_t ', 'u8 ', 'u16 ', 'u32 ', 'u64 ', 's8 ', 's16 ', 's32 ', 's64 ',
+)
+
+
+def _looks_like_decl(line):
+    """True for a leading local declaration, a blank line, or a comment --
+    i.e. lines that are safe to walk past when looking for the first real
+    statement in a function (kernel builds error on -Wdeclaration-after-
+    statement, so hooks must never land before the tail of a decl block)."""
+    s = line.strip()
+    if not s:
+        return True
+    if s.startswith('/*') or s.startswith('//') or s.startswith('*'):
+        return True
+    if s.startswith('CLASS('):
+        return True
+    return any(s.startswith(kw) for kw in _DECL_KEYWORDS)
+
+
 def _statement_span(lines, start_idx, open_marker):
     """Given the line where a call statement starting with `open_marker`
     begins, return (start_idx, end_idx) spanning every line needed for
@@ -117,6 +139,17 @@ def fix_connect(lines):
         print("ERROR: could not find opening brace of __sys_connect")
         return lines
 
+    # Kernel builds treat mixing declarations and statements as an error
+    # (-Wdeclaration-after-statement -Werror), so the hook can't just go
+    # right after the opening brace -- it has to land after whatever local
+    # declarations the function's own shape has (2 lines in the old
+    # sockfd_lookup_light-era style, up to 4 in the CLASS(fd) style).
+    # Walk forward skipping blank/comment lines and anything that looks
+    # like a declaration, rather than hardcoding a line count.
+    insert_idx = brace_idx + 1
+    while insert_idx < func_end and _looks_like_decl(lines[insert_idx]):
+        insert_idx += 1
+
     # struct fd's raw `.file` member became inaccessible once the kernel's
     # fd-refcounting rework (which packs flags into the pointer) landed --
     # from that point on you MUST go through the fd_file() accessor. Older
@@ -167,8 +200,8 @@ def fix_connect(lines):
         "\t}\n",
         "#endif\n",
     ]
-    lines = lines[:brace_idx + 1] + hook + lines[brace_idx + 1:]
-    print(f"connect hook injected after opening brace at line {brace_idx + 1} "
+    lines = lines[:insert_idx] + hook + lines[insert_idx:]
+    print(f"connect hook injected after leading declarations at line {insert_idx + 1} "
           f"(fd_expr={fd_expr}, sock_from_file arity={arity})")
     return lines
 
@@ -305,13 +338,20 @@ def fix_getsockopt(lines):
 
     start_idx, end_idx = _statement_span(lines, call_idx, 'do_sock_getsockopt(')
     indent = _leading_ws(lines[start_idx])
-    new_block = [lines[start_idx].replace('return do_sock_getsockopt(', 'int _vh_err = do_sock_getsockopt(', 1)]
-    new_block += lines[start_idx + 1:end_idx + 1]
-    new_block += [
-        "#ifdef CONFIG_VPNHIDE\n",
-        f"{indent}vpnhide_getsockopt(sock, level, optname, optval, optlen, &_vh_err);\n",
-        "#endif\n",
-        f"{indent}return _vh_err;\n",
+    # Wrapped in its own { } scope: `int _vh_err = ...` must be the first
+    # statement of a fresh block, not a declaration slipped in after the
+    # `if (fd_empty(f)) ...`/`if (unlikely(!sock)) ...` statements earlier
+    # in the function -- kernel builds error on -Wdeclaration-after-statement.
+    call_text = ''.join(l.strip() + ' ' for l in lines[start_idx:end_idx + 1]).strip()
+    call_text = call_text.replace('return do_sock_getsockopt(', 'do_sock_getsockopt(', 1)
+    new_block = [
+        f"{indent}{{\n",
+        f"{indent}\tint _vh_err = {call_text}\n",
+        f"{indent}#ifdef CONFIG_VPNHIDE\n",
+        f"{indent}\tvpnhide_getsockopt(sock, level, optname, optval, optlen, &_vh_err);\n",
+        f"{indent}#endif\n",
+        f"{indent}\treturn _vh_err;\n",
+        f"{indent}}}\n",
     ]
     lines = lines[:start_idx] + new_block + lines[end_idx + 1:]
     print(f"getsockopt hook injected (CLASS(fd) shape) around line {start_idx + 1}")
