@@ -13,13 +13,16 @@ index 538503720..340409d0e 100644
  
  static void udpv6_destruct_sock(struct sock *sk)
  {
-@@ -1316,6 +1320,10 @@ int udpv6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
+@@ -1316,6 +1320,13 @@ int udpv6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
  	int is_udplite = IS_UDPLITE(sk);
  	int (*getfrag)(void *, char *, int, int, int, struct sk_buff *);
  
 +#ifdef CONFIG_VPNHIDE
-+	if (vpnhide_udpv6_sendmsg_ll(sk, msg))
-+		return -ENODEV;
++	{
++		int _err = 0;
++		if (vpnhide_udp_sendmsg_pre(sk, msg, len, &_err))
++			return _err;
++	}
 +#endif
  	ipcm6_init(&ipc6);
  	ipc6.gso_size = READ_ONCE(up->gso_size);

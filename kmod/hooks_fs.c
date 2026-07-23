@@ -934,7 +934,7 @@ struct udp_uid_rate {
 static struct udp_uid_rate udp_rates[MAX_TARGET_UIDS];
 static DEFINE_SPINLOCK(udp_rates_lock);
 
-static bool udp_rate_limit_exceeded(uid_t uid) {
+bool udp_rate_limit_exceeded(uid_t uid) {
   u64 now = ktime_get_ns();
   int i;
   bool limit_exceeded = false;
@@ -982,6 +982,42 @@ static bool udp_rate_limit_exceeded(uid_t uid) {
   return limit_exceeded;
 }
 
+/*
+ * Only rate-limit sends that actually egress through a currently-hidden
+ * VPN interface. Real physical interfaces produce genuine EAGAIN under
+ * sustained flood (BQL/netif_stop_queue hold sk_wmem_alloc up); loopback
+ * and other local traffic never experiences this, so throttling it
+ * unconditionally is itself a distinguishing artifact, not a faithful
+ * emulation.
+ *
+ * Unconnected sendto() resolves its route inside udp_sendmsg itself,
+ * after this hook already ran — there is no cheap way to learn the
+ * egress device yet, so we fail open (don't throttle) rather than
+ * duplicate the kernel's own route lookup from kretprobe context.
+ */
+bool vpnhide_udp_dst_is_vpn_bound(struct sock *sk, struct msghdr *msg) {
+  struct dst_entry *dst;
+  bool vpn;
+
+  if (msg && msg->msg_name)
+    return false;
+
+  if (sk->sk_family == AF_INET6) {
+    if (ipv6_addr_loopback(&sk->sk_v6_daddr))
+      return false;
+  } else {
+    if (ipv4_is_loopback(inet_sk(sk)->inet_daddr))
+      return false;
+  }
+
+  dst = sk_dst_get(sk);
+  if (!dst)
+    return false;
+  vpn = dst->dev && is_active_vpn_ifindex(dst->dev->ifindex);
+  dst_release(dst);
+  return vpn;
+}
+
 static int udp_sendmsg_entry(struct kretprobe_instance *ri,
                              struct pt_regs *regs) {
   struct udp_sendmsg_data *data;
@@ -1008,7 +1044,8 @@ static int udp_sendmsg_entry(struct kretprobe_instance *ri,
   data->orig_sndbuf = sk->sk_sndbuf;
   data->spoofed = false;
 
-  if (msg->msg_flags & MSG_DONTWAIT) {
+  if ((msg->msg_flags & MSG_DONTWAIT) &&
+      vpnhide_udp_dst_is_vpn_bound(sk, msg)) {
     if (udp_rate_limit_exceeded(uid)) {
       sk->sk_sndbuf = 0;
       data->spoofed = true;
