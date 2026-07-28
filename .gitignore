@@ -46,3 +46,4 @@ scripts/__pycache__
 release.jks
 lsposed/.kotlin/sessions/kotlin-compiler*
 GKI_KernelSU_SUSFS_VPNHIDE_NEXT
+scripts/vpnhide_next_private.code-workspace
