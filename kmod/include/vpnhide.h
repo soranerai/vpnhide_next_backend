@@ -3,7 +3,7 @@
 
 #include <linux/types.h>
 
-#define VPNHIDE_VERSION_CODE 20103
+#define VPNHIDE_VERSION_CODE 20201
 
 
 #define MAX_TARGET_UIDS 512

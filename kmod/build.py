@@ -218,7 +218,7 @@ def native_build_one(
             """
         )
 
-    build_version = get_build_version(kmod_dir.parent)
+    build_version = "2.2.1"
 
     module_prop = staging / "module.prop"
     content = module_prop.read_text(encoding="utf-8")
