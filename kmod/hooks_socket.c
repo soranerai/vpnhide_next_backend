@@ -6,6 +6,14 @@ struct sock_setsockopt_data {
   bool override_ret;
   int deny_errno;
   bool intercepted;
+  void __user *optval_ptr;
+  int optlen;
+  union {
+    char orig_name[IFNAMSIZ];
+    int orig_ifindex;
+  };
+  bool has_modified_name;
+  bool has_modified_ifindex;
 };
 
 static int sys_setsockopt_entry(struct kretprobe_instance *ri,
@@ -13,7 +21,7 @@ static int sys_setsockopt_entry(struct kretprobe_instance *ri,
   struct sock_setsockopt_data *sdata;
   int fd, level, optname, optlen;
   void __user *optval_ptr;
-  char name[IFNAMSIZ];
+  char name[IFNAMSIZ] = {0};
 
   if (!is_hook_active(HOOK_SETSOCKOPT, from_kuid(&init_user_ns, current_uid())))
     return 1;
@@ -22,6 +30,10 @@ static int sys_setsockopt_entry(struct kretprobe_instance *ri,
   sdata->override_ret = false;
   sdata->deny_errno = 0;
   sdata->intercepted = false;
+  sdata->optval_ptr = NULL;
+  sdata->optlen = 0;
+  sdata->has_modified_name = false;
+  sdata->has_modified_ifindex = false;
 
   if (sys_setsockopt_uses_wrapper) {
     struct pt_regs *user_regs = (struct pt_regs *)regs->regs[0];
@@ -77,11 +89,30 @@ static int sys_setsockopt_entry(struct kretprobe_instance *ri,
       name[optlen] = '\0';
 
       if (is_active_vpn_ifname(name)) {
-        vpnhide_dbg("sys_setsockopt: denying SO_BINDTODEVICE to VPN iface '%s' with ENODEV\n",
+        char fake_name[IFNAMSIZ] = "nonexistent0";
+        vpnhide_dbg("sys_setsockopt: denying SO_BINDTODEVICE to VPN iface '%s' with ENODEV via userspace replace\n",
                     name);
-        sdata->override_ret = true;
-        sdata->deny_errno = ENODEV;
+        sdata->optval_ptr = optval_ptr;
+        sdata->optlen = optlen;
+        memcpy(sdata->orig_name, name, IFNAMSIZ);
+        sdata->has_modified_name = true;
         sdata->intercepted = true;
+
+        memset(fake_name + 12, 'x', IFNAMSIZ - 13);
+        fake_name[IFNAMSIZ - 1] = '\0';
+
+        if (copy_to_user(optval_ptr, fake_name, optlen)) {
+          if (sys_setsockopt_uses_wrapper) {
+            struct pt_regs *user_regs = (struct pt_regs *)regs->regs[0];
+            if (user_regs && (unsigned long)user_regs >= 0xFFFF000000000000ULL) {
+              user_regs->regs[4] = -1;
+            }
+          } else {
+            regs->regs[4] = -1;
+          }
+          sdata->override_ret = true;
+          sdata->deny_errno = ENODEV;
+        }
       }
     } else if (optname == SO_BINDTOIFINDEX) {
       int ifindex;
@@ -95,11 +126,30 @@ static int sys_setsockopt_entry(struct kretprobe_instance *ri,
         return 0;
 
       if (is_active_vpn_ifindex(ifindex)) {
-        vpnhide_dbg("sys_setsockopt: denying SO_BINDTOIFINDEX %d with ENODEV\n",
+        int fake_ifindex = 999999;
+        vpnhide_dbg("sys_setsockopt: denying SO_BINDTOIFINDEX %d with ENODEV via userspace replace\n",
                     ifindex);
-        sdata->override_ret = true;
-        sdata->deny_errno = ENODEV;
+        sdata->optval_ptr = optval_ptr;
+        sdata->optlen = optlen;
+        sdata->orig_ifindex = ifindex;
+        sdata->has_modified_ifindex = true;
         sdata->intercepted = true;
+
+        if (copy_to_user(optval_ptr, &fake_ifindex, sizeof(int))) {
+          vpnhide_dbg("sys_setsockopt: copy_to_user failed for SO_BINDTOIFINDEX, falling back to override_ret\n");
+          if (sys_setsockopt_uses_wrapper) {
+            struct pt_regs *user_regs = (struct pt_regs *)regs->regs[0];
+            if (user_regs && (unsigned long)user_regs >= 0xFFFF000000000000ULL) {
+              user_regs->regs[4] = -1;
+            }
+          } else {
+            regs->regs[4] = -1;
+          }
+          sdata->override_ret = true;
+          sdata->deny_errno = ENODEV;
+        } else {
+          vpnhide_dbg("sys_setsockopt: copy_to_user succeeded for SO_BINDTOIFINDEX (wrote %d)\n", fake_ifindex);
+        }
       }
     } else if (optname == SO_MARK) {
       int mark;
@@ -181,9 +231,25 @@ static int sys_setsockopt_entry(struct kretprobe_instance *ri,
 static int sys_setsockopt_ret(struct kretprobe_instance *ri,
                               struct pt_regs *regs) {
   struct sock_setsockopt_data *sdata = (void *)ri->data;
+
   if (sdata->intercepted) {
     record_kmod_intercept(from_kuid(&init_user_ns, current_uid()), 3);
   }
+
+  if (sdata->has_modified_name && sdata->optval_ptr) {
+    if (copy_to_user(sdata->optval_ptr, sdata->orig_name, sdata->optlen)) {
+      vpnhide_dbg("sys_setsockopt_ret: failed to restore original name in userspace\n");
+    } else {
+      vpnhide_dbg("sys_setsockopt_ret: successfully restored original name in userspace\n");
+    }
+  } else if (sdata->has_modified_ifindex && sdata->optval_ptr) {
+    if (copy_to_user(sdata->optval_ptr, &sdata->orig_ifindex, sizeof(int))) {
+      vpnhide_dbg("sys_setsockopt_ret: failed to restore original ifindex in userspace\n");
+    } else {
+      vpnhide_dbg("sys_setsockopt_ret: successfully restored original ifindex in userspace\n");
+    }
+  }
+
   if (sdata->override_ret) {
     regs_set_return_value(regs, sdata->deny_errno ? -sdata->deny_errno : 0);
   }
