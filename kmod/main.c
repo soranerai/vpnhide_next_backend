@@ -523,6 +523,9 @@ static ssize_t vpnhide_dev_read(struct file *file, char __user *buf,
       int i;
 
       offset += scnprintf(reader->buf + offset, 65536 - offset,
+                          "version_code: %d\n", VPNHIDE_VERSION_CODE);
+
+      offset += scnprintf(reader->buf + offset, 65536 - offset,
                           "java_hook_mask: %u\n", READ_ONCE(java_hooks_mask));
 
       offset += scnprintf(reader->buf + offset, 65536 - offset,
@@ -1079,6 +1082,14 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
       return -EFAULT;
     }
     mutex_unlock(&java_status_lock);
+    ret = 0;
+    break;
+  }
+
+  case VH_GET_VERSION: {
+    int version = VPNHIDE_VERSION_CODE;
+    if (copy_to_user((void __user *)arg, &version, sizeof(version)))
+      return -EFAULT;
     ret = 0;
     break;
   }

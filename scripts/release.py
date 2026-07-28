@@ -57,6 +57,15 @@ def update_module_prop(path: Path, version: str, version_code: int) -> None:
     )
 
 
+def update_version_header(path: Path, version_code: int) -> None:
+    patch_file(
+        path,
+        [
+            (re.compile(r"^#define VPNHIDE_VERSION_CODE \d+$", re.M), f"#define VPNHIDE_VERSION_CODE {version_code}"),
+        ],
+    )
+
+
 def main() -> int:
     console = Console()
     if len(sys.argv) != 2:
@@ -68,13 +77,27 @@ def main() -> int:
         f"[bold]Updating module version to v{version}[/bold] [dim](versionCode {version_code})[/dim]"
     )
 
-    module_prop = REPO_ROOT / "kmod/module/module.prop"
-    if not module_prop.exists():
-        console.print(f"[red]missing:[/red] {module_prop.relative_to(REPO_ROOT)}")
-        return 1
+    module_prop_kmod = REPO_ROOT / "kmod/module/module.prop"
+    module_prop_kpatch = REPO_ROOT / "kpatch/module/module.prop"
+    header_kmod = REPO_ROOT / "kmod/include/vpnhide.h"
+    header_kpatch = REPO_ROOT / "kpatch/security/vpnhide/vpnhide_uapi.h"
 
-    update_module_prop(module_prop, version, version_code)
+    for path in (module_prop_kmod, module_prop_kpatch, header_kmod, header_kpatch):
+        if not path.exists():
+            console.print(f"[red]missing:[/red] {path.relative_to(REPO_ROOT)}")
+            return 1
+
+    update_module_prop(module_prop_kmod, version, version_code)
     console.print("  [green]✓[/green] kmod/module/module.prop updated successfully")
+
+    update_module_prop(module_prop_kpatch, version, version_code)
+    console.print("  [green]✓[/green] kpatch/module/module.prop updated successfully")
+
+    update_version_header(header_kmod, version_code)
+    console.print("  [green]✓[/green] kmod/include/vpnhide.h updated successfully")
+
+    update_version_header(header_kpatch, version_code)
+    console.print("  [green]✓[/green] kpatch/security/vpnhide/vpnhide_uapi.h updated successfully")
 
     return 0
 

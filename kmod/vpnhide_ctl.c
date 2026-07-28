@@ -14,7 +14,7 @@
 void print_usage(const char *prog)
 {
 	fprintf(stderr,
-		"Usage: %s <load|targets|port_targets|lsposed_targets|port_rules|iface_prefixes|set_spoof_ip|debug|active_hooks|java_hooks|app_hooks|stats|stats_window> [args...]\n",
+		"Usage: %s <load|targets|port_targets|lsposed_targets|port_rules|iface_prefixes|set_spoof_ip|debug|active_hooks|java_hooks|app_hooks|stats|stats_window|version> [args...]\n",
 		prog);
 	fprintf(stderr, "  load format: <json_path> [self_uid]\n");
 	fprintf(stderr,
@@ -25,6 +25,7 @@ void print_usage(const char *prog)
 		"  app_hooks format: <uid> <has_kernel:0|1> <kernel_mask> <has_java:0|1> <java_mask> ...\n");
 	fprintf(stderr, "  proto: 0=TCP, 1=UDP, 2=BOTH\n");
 	fprintf(stderr, "  set_spoof_ip format: <ipv4|none> <ipv6|none>\n");
+	fprintf(stderr, "  version format: [ctl|kmod] (default: print both ctl and running kmod version)\n");
 }
 
 static int add_uid_distinct(uid_t *arr, int *count, uid_t uid)
@@ -67,6 +68,31 @@ int main(int argc, char **argv)
 	if (argc < 2) {
 		print_usage(argv[0]);
 		return 1;
+	}
+
+	if (strcmp(argv[1], "version") == 0) {
+		int kversion = -1;
+		int temp_fd = open("/dev/vpnhide_ctrl", O_RDONLY);
+		if (temp_fd >= 0) {
+			if (ioctl(temp_fd, VH_GET_VERSION, &kversion) < 0) {
+				kversion = -1;
+			}
+			close(temp_fd);
+		}
+		if (argc > 2) {
+			if (strcmp(argv[2], "ctl") == 0) {
+				printf("%d\n", VPNHIDE_VERSION_CODE);
+			} else if (strcmp(argv[2], "kmod") == 0) {
+				printf("%d\n", kversion);
+			} else {
+				fprintf(stderr, "Unknown version component: %s\n", argv[2]);
+				return 1;
+			}
+		} else {
+			printf("ctl: %d\n", VPNHIDE_VERSION_CODE);
+			printf("kmod: %d\n", kversion);
+		}
+		return 0;
 	}
 
 	fd = open("/dev/vpnhide_ctrl", O_RDWR);

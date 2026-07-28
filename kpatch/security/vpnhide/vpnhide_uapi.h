@@ -3,6 +3,8 @@
 
 #include <linux/types.h>
 
+#define VPNHIDE_VERSION_CODE 20103
+
 #define MAX_TARGET_UIDS 512
 #define MAX_PORT_RULES_PER_UID 16
 
@@ -60,6 +62,7 @@ struct vpnhide_spoof_ip {
 #define VH_SET_SPOOF_IP _IOW(VH_IOCTL_MAGIC, 0x08, struct vpnhide_spoof_ip)
 #define VH_SET_ACTIVE_HOOKS _IOW(VH_IOCTL_MAGIC, 0x09, unsigned int)
 #define VH_GET_ACTIVE_HOOKS _IOR(VH_IOCTL_MAGIC, 0x0A, unsigned int)
+#define VH_GET_VERSION _IOR(VH_IOCTL_MAGIC, 0x1E, int)
 
 struct vpnhide_uid_stats {
 	uid_t uid;
