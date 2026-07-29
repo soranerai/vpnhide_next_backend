@@ -22,7 +22,8 @@ queries Package Manager and targets every eligible application UID that is
 not selected for the corresponding layer. It never targets:
 
 - UID 0, UID 1000, or any UID below 10000;
-- the manager application's UID;
+- the manager application's UID in `BLACKLIST` mode (in `ALLOWLIST` it is
+  eligible unless selected explicitly);
 - packages whose APK is outside `/data/app/`.
 
 The last rule is intentionally conservative and protects system, privileged,
@@ -61,7 +62,8 @@ been removed. The corresponding GET ioctls remain read-only diagnostics.
 Port hiding follows the same `listMode`. In `BLACKLIST`, apps with
 `portHiding: true` are targeted. In `ALLOWLIST`, those apps are exceptions and
 all other eligible third-party applications are targeted. System packages,
-the manager UID, and isolated/system UIDs are never port targets. App-specific
+the manager UID in `BLACKLIST`, and isolated/system UIDs are never port
+targets. App-specific
 enabled `portRules` are combined with enabled `massPortRules`; an app with no
 resulting rule receives the legacy full-range TCP/UDP rule. Invalid ranges and
 rule-count overflow reject the configuration instead of truncating it.

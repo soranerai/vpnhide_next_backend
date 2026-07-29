@@ -352,7 +352,8 @@ static int resolve_layer(const JSON_Array *apps,
 		int selected = selected_for_layer(apps, pkg->name, pkg->user_id,
 						  pkg->uid, field);
 
-		if (pkg->system_package || pkg->uid == self_uid || pkg->uid < 10000) {
+		if (pkg->system_package || pkg->uid < 10000 ||
+		    (pkg->uid == self_uid && mode == VPNHIDE_LIST_BLACKLIST)) {
 			if (selected && pkg->system_package)
 				summary->ignored_selected_system_packages++;
 			if (pkg->system_package || pkg->uid < 10000)
@@ -561,7 +562,8 @@ int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
 	for (i = 0; i < package_count; i++) {
 		struct discovered_package *pkg = &packages[i];
 		int selected;
-		if (pkg->system_package || pkg->uid == self_uid || pkg->uid < 10000)
+		if (pkg->system_package || pkg->uid < 10000 ||
+		    (pkg->uid == self_uid && summary->mode == VPNHIDE_LIST_BLACKLIST))
 			continue;
 		selected = selected_for_layer(apps, pkg->name, pkg->user_id,
 					      pkg->uid, "portHiding");
