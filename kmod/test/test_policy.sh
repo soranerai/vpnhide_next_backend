@@ -7,7 +7,7 @@ OUT="/tmp/vpnhide-policy-test-$$"
 ABI_OUT="${OUT}.abi"
 trap 'rm -f "$OUT" "$ABI_OUT"' EXIT
 
-PM_COMMAND="printf 'package:/system/priv-app/Settings/Settings.apk=com.android.settings uid:1000\\npackage:/data/app/keep/base.apk=com.example.keep uid:10001\\npackage:/data/app/hide/base.apk=com.example.hide uid:10002\\n'"
+PM_COMMAND="printf 'package:/system/priv-app/Settings/Settings.apk=com.android.settings uid:1000\\npackage:/data/app/keep/base.apk=com.example.keep uid:10001\\npackage:/data/app/hide/base.apk=com.example.hide uid:10002\\npackage:/data/app/target/base.apk=com.example.target uid:10002\\n'"
 
 ${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror \
   -I"$REPO" -DVPNHIDE_PM_COMMAND="\"$PM_COMMAND\"" \

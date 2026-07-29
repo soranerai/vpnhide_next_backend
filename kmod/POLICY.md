@@ -68,4 +68,7 @@ rule-count overflow reject the configuration instead of truncating it.
 
 The daemon watches the JSON configuration directory and invokes the same
 `vpnhide-ctl load` path after an atomic config update, so frontend writes do
-not require a reboot or a separate privileged apply action.
+not require a reboot or a separate privileged apply action. It also watches
+Package Manager state files (`packages.xml`, `packages.list`, and per-user
+package restrictions), debounces bursts, and re-resolves the policy after
+install, uninstall, UID, or user changes.

@@ -310,6 +310,30 @@ static int selected_for_layer(const JSON_Array *apps, const char *package,
 	return 0;
 }
 
+static int configured_package_is_protected(const JSON_Object *app,
+					   const struct discovered_package *packages,
+					   int package_count)
+{
+	uid_t uid = (uid_t)json_object_get_number(app, "uid");
+	const char *name = json_object_get_string(app, "packageName");
+	int user_id = (int)json_object_get_number(app, "userId");
+	int found = 0;
+
+	if (uid && (uid % 100000) < 10000)
+		return 1;
+	for (int i = 0; i < package_count; i++) {
+		const struct discovered_package *pkg = &packages[i];
+		if ((uid && pkg->uid == uid) ||
+		    (name && !strcmp(pkg->name, name) && pkg->user_id == user_id)) {
+			found = 1;
+			if (pkg->system_package)
+				return 1;
+		}
+	}
+	/* A stale package entry must not be turned into a hiding target. */
+	return !found;
+}
+
 static int resolve_layer(const JSON_Array *apps,
 				 const struct discovered_package *packages, int package_count,
 				 const char *field, uid_t self_uid,
@@ -371,8 +395,12 @@ int vpnhide_resolve_targets(const JSON_Object *root, uid_t self_uid,
 	apps = json_object_get_array(root, "apps");
 
 	if (summary->mode == VPNHIDE_LIST_BLACKLIST) {
-		/* Preserve legacy semantics without requiring Package Manager. */
+		/* Blacklist entries also require PM classification. Without it, a
+		 * stale UID could now refer to a system/shared UID. */
 		JSON_Array *array = (JSON_Array *)apps;
+		ret = discover_packages(&packages, &package_count, error, error_len);
+		if (ret)
+			return ret;
 		size_t i, count = array ? json_array_get_count(array) : 0;
 		for (i = 0; i < count; i++) {
 			JSON_Object *app = json_array_get_object(array, i);
@@ -382,6 +410,13 @@ int vpnhide_resolve_targets(const JSON_Object *root, uid_t self_uid,
 			uid = (uid_t)json_object_get_number(app, "uid");
 			if (!uid || uid == 0)
 				continue;
+			if (configured_package_is_protected(app, packages, package_count)) {
+				if ((uid % 100000) < 10000)
+					summary->protected_packages++;
+				else
+					summary->ignored_selected_system_packages++;
+				continue;
+			}
 			if (json_object_get_boolean(app, "kmod") == 1 &&
 			    add_uid_distinct(kmod->uids, &kmod->count, uid)) {
 				set_error(error, error_len, "blacklist target set exceeds MAX_TARGET_UIDS");
@@ -393,6 +428,7 @@ int vpnhide_resolve_targets(const JSON_Object *root, uid_t self_uid,
 				return -E2BIG;
 			}
 		}
+		free(packages);
 		if (self_uid) {
 			if (add_uid_distinct(kmod->uids, &kmod->count, self_uid) ||
 			    add_uid_distinct(lsposed->uids, &lsposed->count, self_uid)) {
@@ -451,6 +487,9 @@ int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
 	if (summary->mode == VPNHIDE_LIST_BLACKLIST) {
 		size_t n = apps ? json_array_get_count(apps) : 0;
 		size_t j;
+		ret = discover_packages(&packages, &package_count, error, error_len);
+		if (ret)
+			return ret;
 		for (j = 0; j < n; j++) {
 			JSON_Object *app = json_array_get_object(apps, j);
 			struct vpnhide_uid_port_rules *target;
@@ -459,6 +498,8 @@ int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
 				continue;
 			uid = (uid_t)json_object_get_number(app, "uid");
 			if (!uid || uid == self_uid || uid < 10000)
+				continue;
+			if (configured_package_is_protected(app, packages, package_count))
 				continue;
 			if (result->count >= MAX_TARGET_UIDS) {
 				set_error(error, error_len, "port target set exceeds MAX_TARGET_UIDS");
@@ -506,6 +547,7 @@ int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
 			}
 			result->count++;
 		}
+		free(packages);
 		summary->port_targets = result->count;
 		return 0;
 	}
@@ -522,6 +564,12 @@ int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
 					      pkg->uid, "portHiding");
 		if (selected)
 			continue;
+		/* Several packages may share one UID. Port policy is keyed by UID,
+		 * so resolve that UID only once rather than emitting duplicate rules. */
+		for (int existing = 0; existing < result->count; existing++) {
+			if (result->targets[existing].uid == pkg->uid)
+				goto next_package;
+		}
 		if (result->count >= MAX_TARGET_UIDS) {
 			free(packages);
 			set_error(error, error_len, "port target set exceeds MAX_TARGET_UIDS");
@@ -534,6 +582,8 @@ int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
 			return ret;
 		}
 		result->count++;
+	next_package:
+		;
 	}
 	free(packages);
 	summary->port_targets = result->count;
