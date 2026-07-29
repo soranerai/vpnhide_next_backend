@@ -64,6 +64,8 @@ struct vpnhide_spoof_ip {
 #define VH_SET_TARGETS _IOW(VH_IOCTL_MAGIC, 0x01, struct vpnhide_ioctl_data)
 #define VH_SET_TARGET_BUNDLE \
 	_IOW(VH_IOCTL_MAGIC, 0x20, struct vpnhide_target_bundle)
+#define VH_SET_POLICY \
+	_IOW(VH_IOCTL_MAGIC, 0x21, struct vpnhide_policy_ioctl)
 #define VH_SET_DEBUG _IOW(VH_IOCTL_MAGIC, 0x03, int)
 #define VH_SET_PORT_TARGETS \
 	_IOW(VH_IOCTL_MAGIC, 0x05, struct vpnhide_ioctl_data)
@@ -156,6 +158,25 @@ struct vpnhide_app_hook_mask {
 struct vpnhide_app_hook_ioctl_data {
 	int count;
 	struct vpnhide_app_hook_mask masks[MAX_TARGET_UIDS];
+};
+
+#define VPNHIDE_POLICY_ABI_VERSION 1
+struct vpnhide_policy_payload {
+	struct vpnhide_target_bundle targets;
+	struct vpnhide_port_ioctl_data ports;
+	struct vpnhide_iface_ioctl_data iface_prefixes;
+	struct vpnhide_app_hook_ioctl_data app_hook_masks;
+	__u32 active_hooks_mask;
+	__u32 java_hooks_mask;
+	__u32 debug_enabled;
+	__u32 flags;
+};
+
+struct vpnhide_policy_ioctl {
+	__u32 abi_version;
+	__u32 payload_size;
+	__u64 payload_ptr;
+	__u64 expected_generation;
 };
 
 #define VH_SET_APP_HOOK_MASKS \

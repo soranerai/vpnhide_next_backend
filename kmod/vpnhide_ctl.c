@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -206,6 +207,9 @@ int main(int argc, char **argv)
 		struct vpnhide_target_bundle target_bundle;
 		struct vpnhide_port_ioctl_data pdata;
 		struct vpnhide_app_hook_ioctl_data app_hook_masks;
+		struct vpnhide_iface_ioctl_data idata;
+		struct vpnhide_policy_payload *payload;
+		struct vpnhide_policy_ioctl policy_request;
 		struct vpnhide_policy_summary policy_summary;
 		char policy_error[256];
 		int policy_ret;
@@ -214,6 +218,7 @@ int main(int argc, char **argv)
 		memset(&target_bundle, 0, sizeof(target_bundle));
 		memset(&pdata, 0, sizeof(pdata));
 		memset(&app_hook_masks, 0, sizeof(app_hook_masks));
+		memset(&idata, 0, sizeof(idata));
 		memset(policy_error, 0, sizeof(policy_error));
 
 		if (apps) {
@@ -282,26 +287,6 @@ int main(int argc, char **argv)
 			policy_summary.kmod_targets, policy_summary.lsposed_targets,
 			policy_summary.protected_packages);
 
-		/* No kernel state is changed until policy resolution has succeeded. */
-		if (have_global_config) {
-			if (ioctl(fd, VH_SET_ACTIVE_HOOKS, &kernel_mask) < 0) {
-				perror("VH_SET_ACTIVE_HOOKS");
-				apply_failed = 1;
-			}
-			if (ioctl(fd, VH_SET_JAVA_HOOK_MASK, &java_mask) < 0) {
-				perror("VH_SET_JAVA_HOOK_MASK");
-				apply_failed = 1;
-			}
-			if (ioctl(fd, VH_SET_DEBUG, &debug_logging) < 0) {
-				perror("VH_SET_DEBUG");
-				apply_failed = 1;
-			}
-		}
-
-		if (ioctl(fd, VH_SET_APP_HOOK_MASKS, &app_hook_masks) < 0) {
-			perror("VH_SET_APP_HOOK_MASKS");
-			apply_failed = 1;
-		}
 		sort_uids(targets.uids, targets.count);
 		sort_uids(lsposed.uids, lsposed.count);
 		target_bundle.kmod_count = targets.count;
@@ -311,15 +296,8 @@ int main(int argc, char **argv)
 		memcpy(target_bundle.lsposed_uids, lsposed.uids,
 		       lsposed.count * sizeof(lsposed.uids[0]));
 
-		if (ioctl(fd, VH_SET_TARGET_BUNDLE, &target_bundle) < 0) {
-			perror("VH_SET_TARGET_BUNDLE");
-			apply_failed = 1;
-		}
-
 		// 3. Interface prefixes
 		JSON_Array *prefixes = json_object_get_array(root, "ifacePrefixes");
-		struct vpnhide_iface_ioctl_data idata;
-		memset(&idata, 0, sizeof(idata));
 		if (prefixes) {
 			size_t prefixes_count = json_array_get_count(prefixes);
 			idata.count = prefixes_count < MAX_IFACE_PREFIXES ? prefixes_count : MAX_IFACE_PREFIXES;
@@ -331,21 +309,35 @@ int main(int argc, char **argv)
 				}
 			}
 		}
-		if (ioctl(fd, VH_SET_IFACE_PREFIXES, &idata) < 0) {
-			perror("VH_SET_IFACE_PREFIXES");
-			apply_failed = 1;
+		payload = calloc(1, sizeof(*payload));
+		if (!payload) {
+			perror("calloc policy payload");
+			json_value_free(root_value);
+			close(fd);
+			return 1;
 		}
+		payload->targets = target_bundle;
+		payload->ports = pdata;
+		payload->iface_prefixes = idata;
+		payload->app_hook_masks = app_hook_masks;
+		payload->active_hooks_mask = have_global_config ? kernel_mask : 0xFFFFFFFFu;
+		payload->java_hooks_mask = have_global_config ? java_mask : 0xFFFFFFFFu;
+		payload->debug_enabled = have_global_config ? !!debug_logging : 0;
 
-		// 4. Port rules
-		if (ioctl(fd, VH_SET_PORT_RULES, &pdata) < 0) {
-			perror("VH_SET_PORT_RULES");
+		memset(&policy_request, 0, sizeof(policy_request));
+		policy_request.abi_version = VPNHIDE_POLICY_ABI_VERSION;
+		policy_request.payload_size = sizeof(*payload);
+		policy_request.payload_ptr = (uintptr_t)payload;
+		if (ioctl(fd, VH_SET_POLICY, &policy_request) < 0) {
+			perror("VH_SET_POLICY");
 			apply_failed = 1;
 		}
+		free(payload);
 
 		json_value_free(root_value);
 		close(fd);
 		if (apply_failed) {
-			fprintf(stderr, "Configuration apply failed; active kernel state may be mixed.\n");
+			fprintf(stderr, "Configuration apply failed; previous policy was retained only if the kernel rejected before commit.\n");
 			return 1;
 		}
 		return 0;

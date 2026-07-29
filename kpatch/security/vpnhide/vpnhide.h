@@ -64,7 +64,7 @@ extern unsigned int active_hooks_mask;
 
 #define vpnhide_dbg(fmt, ...)                                  \
 	do {                                                   \
-		if (READ_ONCE(debug_enabled))                  \
+		if (vpnhide_debug_is_enabled())                \
 			pr_info(MODNAME ": " fmt, ##__VA_ARGS__); \
 	} while (0)
 
@@ -124,6 +124,11 @@ struct vpnhide_port_targets {
 struct vpnhide_iface_prefixes {
 	int count;
 	char prefixes[MAX_IFACE_PREFIXES][MAX_IFACE_LEN];
+	struct rcu_head rcu;
+};
+
+struct vpnhide_policy_snapshot {
+	struct vpnhide_policy_payload payload;
 	struct rcu_head rcu;
 };
 
@@ -192,6 +197,8 @@ extern spinlock_t port_targets_update_lock;
 
 extern struct vpnhide_iface_prefixes __rcu *global_iface_prefixes;
 extern spinlock_t iface_prefixes_lock;
+extern struct vpnhide_policy_snapshot __rcu *global_policy_snapshot;
+extern spinlock_t policy_snapshot_lock;
 
 extern struct vpnhide_spoof_ip_rcu __rcu *global_spoof_ip;
 extern spinlock_t spoof_ip_lock;
@@ -212,10 +219,15 @@ extern atomic_t stats_bucket_secs;
 
 bool lookup_app_kernel_mask(uid_t uid, unsigned int *out);
 bool is_hook_active(enum vpnhide_hook_idx index, uid_t uid);
+bool vpnhide_debug_is_enabled(void);
+unsigned int vpnhide_active_hooks_mask(void);
+unsigned int vpnhide_java_hooks_mask(void);
 bool is_active_vpn_ifindex(u32 ifindex);
 bool is_active_vpn_ifname(const char *name);
 bool is_target_uid_val(uid_t uid);
 bool is_target_uid(void);
+int vpnhide_apply_policy(const struct vpnhide_policy_payload *payload,
+			 u64 expected_generation);
 void record_kmod_intercept(uid_t uid, int type);
 void get_spoof_ip(struct vpnhide_spoof_ip *dst);
 int  update_spoof_ip(const struct vpnhide_spoof_ip *sip);

@@ -26,8 +26,12 @@ not selected for the corresponding layer. It never targets:
 - packages whose APK is outside `/data/app/`.
 
 The last rule is intentionally conservative and protects system, privileged,
-APEX, vendor, product, and shared system UID groups. A selected system package
-is reported as ignored rather than being forced into the target set.
+APEX, vendor, product, and shared system UID groups. The resolver also asks
+Package Manager for the authoritative system-package set, so updated system
+APKs under `/data/app/` and every package sharing a protected UID are excluded.
+UID protection uses the appId component (`uid % 100000`) for secondary users.
+A selected system package is reported as ignored rather than being forced into
+the target set.
 
 Use the userspace preview before applying a policy:
 
@@ -41,11 +45,18 @@ The current kernel ABI still limits each effective UID snapshot to
 larger result. Removing this limit requires a staged/committed kernel UAPI and
 must be implemented consistently in kmod and kpatch.
 
-The current `load` path validates the complete policy before issuing ioctls
-and applies kernel and LSPosed target snapshots through
-`VH_SET_TARGET_BUNDLE`. Hook masks, interface prefixes, and port rules still
-have independent ioctls; making the entire configuration one transaction is
-the next ABI step.
+The `load` path resolves and validates the complete policy, builds a versioned
+`struct vpnhide_policy_payload`, and commits it with one `VH_SET_POLICY`
+ioctl. The ioctl carries an explicit pointer and length because the complete
+payload is larger than the size field available in the encoded ioctl command.
+The kernel copies the payload, validates all counts/ranges, sorts target UIDs,
+and publishes one immutable RCU snapshot. Readers therefore observe either
+the previous generation or the complete new generation. `expected_generation`
+may be used by a future controller to reject a stale commit with `-EAGAIN`.
+
+The old component ioctls remain as a legacy ABI for diagnostics and older
+controllers. New policy loads must use `VH_SET_POLICY`; legacy component
+updates are not a transaction and must not be mixed with a declarative load.
 
 Port hiding follows the same `listMode`. In `BLACKLIST`, apps with
 `portHiding: true` are targeted. In `ALLOWLIST`, those apps are exceptions and

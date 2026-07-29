@@ -13,6 +13,9 @@
 #ifndef VPNHIDE_PM_COMMAND
 #define VPNHIDE_PM_COMMAND "pm list packages -f -U --user all 2>/dev/null"
 #endif
+#ifndef VPNHIDE_PM_SYSTEM_COMMAND
+#define VPNHIDE_PM_SYSTEM_COMMAND "pm list packages -s -U --user all 2>/dev/null"
+#endif
 #define VPNHIDE_PACKAGE_NAME_MAX 256
 #define VPNHIDE_APK_PATH_MAX 512
 
@@ -21,6 +24,7 @@ struct discovered_package {
 	char apk_path[VPNHIDE_APK_PATH_MAX];
 	uid_t uid;
 	int user_id;
+	unsigned int app_id;
 	int system_package;
 };
 
@@ -192,8 +196,38 @@ static int parse_pm_line(char *line, struct discovered_package *out)
 	strcpy(out->name, equals + 1);
 	out->uid = (uid_t)uid;
 	out->user_id = (int)(uid / 100000);
-	out->system_package = package_is_system(out->apk_path);
+	out->app_id = (unsigned int)(uid % 100000);
+	out->system_package = package_is_system(out->apk_path) || out->app_id < 10000;
 	return 1;
+}
+
+static void mark_system_packages(struct discovered_package *packages, int count)
+{
+	char line[1024];
+	FILE *pipe = popen(VPNHIDE_PM_SYSTEM_COMMAND, "r");
+
+	if (!pipe)
+		return;
+	while (fgets(line, sizeof(line), pipe)) {
+		char *name = strstr(line, "package:");
+		char *uid_marker = strstr(line, " uid:");
+		char *end;
+		long uid;
+		if (!name || !uid_marker)
+			continue;
+		name += strlen("package:");
+		*uid_marker = '\0';
+		uid_marker += strlen(" uid:");
+		uid = strtol(uid_marker, &end, 10);
+		if (end == uid_marker || uid <= 0 || uid > UINT_MAX)
+			continue;
+		for (int i = 0; i < count; i++) {
+			if ((uid_t)uid == packages[i].uid ||
+			    !strcmp(name, packages[i].name))
+				packages[i].system_package = 1;
+		}
+	}
+	pclose(pipe);
 }
 
 static int discover_packages(struct discovered_package **out, int *count,
@@ -242,6 +276,10 @@ static int discover_packages(struct discovered_package **out, int *count,
 		set_error(error, error_len, "Package Manager returned no packages");
 		return -EIO;
 	}
+	/* The APK path alone cannot identify updated system packages or shared
+	 * system UIDs. Ask Package Manager for the authoritative system set and
+	 * protect the whole UID group when any member is system. */
+	mark_system_packages(packages, *count);
 	*out = packages;
 	return 0;
 }

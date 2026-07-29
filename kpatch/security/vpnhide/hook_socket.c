@@ -258,12 +258,15 @@ EXPORT_SYMBOL_GPL(vpnhide_getsockopt_post);
 static bool should_block_port(uid_t uid, __be16 port_be, bool is_ipv6)
 {
 	struct vpnhide_port_targets *pt;
+	struct vpnhide_policy_snapshot *snapshot;
 	u16 port = ntohs(port_be);
 	bool block = false;
 	int i, j;
 
 	rcu_read_lock();
-	pt = rcu_dereference(global_port_targets);
+	snapshot = rcu_dereference(global_policy_snapshot);
+	pt = snapshot ? (struct vpnhide_port_targets *)&snapshot->payload.ports :
+			rcu_dereference(global_port_targets);
 	if (!pt)
 		goto out;
 
@@ -291,7 +294,7 @@ int vpnhide_connect_pre(struct socket *sock,
 	uid_t uid;
 	sa_family_t family;
 
-	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_CONNECT)))
+	if (!(vpnhide_active_hooks_mask() & BIT(HOOK_CONNECT)))
 		return 0;
 	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_CONNECT, uid))
@@ -334,7 +337,7 @@ int vpnhide_bind_pre(struct socket *sock,
 	uid_t uid;
 	sa_family_t family;
 
-	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_BIND)))
+	if (!(vpnhide_active_hooks_mask() & BIT(HOOK_BIND)))
 		return 0;
 	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_BIND, uid))
@@ -483,7 +486,7 @@ bool vpnhide_udpv6_sendmsg_ll(struct sock *sk, struct msghdr *msg)
 	uid_t uid;
 	u32 oifindex;
 
-	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_UDPV6_SENDMSG)))
+	if (!(vpnhide_active_hooks_mask() & BIT(HOOK_UDPV6_SENDMSG)))
 		return false;
 	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_UDPV6_SENDMSG, uid))
@@ -601,7 +604,7 @@ bool vpnhide_udp_sendmsg(struct sock *sk)
 	int regen;
 	bool drop = false;
 
-	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_UDP_SENDMSG)))
+	if (!(vpnhide_active_hooks_mask() & BIT(HOOK_UDP_SENDMSG)))
 		return false;
 
 	/* Probe sockets (IP_MTU_DISCOVER / UDP_SEGMENT intercepted) must not

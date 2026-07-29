@@ -80,7 +80,7 @@ void vpnhide_bpf_lookup_elem(struct bpf_map *map, void *key, void *value)
 
 	if (!map || !key || !value)
 		return;
-	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_BPF)))
+	if (!(vpnhide_active_hooks_mask() & BIT(HOOK_BPF)))
 		return;
 	uid = from_kuid(&init_user_ns, current_uid());
 	/* The target process itself must see its own real traffic — only
@@ -146,7 +146,7 @@ void vpnhide_bpf_lookup_batch(struct bpf_map *map,
 
 	if (!map || !attr || !uattr)
 		return;
-	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_BPF)))
+	if (!(vpnhide_active_hooks_mask() & BIT(HOOK_BPF)))
 		return;
 	uid = from_kuid(&init_user_ns, current_uid());
 	/* The target process itself must see its own real traffic. */
@@ -216,7 +216,7 @@ bool vpnhide_getdents64(unsigned int fd,
 
 	if (nbytes <= 0)
 		return false;
-	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_GETDENTS64)))
+	if (!(vpnhide_active_hooks_mask() & BIT(HOOK_GETDENTS64)))
 		return false;
 	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_GETDENTS64, uid))
@@ -281,7 +281,7 @@ bool vpnhide_should_hide_path(const struct path *path)
 	uid_t uid;
 
 	/* Fast exits — avoid RCU + binary search on every filename_lookup */
-	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_OPENAT)))
+	if (!(vpnhide_active_hooks_mask() & BIT(HOOK_OPENAT)))
 		return false;
 
 	uid = from_kuid(&init_user_ns, current_uid());
@@ -316,7 +316,7 @@ bool vpnhide_filter_sysctl(struct inode *dir,
 	uid_t uid;
 
 	/* Fast exits */
-	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_OPENAT)))
+	if (!(vpnhide_active_hooks_mask() & BIT(HOOK_OPENAT)))
 		return false;
 
 	uid = from_kuid(&init_user_ns, current_uid());

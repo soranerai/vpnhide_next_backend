@@ -4,7 +4,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 OUT="/tmp/vpnhide-policy-test-$$"
-trap 'rm -f "$OUT"' EXIT
+ABI_OUT="${OUT}.abi"
+trap 'rm -f "$OUT" "$ABI_OUT"' EXIT
 
 PM_COMMAND="printf 'package:/system/priv-app/Settings/Settings.apk=com.android.settings uid:1000\\npackage:/data/app/keep/base.apk=com.example.keep uid:10001\\npackage:/data/app/hide/base.apk=com.example.hide uid:10002\\n'"
 
@@ -12,6 +13,10 @@ ${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror \
   -I"$REPO" -DVPNHIDE_PM_COMMAND="\"$PM_COMMAND\"" \
   "$REPO/vpnhide_ctl.c" "$REPO/vpnhide_policy.c" "$REPO/parson.c" \
   -o "$OUT"
+
+${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror \
+  -I"$REPO" "$HERE/test_policy_abi.c" -o "$ABI_OUT"
+"$ABI_OUT" >/dev/null
 
 OUTPUT="$($OUT validate "$HERE/policy_allowlist.json" 10003)"
 grep -q '^mode=ALLOWLIST$' <<<"$OUTPUT"
