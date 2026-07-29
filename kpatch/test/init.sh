@@ -27,6 +27,7 @@ echo "KREL=$(uname -r)"
 
 # Add a non-root Android-style app user with UID 115555 (user 1, appId 15555)
 echo "testuser:x:115555:115555:testuser:/home/testuser:/bin/sh" >> /etc/passwd
+echo "testallow:x:115556:115556:testallow:/home/testallow:/bin/sh" >> /etc/passwd
 
 # --- bring up user-mode networking ----------------------------------------
 ip link set lo up 2>/dev/null
@@ -59,11 +60,29 @@ cat > "$TEST_CONFIG" <<'EOF'
   "portRules": [{"enabled":true, "packageName":"com.vpnhide.test", "userId":1, "startPort":8080, "endPort":8080, "protocol":"BOTH"}]
 }
 EOF
-export VPNHIDE_PM_COMMAND="echo 'package:/data/app/test/base.apk=com.vpnhide.test uid:115555'"
+export VPNHIDE_PM_COMMAND="echo 'package:/data/app/test/base.apk=com.vpnhide.test uid:115555'; echo 'package:/data/app/keep/base.apk=com.vpnhide.keep uid:115556'; echo 'package:/system/priv-app/Settings/Settings.apk=com.android.settings uid:1000'"
 apply_policy() {
 	/vpnhide-ctl load "$TEST_CONFIG" 0
 	rc=$?
 	echo "POLICY_APPLY_RC=$rc"
+	return "$rc"
+}
+ALLOWLIST_CONFIG=/tmp/vpnhide-test-allowlist.json
+cat > "$ALLOWLIST_CONFIG" <<'EOF'
+{
+  "globalConfig": {"listMode":"ALLOWLIST", "kernelHookMask":4294967295, "javaHookMask":4294967295, "debugLogging":1},
+  "ifacePrefixes": ["vpn"],
+  "apps": [
+    {"packageName":"com.vpnhide.keep", "userId":1, "uid":115556, "kmod":true, "lsposed":true, "portHiding":true},
+    {"packageName":"com.vpnhide.test", "userId":1, "uid":115555, "kmod":false, "lsposed":false, "portHiding":false}
+  ],
+  "portRules": [{"enabled":true, "packageName":"com.vpnhide.test", "userId":1, "startPort":8080, "endPort":8080, "protocol":"BOTH"}]
+}
+EOF
+apply_allowlist() {
+	/vpnhide-ctl load "$ALLOWLIST_CONFIG" 0
+	rc=$?
+	echo "ALLOWLIST_APPLY_RC=$rc"
 	return "$rc"
 }
 REGISTERED=1
@@ -139,6 +158,32 @@ while read -r line; do
         "RESULT "*=FAIL*)  FAIL=$((FAIL + 1))  ;;
     esac
 done < /tmp/py_res.log
+
+# --- end-to-end allowlist check --------------------------------------------
+# testallow is selected and must retain visibility; testuser is unselected
+# and must receive the same hiding treatment as the blacklist target.
+apply_allowlist
+_al_nt=$(ip addr show 2>/dev/null | grep -c -- "vpn0")
+_al_keep=$(su testallow -c "ip addr show" 2>/dev/null | grep -c -- "vpn0")
+_al_target=$(su testuser -c "ip addr show" 2>/dev/null | grep -c -- "vpn0")
+if [ "$_al_nt" -gt 0 ] && [ "$_al_keep" -gt 0 ] && [ "$_al_target" -eq 0 ]; then
+    echo "RESULT allowlist_visibility=PASS (root=$_al_nt allowlisted=$_al_keep target=$_al_target)"
+    PASS=$((PASS + 1))
+else
+    echo "RESULT allowlist_visibility=FAIL (root=$_al_nt allowlisted=$_al_keep target=$_al_target)"
+    FAIL=$((FAIL + 1))
+fi
+
+# The existing programmatic vectors now run against the unselected UID 115555
+# under the allowlist snapshot, including port and socket policy.
+python3 /vector_tests.py > /tmp/py_allowlist_res.log 2>&1
+cat /tmp/py_allowlist_res.log
+while read -r line; do
+    case "$line" in
+        "RESULT "*=PASS*) PASS=$((PASS + 1)) ;;
+        "RESULT "*=FAIL*) FAIL=$((FAIL + 1)) ;;
+    esac
+done < /tmp/py_allowlist_res.log
 
 PANIC=$(dmesg | grep -ci 'Unable to handle\|Internal error\|Oops\|BUG:\|Kernel panic')
 echo "=== DAEMON LOG ==="
