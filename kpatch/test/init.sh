@@ -91,7 +91,7 @@ PASS=0
 FAIL=0
 
 # check <name> <shell-command> <grep-pattern>
-# Asserts: non-target (root) SEES the pattern; target UID 5555 does NOT.
+# Asserts: non-target (root) SEES the pattern; target UID 115555 does NOT.
 check() {
     _name=$1
     _cmd=$2

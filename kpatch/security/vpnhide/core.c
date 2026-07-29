@@ -561,6 +561,7 @@ int vpnhide_apply_policy(const struct vpnhide_policy_payload *payload,
 			 u64 expected_generation)
 {
 	struct vpnhide_policy_snapshot *snapshot, *old_snapshot;
+	int i, j;
 
 	if (!payload || payload->targets.kmod_count < 0 ||
 	    payload->targets.kmod_count > MAX_TARGET_UIDS ||
@@ -576,11 +577,11 @@ int vpnhide_apply_policy(const struct vpnhide_policy_payload *payload,
 	    (u64)atomic_read(&vpnhide_config_generation))
 		return -EAGAIN;
 
-	for (int i = 0; i < payload->ports.count; i++) {
+	for (i = 0; i < payload->ports.count; i++) {
 		const struct vpnhide_uid_port_rules *target = &payload->ports.targets[i];
 		if (target->rule_count < 0 || target->rule_count > MAX_PORT_RULES_PER_UID)
 			return -EINVAL;
-		for (int j = 0; j < target->rule_count; j++) {
+		for (j = 0; j < target->rule_count; j++) {
 			const struct vpnhide_port_rule *rule = &target->rules[j];
 			if (rule->start_port > rule->end_port ||
 			    rule->protocol > VH_PROTO_BOTH)

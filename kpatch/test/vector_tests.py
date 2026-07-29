@@ -67,7 +67,7 @@ def test_dev_ioctl(vpn0_idx):
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             try:
                 socket.if_nametoindex("vpn0")
                 print("FAIL: dev_ioctl if_nametoindex target succeeded but should have failed")
@@ -120,7 +120,7 @@ def test_setsockopt(vpn0_idx):
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             s_tgt = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
                 s_tgt.setsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE, b"vpn0")
@@ -165,7 +165,7 @@ def test_getsockopt(vpn0_idx):
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             val = s_dev.getsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE, 256)
             clean_val = val.strip(b"\x00")
             print(f"[getsockopt] Target getsockopt(SO_BINDTODEVICE) returned: {clean_val!r} (expected: empty)")
@@ -215,7 +215,7 @@ def test_getsockname():
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             ip4, _ = s_v4.getsockname()
             print(f"[getsockname] Target getsockname IPv4: {ip4} (expected: spoofed/shielded)")
             if ip4 == "10.9.0.1":
@@ -265,7 +265,7 @@ def test_connect_port_block():
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             s_tgt = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s_tgt.settimeout(2.0)
             try:
@@ -295,7 +295,7 @@ def test_bind_port_block():
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
@@ -463,7 +463,7 @@ def test_bpf_laundering(vpn0_idx):
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             vpn_val = lookup_map_elem(map_fd, vpn0_idx)
             eth_val = lookup_map_elem(map_fd, eth0_idx)
             print(f"[BPF Target] vpn0: rx={vpn_val.rxBytes}, tx={vpn_val.txBytes}")
@@ -505,7 +505,7 @@ def test_proc_sys_net():
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             ipv4_conf = os.listdir("/proc/sys/net/ipv4/conf")
             ipv6_neigh = os.listdir("/proc/sys/net/ipv6/neigh")
             with open("/proc/net/dev") as f:
@@ -556,7 +556,7 @@ def test_udp_queue_pressure():
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             s_tgt = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s_tgt.setblocking(False)
             success_count = 0
@@ -636,11 +636,11 @@ def test_tc_qdisc(vpn0_idx):
         print(f"FAIL: tc_qdisc non-target netlink: {e}")
         return False
 
-    # Target (uid 5555): vpn0 must NOT appear
+    # Target (uid 115555): vpn0 must NOT appear
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             indexes = netlink_dump_qdiscs()
             print(f"[tc_qdisc] Target RTM_GETQDISC ifindexes: {sorted(indexes)}")
             if vpn0_idx in indexes:
@@ -688,7 +688,7 @@ def test_pmtu_discover():
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             # Must not raise — hook returns 0
             s.setsockopt(socket.IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DO)
@@ -717,7 +717,7 @@ def test_gso_asymmetry():
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             # Must not raise — hook returns 0 silently
             s.setsockopt(SOL_UDP, UDP_SEGMENT, 1200)
@@ -755,7 +755,7 @@ def test_ipv6_link_local(vpn0_idx):
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
             s.bind(("fe80::1", 0, 0, vpn0_idx))
             s.close()
@@ -797,7 +797,7 @@ def test_tcp_info_mss():
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             buf = s.getsockopt(socket.IPPROTO_TCP, TCP_INFO, 24)
             s.close()
@@ -894,11 +894,11 @@ def test_netlink_getrule(vpn0_name):
         print(f"FAIL: netlink_getrule non-target: {e}")
         return False
 
-    # Target (uid 5555): no vpn0 rules must appear
+    # Target (uid 115555): no vpn0 rules must appear
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             rules = _netlink_dump_rules()
             vpn_rules = [r for r in rules if _rule_matches_vpn(r[0], r[1], vpn_bytes)]
             print(f"[netlink_getrule] Target: vpn0 rules visible: {len(vpn_rules)}")
@@ -921,12 +921,12 @@ def test_netlink_getrule_uid_leak(vpn0_name):
     """RTM_GETRULE must not expose UID split-routing rules to target UID."""
     print("\n--- netlink_getrule_uid_leak checks ---")
 
-    # Target (uid 5555): UID split-routing rules (table > 100, not 253/254/255)
+    # Target (uid 115555): UID split-routing rules (table > 100, not 253/254/255)
     # pointing to any app uid range must be hidden
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             rules = _netlink_dump_rules()
             leaked = []
             for iif, oif, uid_start, uid_end, table in rules:

@@ -83,19 +83,19 @@ PASS=0
 FAIL=0
 
 # check <name> <shell-command> <grep-pattern>
-# Asserts: non-target UID (root/0) sees the pattern, target UID (testuser/5555) does not.
+# Asserts: non-target UID (root/0) sees the pattern, target UID (testuser/115555) does not.
 check() {
 	_name=$1
 	_cmd=$2
 	_pat=$3
 	
-	# 1. Set UID 5555 as the target in the kernel module
+	# 1. Set UID 115555 as the target in the kernel module
 	apply_policy
 	
 	# 2. Non-target check (run as root / UID 0)
 	_nt=$(eval "$_cmd" 2>/dev/null | grep -c -- "$_pat")
 	
-	# 3. Target check (run as testuser / UID 5555)
+	# 3. Target check (run as testuser / UID 115555)
 	_tg=$(su testuser -c "$_cmd" 2>/dev/null | grep -c -- "$_pat")
 	
 	if [ "$_nt" -gt 0 ] && [ "$_tg" -eq 0 ]; then
@@ -121,7 +121,7 @@ check proc_net_dev    "cat /proc/net/dev"            "vpn0"   # dev_seq_show
 check proc_net_if_in6 "cat /proc/net/if_inet6"       "vpn0"   # if6_seq_show
 
 # --- execute programmatic socket and ioctl vector tests in Python ---
-# 1. Set targets and configure port rules for UID 5555
+# 1. Set targets and configure port rules for UID 115555
 apply_policy
 
 # 2. Run vector_tests.py and process its output
