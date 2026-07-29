@@ -10,13 +10,15 @@
 
 #include "include/vpnhide.h"
 #include "parson.h"
+#include "vpnhide_policy.h"
 
 void print_usage(const char *prog)
 {
 	fprintf(stderr,
-		"Usage: %s <load|targets|port_targets|lsposed_targets|port_rules|iface_prefixes|set_spoof_ip|debug|active_hooks|java_hooks|app_hooks|stats|stats_window|version> [args...]\n",
+		"Usage: %s <load|validate|preview|targets|port_targets|lsposed_targets|port_rules|iface_prefixes|set_spoof_ip|debug|active_hooks|java_hooks|app_hooks|stats|stats_window|version> [args...]\n",
 		prog);
 	fprintf(stderr, "  load format: <json_path> [self_uid]\n");
+	fprintf(stderr, "  validate/preview format: <json_path> [self_uid]\n");
 	fprintf(stderr,
 		"  stats_window format: <seconds_per_bucket> (window = 30 * seconds)\n");
 	fprintf(stderr,
@@ -95,6 +97,54 @@ int main(int argc, char **argv)
 		return 0;
 	}
 
+	if (strcmp(argv[1], "validate") == 0 ||
+	    strcmp(argv[1], "preview") == 0) {
+		JSON_Value *root_value;
+		JSON_Object *root;
+		struct vpnhide_ioctl_data targets, lsposed;
+		struct vpnhide_policy_summary summary;
+		char error[256];
+		uid_t self_uid = 0;
+		int ret;
+
+		if (argc < 3) {
+			fprintf(stderr, "Error: %s requires <json_path> [self_uid]\n", argv[1]);
+			return 1;
+		}
+		if (argc > 3)
+			self_uid = (uid_t)atoi(argv[3]);
+		root_value = json_parse_file(argv[2]);
+		if (!root_value || json_value_get_type(root_value) != JSONObject) {
+			fprintf(stderr, "Failed to parse JSON file: %s\n", argv[2]);
+			if (root_value)
+				json_value_free(root_value);
+			return 1;
+		}
+		root = json_value_get_object(root_value);
+		memset(&targets, 0, sizeof(targets));
+		memset(&lsposed, 0, sizeof(lsposed));
+		memset(error, 0, sizeof(error));
+		ret = vpnhide_resolve_targets(root, self_uid, &targets, &lsposed,
+						      &summary, error, sizeof(error));
+		if (ret) {
+			fprintf(stderr, "Policy rejected (%s): %s\n",
+				vpnhide_list_mode_name(summary.mode),
+				error[0] ? error : "unknown error");
+			json_value_free(root_value);
+			return 1;
+		}
+		printf("mode=%s\n", vpnhide_list_mode_name(summary.mode));
+		printf("discovered_packages=%d\n", summary.discovered_packages);
+		printf("protected_packages=%d\n", summary.protected_packages);
+		printf("selected_exceptions=%d\n", summary.selected_exceptions);
+		printf("ignored_selected_system_packages=%d\n",
+		       summary.ignored_selected_system_packages);
+		printf("kmod_targets=%d\n", summary.kmod_targets);
+		printf("lsposed_targets=%d\n", summary.lsposed_targets);
+		json_value_free(root_value);
+		return 0;
+	}
+
 	fd = open("/dev/vpnhide_ctrl", O_RDWR);
 	if (fd < 0) {
 		perror("open /dev/vpnhide_ctrl");
@@ -109,6 +159,11 @@ int main(int argc, char **argv)
 		}
 		const char *json_path = argv[2];
 		uid_t self_uid = 0;
+		int apply_failed = 0;
+		unsigned int kernel_mask = 0;
+		unsigned int java_mask = 0;
+		int debug_logging = 0;
+		int have_global_config = 0;
 		if (argc > 3) {
 			self_uid = (uid_t)atoi(argv[3]);
 		}
@@ -127,29 +182,24 @@ int main(int argc, char **argv)
 		// 1. Hook masks & debug level
 		JSON_Object *global_config = json_object_get_object(root, "globalConfig");
 		if (global_config) {
-			unsigned int kernel_mask = (unsigned int)json_object_get_number(global_config, "kernelHookMask");
-			unsigned int java_mask = (unsigned int)json_object_get_number(global_config, "javaHookMask");
-			int debug_logging = (int)json_object_get_number(global_config, "debugLogging");
-
-			if (ioctl(fd, VH_SET_ACTIVE_HOOKS, &kernel_mask) < 0) {
-				perror("VH_SET_ACTIVE_HOOKS");
-			}
-			if (ioctl(fd, VH_SET_JAVA_HOOK_MASK, &java_mask) < 0) {
-				perror("VH_SET_JAVA_HOOK_MASK");
-			}
-			if (ioctl(fd, VH_SET_DEBUG, &debug_logging) < 0) {
-				perror("VH_SET_DEBUG");
-			}
+			kernel_mask = (unsigned int)json_object_get_number(global_config, "kernelHookMask");
+			java_mask = (unsigned int)json_object_get_number(global_config, "javaHookMask");
+			debug_logging = (int)json_object_get_number(global_config, "debugLogging");
+			have_global_config = 1;
 		}
 
-		// 2. targets & lsposed_targets
+		// 2. Resolve declarative targets into effective UID snapshots.
 		JSON_Array *apps = json_object_get_array(root, "apps");
 		struct vpnhide_ioctl_data targets;
 		struct vpnhide_ioctl_data lsposed;
 		struct vpnhide_app_hook_ioctl_data app_hook_masks;
+		struct vpnhide_policy_summary policy_summary;
+		char policy_error[256];
+		int policy_ret;
 		memset(&targets, 0, sizeof(targets));
 		memset(&lsposed, 0, sizeof(lsposed));
 		memset(&app_hook_masks, 0, sizeof(app_hook_masks));
+		memset(policy_error, 0, sizeof(policy_error));
 
 		if (apps) {
 			size_t apps_count = json_array_get_count(apps);
@@ -190,21 +240,53 @@ int main(int argc, char **argv)
 			}
 		}
 
+		policy_ret = vpnhide_resolve_targets(root, self_uid, &targets,
+							     &lsposed, &policy_summary,
+							     policy_error, sizeof(policy_error));
+		if (policy_ret) {
+			fprintf(stderr, "Policy rejected (%s): %s\n",
+				vpnhide_list_mode_name(policy_summary.mode),
+				policy_error[0] ? policy_error : "unknown error");
+			json_value_free(root_value);
+			close(fd);
+			return 1;
+		}
+
+		fprintf(stderr, "Applying %s policy: kmod=%d lsposed=%d protected=%d\n",
+			vpnhide_list_mode_name(policy_summary.mode),
+			policy_summary.kmod_targets, policy_summary.lsposed_targets,
+			policy_summary.protected_packages);
+
+		/* No kernel state is changed until policy resolution has succeeded. */
+		if (have_global_config) {
+			if (ioctl(fd, VH_SET_ACTIVE_HOOKS, &kernel_mask) < 0) {
+				perror("VH_SET_ACTIVE_HOOKS");
+				apply_failed = 1;
+			}
+			if (ioctl(fd, VH_SET_JAVA_HOOK_MASK, &java_mask) < 0) {
+				perror("VH_SET_JAVA_HOOK_MASK");
+				apply_failed = 1;
+			}
+			if (ioctl(fd, VH_SET_DEBUG, &debug_logging) < 0) {
+				perror("VH_SET_DEBUG");
+				apply_failed = 1;
+			}
+		}
+
 		if (ioctl(fd, VH_SET_APP_HOOK_MASKS, &app_hook_masks) < 0) {
 			perror("VH_SET_APP_HOOK_MASKS");
-		}
-		if (self_uid != 0) {
-			add_uid_distinct(targets.uids, &targets.count, self_uid);
-			add_uid_distinct(lsposed.uids, &lsposed.count, self_uid);
+			apply_failed = 1;
 		}
 		sort_uids(targets.uids, targets.count);
 		sort_uids(lsposed.uids, lsposed.count);
 
 		if (ioctl(fd, VH_SET_TARGETS, &targets) < 0) {
 			perror("VH_SET_TARGETS");
+			apply_failed = 1;
 		}
 		if (ioctl(fd, VH_SET_LSPOSED_TARGETS, &lsposed) < 0) {
 			perror("VH_SET_LSPOSED_TARGETS");
+			apply_failed = 1;
 		}
 
 		// 3. Interface prefixes
@@ -224,6 +306,7 @@ int main(int argc, char **argv)
 		}
 		if (ioctl(fd, VH_SET_IFACE_PREFIXES, &idata) < 0) {
 			perror("VH_SET_IFACE_PREFIXES");
+			apply_failed = 1;
 		}
 
 		// 4. Port rules
@@ -244,6 +327,11 @@ int main(int argc, char **argv)
 				int user_id = (int)json_object_get_number(app, "userId");
 
 				if (port_hiding && uid != 0 && package_name) {
+					if (pdata.count >= MAX_TARGET_UIDS) {
+						fprintf(stderr, "port rule target set exceeds MAX_TARGET_UIDS\n");
+						apply_failed = 1;
+						break;
+					}
 					struct vpnhide_uid_port_rules *target = &pdata.targets[pdata.count];
 					target->uid = uid;
 					target->rule_count = 0;
@@ -322,9 +410,16 @@ int main(int argc, char **argv)
 
 		if (ioctl(fd, VH_SET_PORT_RULES, &pdata) < 0) {
 			perror("VH_SET_PORT_RULES");
+			apply_failed = 1;
 		}
 
 		json_value_free(root_value);
+		close(fd);
+		if (apply_failed) {
+			fprintf(stderr, "Configuration apply failed; active kernel state may be mixed.\n");
+			return 1;
+		}
+		return 0;
 	} else if (strcmp(argv[1], "targets") == 0 ||
 	    strcmp(argv[1], "port_targets") == 0 ||
 	    strcmp(argv[1], "lsposed_targets") == 0) {
