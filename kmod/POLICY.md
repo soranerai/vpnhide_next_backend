@@ -54,9 +54,9 @@ and publishes one immutable RCU snapshot. Readers therefore observe either
 the previous generation or the complete new generation. `expected_generation`
 may be used by a future controller to reject a stale commit with `-EAGAIN`.
 
-The old component ioctls remain as a legacy ABI for diagnostics and older
-controllers. New policy loads must use `VH_SET_POLICY`; legacy component
-updates are not a transaction and must not be mixed with a declarative load.
+Policy writes use only `VH_SET_POLICY`, which replaces the complete immutable
+policy snapshot atomically. The former per-component policy setter ABI has
+been removed. The corresponding GET ioctls remain read-only diagnostics.
 
 Port hiding follows the same `listMode`. In `BLACKLIST`, apps with
 `portHiding: true` are targeted. In `ALLOWLIST`, those apps are exceptions and

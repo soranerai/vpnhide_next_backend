@@ -59,9 +59,6 @@
 #define SOF_TIMESTAMPING_RAW_HARDWARE (1 << 6)
 #endif
 
-extern bool debug_enabled;
-extern unsigned int active_hooks_mask;
-
 #define vpnhide_dbg(fmt, ...)                                  \
 	do {                                                   \
 		if (vpnhide_debug_is_enabled())                \
@@ -101,30 +98,6 @@ enum vpnhide_hook_idx {
 	HOOK_UDPV6_SENDMSG = 29,
 	HOOK_FIB_TRIE      = 30,
 	HOOK_TC_FILL_QDISC = 31,
-};
-
-struct vpnhide_app_hook_masks {
-	int count;
-	struct vpnhide_app_hook_mask masks[MAX_TARGET_UIDS];
-	struct rcu_head rcu;
-};
-
-struct vpnhide_targets {
-	int count;
-	uid_t uids[MAX_TARGET_UIDS]; /* kept sorted for bsearch */
-	struct rcu_head rcu;
-};
-
-struct vpnhide_port_targets {
-	int count;
-	struct vpnhide_uid_port_rules targets[MAX_TARGET_UIDS];
-	struct rcu_head rcu;
-};
-
-struct vpnhide_iface_prefixes {
-	int count;
-	char prefixes[MAX_IFACE_PREFIXES][MAX_IFACE_LEN];
-	struct rcu_head rcu;
 };
 
 struct vpnhide_policy_snapshot {
@@ -178,25 +151,11 @@ struct vh_udp_uid_rate {
 /* Global RCU state (defined in core.c)                                */
 /* ------------------------------------------------------------------ */
 
-extern struct vpnhide_app_hook_masks __rcu *global_app_hook_masks;
-extern spinlock_t app_hook_masks_update_lock;
-
-extern struct vpnhide_targets __rcu *global_targets;
-extern spinlock_t targets_update_lock;
-
-extern struct vpnhide_targets __rcu *global_lsposed_targets;
-extern spinlock_t lsposed_targets_update_lock;
-
 extern wait_queue_head_t vpnhide_config_wait;
 extern atomic_t          vpnhide_config_generation;
 extern atomic_t          java_stats_clear_generation;
 extern unsigned int      java_hooks_mask;
 
-extern struct vpnhide_port_targets __rcu *global_port_targets;
-extern spinlock_t port_targets_update_lock;
-
-extern struct vpnhide_iface_prefixes __rcu *global_iface_prefixes;
-extern spinlock_t iface_prefixes_lock;
 extern struct vpnhide_policy_snapshot __rcu *global_policy_snapshot;
 extern spinlock_t policy_snapshot_lock;
 

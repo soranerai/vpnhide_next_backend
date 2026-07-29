@@ -257,7 +257,7 @@ EXPORT_SYMBOL_GPL(vpnhide_getsockopt_post);
 
 static bool should_block_port(uid_t uid, __be16 port_be, bool is_ipv6)
 {
-	struct vpnhide_port_targets *pt;
+	struct vpnhide_port_ioctl_data *pt;
 	struct vpnhide_policy_snapshot *snapshot;
 	u16 port = ntohs(port_be);
 	bool block = false;
@@ -265,8 +265,7 @@ static bool should_block_port(uid_t uid, __be16 port_be, bool is_ipv6)
 
 	rcu_read_lock();
 	snapshot = rcu_dereference(global_policy_snapshot);
-	pt = snapshot ? (struct vpnhide_port_targets *)&snapshot->payload.ports :
-			rcu_dereference(global_port_targets);
+	pt = snapshot ? &snapshot->payload.ports : NULL;
 	if (!pt)
 		goto out;
 

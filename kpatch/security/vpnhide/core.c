@@ -24,33 +24,11 @@
 /* Global state                                                        */
 /* ------------------------------------------------------------------ */
 
-bool          debug_enabled;
-unsigned int  active_hooks_mask = 0xFFFFFFFF;
-
 /* Fast-path flags — checked before any RCU section.  Written under their
  * respective update locks; read with READ_ONCE on the hot path. */
-static bool g_has_targets;
-static bool g_has_app_masks;
-
-struct vpnhide_app_hook_masks __rcu *global_app_hook_masks;
-spinlock_t app_hook_masks_update_lock;
-
-struct vpnhide_targets __rcu *global_targets;
-spinlock_t targets_update_lock;
-
-struct vpnhide_targets __rcu *global_lsposed_targets;
-spinlock_t lsposed_targets_update_lock;
-
 wait_queue_head_t vpnhide_config_wait;
 atomic_t          vpnhide_config_generation = ATOMIC_INIT(0);
 atomic_t          java_stats_clear_generation = ATOMIC_INIT(0);
-unsigned int      java_hooks_mask;
-
-struct vpnhide_port_targets __rcu *global_port_targets;
-spinlock_t port_targets_update_lock;
-
-struct vpnhide_iface_prefixes __rcu *global_iface_prefixes;
-spinlock_t iface_prefixes_lock;
 
 struct vpnhide_policy_snapshot __rcu *global_policy_snapshot;
 spinlock_t policy_snapshot_lock;
@@ -106,7 +84,7 @@ bool vpnhide_debug_is_enabled(void)
 
 	rcu_read_lock();
 	snapshot = rcu_dereference(global_policy_snapshot);
-	enabled = snapshot ? !!snapshot->payload.debug_enabled : READ_ONCE(debug_enabled);
+	enabled = snapshot && !!snapshot->payload.debug_enabled;
 	rcu_read_unlock();
 	return enabled;
 }
@@ -118,7 +96,7 @@ unsigned int vpnhide_active_hooks_mask(void)
 
 	rcu_read_lock();
 	snapshot = rcu_dereference(global_policy_snapshot);
-	mask = snapshot ? snapshot->payload.active_hooks_mask : READ_ONCE(active_hooks_mask);
+	mask = snapshot ? snapshot->payload.active_hooks_mask : 0;
 	rcu_read_unlock();
 	return mask;
 }
@@ -130,21 +108,9 @@ unsigned int vpnhide_java_hooks_mask(void)
 
 	rcu_read_lock();
 	snapshot = rcu_dereference(global_policy_snapshot);
-	mask = snapshot ? snapshot->payload.java_hooks_mask : READ_ONCE(java_hooks_mask);
+	mask = snapshot ? snapshot->payload.java_hooks_mask : 0;
 	rcu_read_unlock();
 	return mask;
-}
-
-/* call_rcu callbacks for structs whose rcu_head offset exceeds the
- * kfree_rcu() compile-time limit of 4096 bytes (kernel 5.10). */
-static void vh_free_port_targets_rcu(struct rcu_head *head)
-{
-	kfree(container_of(head, struct vpnhide_port_targets, rcu));
-}
-
-static void vh_free_app_hook_masks_rcu(struct rcu_head *head)
-{
-	kfree(container_of(head, struct vpnhide_app_hook_masks, rcu));
 }
 
 /* ------------------------------------------------------------------ */
@@ -235,7 +201,6 @@ static int uid_cmp(const void *a, const void *b)
 
 bool is_target_uid_val(uid_t uid)
 {
-	struct vpnhide_targets *t;
 	struct vpnhide_policy_snapshot *snapshot;
 	bool found = false;
 	int lo, hi, mid;
@@ -258,23 +223,6 @@ bool is_target_uid_val(uid_t uid)
 			else
 				hi = mid - 1;
 		}
-	} else {
-		t = rcu_dereference(global_targets);
-		if (t && t->count > 0) {
-		lo = 0;
-		hi = t->count - 1;
-		while (lo <= hi) {
-			mid = (lo + hi) >> 1;
-			if (t->uids[mid] == uid) {
-				found = true;
-				break;
-			}
-			if (t->uids[mid] < uid)
-				lo = mid + 1;
-			else
-				hi = mid - 1;
-		}
-	}
 	}
 	rcu_read_unlock();
 	return found;
@@ -292,7 +240,6 @@ bool is_target_uid(void)
 
 bool lookup_app_kernel_mask(uid_t uid, unsigned int *out)
 {
-	struct vpnhide_app_hook_masks *ahm;
 	struct vpnhide_policy_snapshot *snapshot;
 	bool found = false;
 	int i;
@@ -308,18 +255,6 @@ bool lookup_app_kernel_mask(uid_t uid, unsigned int *out)
 				break;
 			}
 		}
-	} else {
-	ahm = rcu_dereference(global_app_hook_masks);
-	if (ahm) {
-		for (i = 0; i < ahm->count; i++) {
-			if (ahm->masks[i].uid == uid &&
-			    ahm->masks[i].has_kernel_override) {
-				*out = ahm->masks[i].kernel_mask;
-				found = true;
-				break;
-			}
-		}
-	}
 	}
 	rcu_read_unlock();
 	return found;
@@ -469,9 +404,7 @@ static ssize_t vpnhide_dev_read(struct file *file, char __user *buf,
 
 	if (reader->read_pos >= reader->buf_len) {
 		unsigned long gen = (unsigned long)atomic_read(&vpnhide_config_generation);
-		struct vpnhide_targets *lt;
-		struct vpnhide_iface_prefixes *ip;
-		struct vpnhide_app_hook_masks *ahm;
+		struct vpnhide_policy_snapshot *snapshot;
 		int offset = 0, i;
 
 		if (reader->generation >= gen) {
@@ -505,37 +438,37 @@ static ssize_t vpnhide_dev_read(struct file *file, char __user *buf,
 				    "debug_enabled: %d\n", vpnhide_debug_is_enabled());
 
 		rcu_read_lock();
-		lt = rcu_dereference(global_lsposed_targets);
+		snapshot = rcu_dereference(global_policy_snapshot);
 		offset += scnprintf(reader->buf + offset, 65536 - offset,
 				    "lsposed_targets:");
-		if (lt) {
-			for (i = 0; i < lt->count; i++)
+		if (snapshot) {
+			for (i = 0; i < snapshot->payload.targets.lsposed_count; i++)
 				offset += scnprintf(reader->buf + offset,
-						    65536 - offset, " %u", lt->uids[i]);
+							65536 - offset, " %u",
+							snapshot->payload.targets.lsposed_uids[i]);
 		}
 		offset += scnprintf(reader->buf + offset, 65536 - offset, "\n");
 
-		ip = rcu_dereference(global_iface_prefixes);
 		offset += scnprintf(reader->buf + offset, 65536 - offset,
 				    "iface_prefixes:");
-		if (ip) {
-			for (i = 0; i < ip->count; i++)
+		if (snapshot) {
+			for (i = 0; i < snapshot->payload.iface_prefixes.count; i++)
 				offset += scnprintf(reader->buf + offset,
-						    65536 - offset, " %s", ip->prefixes[i]);
+							65536 - offset,
+							" %s", snapshot->payload.iface_prefixes.prefixes[i]);
 		}
 		offset += scnprintf(reader->buf + offset, 65536 - offset, "\n");
 
-		ahm = rcu_dereference(global_app_hook_masks);
 		offset += scnprintf(reader->buf + offset, 65536 - offset,
 				    "app_java_hook_mask:");
-		if (ahm) {
-			for (i = 0; i < ahm->count; i++) {
-				if (!ahm->masks[i].has_java_override)
+		if (snapshot) {
+			for (i = 0; i < snapshot->payload.app_hook_masks.count; i++) {
+				if (!snapshot->payload.app_hook_masks.masks[i].has_java_override)
 					continue;
 				offset += scnprintf(reader->buf + offset,
 						    65536 - offset, " %u:%u",
-						    ahm->masks[i].uid,
-						    ahm->masks[i].java_mask);
+							snapshot->payload.app_hook_masks.masks[i].uid,
+							snapshot->payload.app_hook_masks.masks[i].java_mask);
 			}
 		}
 		offset += scnprintf(reader->buf + offset, 65536 - offset, "\n");
@@ -616,53 +549,6 @@ static ssize_t vpnhide_dev_write(struct file *file, const char __user *buf,
 /* ------------------------------------------------------------------ */
 /* IOCTL dispatch                                                      */
 /* ------------------------------------------------------------------ */
-
-static int update_target_bundle(const struct vpnhide_target_bundle *bundle)
-{
-	struct vpnhide_targets *new_kmod, *new_lsposed;
-	struct vpnhide_targets *old_kmod, *old_lsposed;
-
-	if (bundle->kmod_count < 0 || bundle->kmod_count > MAX_TARGET_UIDS ||
-	    bundle->lsposed_count < 0 || bundle->lsposed_count > MAX_TARGET_UIDS)
-		return -EINVAL;
-
-	new_kmod = kzalloc(sizeof(*new_kmod), GFP_KERNEL);
-	new_lsposed = kzalloc(sizeof(*new_lsposed), GFP_KERNEL);
-	if (!new_kmod || !new_lsposed) {
-		kfree(new_kmod);
-		kfree(new_lsposed);
-		return -ENOMEM;
-	}
-
-	new_kmod->count = bundle->kmod_count;
-	new_lsposed->count = bundle->lsposed_count;
-	memcpy(new_kmod->uids, bundle->kmod_uids,
-	       bundle->kmod_count * sizeof(uid_t));
-	memcpy(new_lsposed->uids, bundle->lsposed_uids,
-	       bundle->lsposed_count * sizeof(uid_t));
-	sort(new_kmod->uids, new_kmod->count, sizeof(uid_t), uid_cmp, NULL);
-	sort(new_lsposed->uids, new_lsposed->count, sizeof(uid_t), uid_cmp, NULL);
-
-	spin_lock(&targets_update_lock);
-	spin_lock(&lsposed_targets_update_lock);
-	old_kmod = rcu_dereference_protected(
-		global_targets, lockdep_is_held(&targets_update_lock));
-	old_lsposed = rcu_dereference_protected(
-		global_lsposed_targets, lockdep_is_held(&lsposed_targets_update_lock));
-	rcu_assign_pointer(global_targets, new_kmod);
-	rcu_assign_pointer(global_lsposed_targets, new_lsposed);
-	WRITE_ONCE(g_has_targets, new_kmod->count > 0);
-	spin_unlock(&lsposed_targets_update_lock);
-	spin_unlock(&targets_update_lock);
-
-	if (old_kmod)
-		kfree_rcu(old_kmod, rcu);
-	if (old_lsposed)
-		kfree_rcu(old_lsposed, rcu);
-	atomic_inc(&vpnhide_config_generation);
-	wake_up_all(&vpnhide_config_wait);
-	return 0;
-}
 
 static void vh_free_policy_snapshot_rcu(struct rcu_head *head)
 {
@@ -758,6 +644,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		return policy_ret;
 	}
 
+	#if 0 /* removed legacy policy setters; VH_SET_POLICY is authoritative */
 	case VH_SET_TARGET_BUNDLE: {
 		struct vpnhide_target_bundle *bundle;
 		int bundle_ret;
@@ -813,9 +700,9 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		break;
 	}
 
+	#endif
 	case VH_GET_TARGETS: {
 		struct vpnhide_ioctl_data *td;
-		struct vpnhide_targets *t;
 		struct vpnhide_policy_snapshot *snapshot;
 		int i;
 
@@ -828,13 +715,6 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 			td->count = snapshot->payload.targets.kmod_count;
 			for (i = 0; i < td->count; i++)
 				td->uids[i] = snapshot->payload.targets.kmod_uids[i];
-		} else {
-			t = rcu_dereference(global_targets);
-			if (t) {
-				td->count = t->count;
-				for (i = 0; i < t->count; i++)
-					td->uids[i] = t->uids[i];
-			}
 		}
 		rcu_read_unlock();
 		if (copy_to_user(uarg, td, sizeof(*td))) {
@@ -845,6 +725,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		break;
 	}
 
+	#if 0
 	case VH_SET_LSPOSED_TARGETS: {
 		struct vpnhide_ioctl_data *td;
 		struct vpnhide_targets *nt, *old;
@@ -915,6 +796,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		break;
 	}
 
+	#endif
 	case VH_SET_VPN_IFINDEXES: {
 		struct vpnhide_vpn_ifindexes idata;
 		struct vpnhide_active_vpns *nav, *old;
@@ -946,6 +828,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		break;
 	}
 
+	#if 0
 	case VH_SET_DEBUG: {
 		u32 val;
 
@@ -966,6 +849,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		break;
 	}
 
+	#endif
 	case VH_SET_SPOOF_IP: {
 		struct vpnhide_spoof_ip sip;
 
@@ -975,6 +859,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		break;
 	}
 
+	#if 0
 	case VH_SET_IFACE_PREFIXES: {
 		struct vpnhide_iface_ioctl_data pd;
 		struct vpnhide_iface_prefixes *np, *old;
@@ -999,6 +884,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		break;
 	}
 
+	#endif
 	case VH_SET_COVER_IFACE: {
 		struct vpnhide_cover_iface ci;
 
@@ -1008,6 +894,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		break;
 	}
 
+	#if 0
 	case VH_SET_JAVA_HOOK_MASK: {
 		u32 mask;
 
@@ -1019,6 +906,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		break;
 	}
 
+	#endif
 	case VH_GET_JAVA_HOOK_MASK: {
 		u32 mask = vpnhide_java_hooks_mask();
 
@@ -1027,6 +915,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		break;
 	}
 
+	#if 0
 	case VH_SET_APP_HOOK_MASKS: {
 		struct vpnhide_app_hook_ioctl_data *amd;
 		struct vpnhide_app_hook_masks *nm, *old;
@@ -1062,9 +951,9 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		break;
 	}
 
+	#endif
 	case VH_GET_APP_HOOK_MASKS: {
 		struct vpnhide_app_hook_ioctl_data *amd;
-		struct vpnhide_app_hook_masks *am;
 		struct vpnhide_policy_snapshot *snapshot;
 
 		amd = kzalloc(sizeof(*amd), GFP_KERNEL);
@@ -1074,13 +963,6 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		snapshot = rcu_dereference(global_policy_snapshot);
 		if (snapshot) {
 			*amd = snapshot->payload.app_hook_masks;
-		} else {
-			am = rcu_dereference(global_app_hook_masks);
-			if (am) {
-				amd->count = am->count;
-				memcpy(amd->masks, am->masks,
-				       am->count * sizeof(amd->masks[0]));
-			}
 		}
 		rcu_read_unlock();
 		if (copy_to_user(uarg, amd, sizeof(*amd))) {
@@ -1184,7 +1066,6 @@ found:
 
 	case VH_GET_LSPOSED_TARGETS: {
 		struct vpnhide_ioctl_data *td;
-		struct vpnhide_targets *t;
 		struct vpnhide_policy_snapshot *snapshot;
 		int i;
 
@@ -1197,13 +1078,6 @@ found:
 			td->count = snapshot->payload.targets.lsposed_count;
 			for (i = 0; i < td->count; i++)
 				td->uids[i] = snapshot->payload.targets.lsposed_uids[i];
-		} else {
-			t = rcu_dereference(global_lsposed_targets);
-			if (t) {
-				td->count = t->count;
-				for (i = 0; i < t->count; i++)
-					td->uids[i] = t->uids[i];
-			}
 		}
 		rcu_read_unlock();
 		if (copy_to_user(uarg, td, sizeof(*td))) {
@@ -1214,6 +1088,7 @@ found:
 		break;
 	}
 
+	#if 0
 	case VH_SET_PORT_RULES: {
 		struct vpnhide_port_ioctl_data *pd;
 		struct vpnhide_port_targets *np, *old;
@@ -1248,9 +1123,9 @@ found:
 		break;
 	}
 
+	#endif
 	case VH_GET_IFACE_PREFIXES: {
 		struct vpnhide_iface_ioctl_data pd;
-		struct vpnhide_iface_prefixes *p;
 		struct vpnhide_policy_snapshot *snapshot;
 
 		memset(&pd, 0, sizeof(pd));
@@ -1258,13 +1133,6 @@ found:
 		snapshot = rcu_dereference(global_policy_snapshot);
 		if (snapshot) {
 			pd = snapshot->payload.iface_prefixes;
-		} else {
-			p = rcu_dereference(global_iface_prefixes);
-			if (p) {
-				pd.count = p->count;
-				memcpy(pd.prefixes, p->prefixes,
-				       p->count * MAX_IFACE_LEN);
-			}
 		}
 		rcu_read_unlock();
 		if (copy_to_user(uarg, &pd, sizeof(pd)))
@@ -1332,15 +1200,10 @@ static int __init vpnhide_init(void)
 {
 	int ret;
 
-	spin_lock_init(&targets_update_lock);
-	spin_lock_init(&lsposed_targets_update_lock);
-	spin_lock_init(&port_targets_update_lock);
-	spin_lock_init(&iface_prefixes_lock);
 	spin_lock_init(&policy_snapshot_lock);
 	spin_lock_init(&spoof_ip_lock);
 	spin_lock_init(&active_vpns_lock);
 	spin_lock_init(&g_vpn_name_cache_lock);
-	spin_lock_init(&app_hook_masks_update_lock);
 	spin_lock_init(&intercept_ring.lock);
 	init_waitqueue_head(&vpnhide_config_wait);
 
@@ -1356,13 +1219,9 @@ static int __init vpnhide_init(void)
 
 static void __exit vpnhide_exit(void)
 {
-	struct vpnhide_targets          *t;
-	struct vpnhide_port_targets     *pt;
 	struct vpnhide_active_vpns      *av;
 	struct vh_vpn_name_cache        *nc;
 	struct vpnhide_spoof_ip_rcu     *si;
-	struct vpnhide_iface_prefixes   *ip;
-	struct vpnhide_app_hook_masks   *am;
 	struct vpnhide_policy_snapshot  *snapshot;
 
 	misc_deregister(&vpnhide_misc);
@@ -1377,13 +1236,6 @@ static void __exit vpnhide_exit(void)
 	kfree(ptr);                                             \
 } while (0)
 
-	t  = rcu_dereference_protected(global_targets, 1);
-	rcu_assign_pointer(global_targets, NULL);
-	WRITE_ONCE(g_has_targets, false);
-
-	pt = rcu_dereference_protected(global_port_targets, 1);
-	rcu_assign_pointer(global_port_targets, NULL);
-
 	av = rcu_dereference_protected(global_active_vpns, 1);
 	rcu_assign_pointer(global_active_vpns, NULL);
 
@@ -1393,24 +1245,13 @@ static void __exit vpnhide_exit(void)
 	si = rcu_dereference_protected(global_spoof_ip, 1);
 	rcu_assign_pointer(global_spoof_ip, NULL);
 
-	ip = rcu_dereference_protected(global_iface_prefixes, 1);
-	rcu_assign_pointer(global_iface_prefixes, NULL);
-
-	am = rcu_dereference_protected(global_app_hook_masks, 1);
-	rcu_assign_pointer(global_app_hook_masks, NULL);
-	WRITE_ONCE(g_has_app_masks, false);
-
 	snapshot = rcu_dereference_protected(global_policy_snapshot, 1);
 	rcu_assign_pointer(global_policy_snapshot, NULL);
 
 	synchronize_rcu();
-	kfree(t);
-	kfree(pt);
 	kfree(av);
 	kfree(nc);
 	kfree(si);
-	kfree(ip);
-	kfree(am);
 	kvfree(snapshot);
 
 	pr_info(MODNAME ": unloaded\n");

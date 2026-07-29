@@ -244,7 +244,10 @@ static int discover_packages(struct discovered_package **out, int *count,
 		return -ENOMEM;
 	}
 
-	pipe = popen(VPNHIDE_PM_COMMAND, "r");
+	{
+		const char *command = getenv("VPNHIDE_PM_COMMAND");
+		pipe = popen(command && command[0] ? command : VPNHIDE_PM_COMMAND, "r");
+	}
 	if (!pipe) {
 		free(packages);
 		set_error(error, error_len, "cannot execute Package Manager");

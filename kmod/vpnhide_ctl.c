@@ -16,16 +16,12 @@
 void print_usage(const char *prog)
 {
 	fprintf(stderr,
-		"Usage: %s <load|validate|preview|targets|port_targets|lsposed_targets|port_rules|iface_prefixes|set_spoof_ip|debug|active_hooks|java_hooks|app_hooks|stats|stats_window|version> [args...]\n",
+		"Usage: %s <load|validate|preview|set_spoof_ip|active_hooks|java_hooks|stats|stats_window|version> [args...]\n",
 		prog);
 	fprintf(stderr, "  load format: <json_path> [self_uid]\n");
 	fprintf(stderr, "  validate/preview format: <json_path> [self_uid]\n");
 	fprintf(stderr,
 		"  stats_window format: <seconds_per_bucket> (window = 30 * seconds)\n");
-	fprintf(stderr,
-		"  port_rules format: <uid> <rule_count> <start> <end> <proto> ...\n");
-	fprintf(stderr,
-		"  app_hooks format: <uid> <has_kernel:0|1> <kernel_mask> <has_java:0|1> <java_mask> ...\n");
 	fprintf(stderr, "  proto: 0=TCP, 1=UDP, 2=BOTH\n");
 	fprintf(stderr, "  set_spoof_ip format: <ipv4|none> <ipv6|none>\n");
 	fprintf(stderr, "  version format: [ctl|kmod] (default: print both ctl and running kmod version)\n");
@@ -61,13 +57,7 @@ static void sort_uids(uid_t *arr, int count)
 
 int main(int argc, char **argv)
 {
-	int fd, val;
-	struct vpnhide_ioctl_data data;
-	struct vpnhide_port_ioctl_data pdata;
-
-	memset(&data, 0, sizeof(data));
-	memset(&pdata, 0, sizeof(pdata));
-
+	int fd;
 	if (argc < 2) {
 		print_usage(argv[0]);
 		return 1;
@@ -341,85 +331,6 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		return 0;
-	} else if (strcmp(argv[1], "targets") == 0 ||
-	    strcmp(argv[1], "port_targets") == 0 ||
-	    strcmp(argv[1], "lsposed_targets") == 0) {
-		data.count = argc - 2;
-		if (data.count > MAX_TARGET_UIDS)
-			data.count = MAX_TARGET_UIDS;
-
-		for (int i = 0; i < data.count; i++) {
-			data.uids[i] = (unsigned int)atoi(argv[i + 2]);
-		}
-
-		unsigned long cmd;
-		if (strcmp(argv[1], "targets") == 0)
-			cmd = VH_SET_TARGETS;
-		else if (strcmp(argv[1], "port_targets") == 0)
-			cmd = VH_SET_PORT_TARGETS;
-		else
-			cmd = VH_SET_LSPOSED_TARGETS;
-
-		if (ioctl(fd, cmd, &data) < 0) {
-			perror("ioctl");
-			close(fd);
-			return 1;
-		}
-	} else if (strcmp(argv[1], "port_rules") == 0) {
-		int arg_idx = 2;
-		pdata.count = 0;
-
-		while (arg_idx < argc && pdata.count < MAX_TARGET_UIDS) {
-			struct vpnhide_uid_port_rules *target =
-				&pdata.targets[pdata.count];
-			if (arg_idx >= argc)
-				break;
-			target->uid = (uid_t)atoi(argv[arg_idx++]);
-			if (arg_idx >= argc)
-				break;
-			int rules_to_parse = atoi(argv[arg_idx++]);
-
-			if (rules_to_parse > MAX_PORT_RULES_PER_UID)
-				rules_to_parse = MAX_PORT_RULES_PER_UID;
-
-			target->rule_count = 0;
-			for (int i = 0; i < rules_to_parse; i++) {
-				if (arg_idx + 2 >= argc)
-					break;
-				target->rules[i].start_port =
-					(unsigned short)atoi(argv[arg_idx++]);
-				target->rules[i].end_port =
-					(unsigned short)atoi(argv[arg_idx++]);
-				target->rules[i].protocol =
-					(unsigned char)atoi(argv[arg_idx++]);
-				target->rule_count++;
-			}
-			pdata.count++;
-		}
-
-		if (ioctl(fd, VH_SET_PORT_RULES, &pdata) < 0) {
-			perror("VH_SET_PORT_RULES");
-			close(fd);
-			return 1;
-		}
-	} else if (strcmp(argv[1], "iface_prefixes") == 0) {
-		struct vpnhide_iface_ioctl_data idata;
-		memset(&idata, 0, sizeof(idata));
-		idata.count = argc - 2;
-		if (idata.count > MAX_IFACE_PREFIXES)
-			idata.count = MAX_IFACE_PREFIXES;
-
-		for (int i = 0; i < idata.count; i++) {
-			strncpy(idata.prefixes[i], argv[i + 2],
-				MAX_IFACE_LEN - 1);
-			idata.prefixes[i][MAX_IFACE_LEN - 1] = '\0';
-		}
-
-		if (ioctl(fd, VH_SET_IFACE_PREFIXES, &idata) < 0) {
-			perror("VH_SET_IFACE_PREFIXES");
-			close(fd);
-			return 1;
-		}
 	} else if (strcmp(argv[1], "set_spoof_ip") == 0) {
 		struct vpnhide_spoof_ip spoof;
 		memset(&spoof, 0, sizeof(spoof));
@@ -459,18 +370,6 @@ int main(int argc, char **argv)
 			close(fd);
 			return 1;
 		}
-	} else if (strcmp(argv[1], "debug") == 0) {
-		if (argc < 3) {
-			print_usage(argv[0]);
-			close(fd);
-			return 1;
-		}
-		val = atoi(argv[2]);
-		if (ioctl(fd, VH_SET_DEBUG, &val) < 0) {
-			perror("VH_SET_DEBUG");
-			close(fd);
-			return 1;
-		}
 	} else if (strcmp(argv[1], "active_hooks") == 0) {
 		if (argc < 3) {
 			unsigned int mask = 0;
@@ -481,13 +380,9 @@ int main(int argc, char **argv)
 			}
 			printf("%u\n", mask);
 		} else {
-			unsigned int mask =
-				(unsigned int)strtoul(argv[2], NULL, 0);
-			if (ioctl(fd, VH_SET_ACTIVE_HOOKS, &mask) < 0) {
-				perror("VH_SET_ACTIVE_HOOKS");
-				close(fd);
-				return 1;
-			}
+			fprintf(stderr, "active_hooks is read-only; use load with globalConfig.kernelHookMask\n");
+			close(fd);
+			return 1;
 		}
 	} else if (strcmp(argv[1], "java_hooks") == 0) {
 		if (argc < 3) {
@@ -499,33 +394,7 @@ int main(int argc, char **argv)
 			}
 			printf("%u\n", mask);
 		} else {
-			unsigned int mask =
-				(unsigned int)strtoul(argv[2], NULL, 0);
-			if (ioctl(fd, VH_SET_JAVA_HOOK_MASK, &mask) < 0) {
-				perror("VH_SET_JAVA_HOOK_MASK");
-				close(fd);
-				return 1;
-			}
-		}
-	} else if (strcmp(argv[1], "app_hooks") == 0) {
-		struct vpnhide_app_hook_ioctl_data adata;
-		int arg_idx = 2;
-
-		memset(&adata, 0, sizeof(adata));
-
-		while (arg_idx + 4 < argc && adata.count < MAX_TARGET_UIDS) {
-			struct vpnhide_app_hook_mask *m = &adata.masks[adata.count];
-
-			m->uid = (uid_t)atoi(argv[arg_idx++]);
-			m->has_kernel_override = (unsigned char)atoi(argv[arg_idx++]);
-			m->kernel_mask = (unsigned int)strtoul(argv[arg_idx++], NULL, 0);
-			m->has_java_override = (unsigned char)atoi(argv[arg_idx++]);
-			m->java_mask = (unsigned int)strtoul(argv[arg_idx++], NULL, 0);
-			adata.count++;
-		}
-
-		if (ioctl(fd, VH_SET_APP_HOOK_MASKS, &adata) < 0) {
-			perror("VH_SET_APP_HOOK_MASKS");
+			fprintf(stderr, "java_hooks is read-only; use load with globalConfig.javaHookMask\n");
 			close(fd);
 			return 1;
 		}

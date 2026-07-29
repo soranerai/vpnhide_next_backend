@@ -21,8 +21,8 @@ mount -t devtmpfs dev /dev 2>/dev/null
 echo "##### VPNHIDE-QEMU-TEST START #####"
 echo "KREL=$(uname -r)"
 
-# Add a non-root test user with UID 5555
-echo "testuser:x:5555:5555:testuser:/home/testuser:/bin/sh" >> /etc/passwd
+# Add a non-root Android-style app user with UID 115555 (user 1, appId 15555)
+echo "testuser:x:115555:115555:testuser:/home/testuser:/bin/sh" >> /etc/passwd
 
 # --- bring up user-mode networking so apk can fetch iproute2 ----------------
 ip link set lo up 2>/dev/null
@@ -38,10 +38,19 @@ if apk add --no-cache iproute2 python3 >/dev/null 2>&1; then echo "IPROUTE2=ok";
 if insmod /vpnhide_kmod.ko; then echo "INSMOD=ok"; else echo "INSMOD=FAIL"; fi
 # Wait for the device node /dev/vpnhide_ctrl to populate
 sleep 1
-# Initialize interface prefixes so the module knows to hide "vpn" interfaces
-/vpnhide-ctl iface_prefixes vpn 2>/dev/null
-# Enable debug mode
-/vpnhide-ctl debug 1 2>/dev/null
+# Configure all policy state through the transactional JSON path. The PM
+# command is an in-VM fixture; production uses the real Package Manager.
+TEST_CONFIG=/tmp/vpnhide-test-policy.json
+cat > "$TEST_CONFIG" <<'EOF'
+{
+  "globalConfig": {"listMode":"BLACKLIST", "kernelHookMask":4294967295, "javaHookMask":4294967295, "debugLogging":1},
+  "ifacePrefixes": ["vpn"],
+  "apps": [{"packageName":"com.vpnhide.test", "userId":1, "uid":115555, "kmod":true, "lsposed":true, "portHiding":true}],
+  "portRules": [{"enabled":true, "packageName":"com.vpnhide.test", "userId":1, "startPort":8080, "endPort":8080, "protocol":"BOTH"}]
+}
+EOF
+export VPNHIDE_PM_COMMAND="printf 'package:/data/app/test/base.apk=com.vpnhide.test uid:115555\\n'"
+apply_policy() { /vpnhide-ctl load "$TEST_CONFIG" 0 2>/dev/null; }
 REGISTERED=1
 echo "REGISTERED=$REGISTERED"
 # Start the event-driven C daemon in the background to automatically monitor interfaces and update ifindexes in the kmod
@@ -56,7 +65,7 @@ ip addr add 10.9.0.1/24 dev vpn0 2>/dev/null
 ip route add 10.9.9.0/24 dev vpn0 2>/dev/null
 ip -6 addr add fd00:9::1/64 dev vpn0 2>/dev/null
 ip -6 route add fd00:99::/64 dev vpn0 2>/dev/null
-ip rule add uidrange 5555-5555 table 199 2>/dev/null
+ip rule add uidrange 115555-115555 table 199 2>/dev/null
 # Give the daemon a moment to process the interface events and update active_vpns in the kernel
 sleep 3
 
@@ -71,7 +80,7 @@ check() {
 	_pat=$3
 	
 	# 1. Set UID 5555 as the target in the kernel module
-	/vpnhide-ctl targets 5555 2>/dev/null
+	apply_policy
 	
 	# 2. Non-target check (run as root / UID 0)
 	_nt=$(eval "$_cmd" 2>/dev/null | grep -c -- "$_pat")
@@ -103,8 +112,7 @@ check proc_net_if_in6 "cat /proc/net/if_inet6"       "vpn0"   # if6_seq_show
 
 # --- execute programmatic socket and ioctl vector tests in Python ---
 # 1. Set targets and configure port rules for UID 5555
-/vpnhide-ctl targets 5555 2>/dev/null
-/vpnhide-ctl port_rules 5555 1 8080 8080 2 2>/dev/null
+apply_policy
 
 # 2. Run vector_tests.py and process its output
 python3 /vector_tests.py > /tmp/py_res.log 2>&1

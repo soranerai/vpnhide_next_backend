@@ -20,8 +20,8 @@ mount -t devtmpfs dev /dev 2>/dev/null
 echo "##### VPNHIDE-QEMU-TEST START #####"
 echo "KREL=$(uname -r)"
 
-# Add a non-root test user with UID 5555
-echo "testuser:x:5555:5555:testuser:/home/testuser:/bin/sh" >> /etc/passwd
+# Add a non-root Android-style app user with UID 115555 (user 1, appId 15555)
+echo "testuser:x:115555:115555:testuser:/home/testuser:/bin/sh" >> /etc/passwd
 
 # --- bring up user-mode networking ----------------------------------------
 ip link set lo up 2>/dev/null
@@ -45,8 +45,17 @@ else
     poweroff -f
 fi
 
-/vpnhide-ctl iface_prefixes vpn 2>/dev/null
-/vpnhide-ctl debug 1 2>/dev/null
+TEST_CONFIG=/tmp/vpnhide-test-policy.json
+cat > "$TEST_CONFIG" <<'EOF'
+{
+  "globalConfig": {"listMode":"BLACKLIST", "kernelHookMask":4294967295, "javaHookMask":4294967295, "debugLogging":1},
+  "ifacePrefixes": ["vpn"],
+  "apps": [{"packageName":"com.vpnhide.test", "userId":1, "uid":115555, "kmod":true, "lsposed":true, "portHiding":true}],
+  "portRules": [{"enabled":true, "packageName":"com.vpnhide.test", "userId":1, "startPort":8080, "endPort":8080, "protocol":"BOTH"}]
+}
+EOF
+export VPNHIDE_PM_COMMAND="printf 'package:/data/app/test/base.apk=com.vpnhide.test uid:115555\\n'"
+apply_policy() { /vpnhide-ctl load "$TEST_CONFIG" 0 2>/dev/null; }
 REGISTERED=1
 echo "REGISTERED=$REGISTERED"
 
@@ -62,7 +71,7 @@ ip addr add 10.9.0.1/24 dev vpn0 2>/dev/null
 ip route add 10.9.9.0/24 dev vpn0 2>/dev/null
 ip -6 addr add fd00:9::1/64 dev vpn0 2>/dev/null
 ip -6 route add fd00:99::/64 dev vpn0 2>/dev/null
-ip rule add uidrange 5555-5555 table 199 2>/dev/null
+ip rule add uidrange 115555-115555 table 199 2>/dev/null
 ip rule add iif vpn0 table 200 2>/dev/null
 ip rule add oif vpn0 table 201 2>/dev/null
 # Give the daemon time to detect vpn0 and push its ifindex to the kernel
@@ -78,7 +87,7 @@ check() {
     _cmd=$2
     _pat=$3
 
-    /vpnhide-ctl targets 5555 2>/dev/null
+    apply_policy
 
     _nt=$(eval "$_cmd" 2>/dev/null | grep -c -- "$_pat")
     _tg=$(su testuser -c "$_cmd" 2>/dev/null | grep -c -- "$_pat")
@@ -109,8 +118,7 @@ check proc_net_if_in6 "cat /proc/net/if_inet6"       "vpn0"   # if6_seq_show  (k
 check tc_qdisc        "tc qdisc show"                "vpn0"   # tc_fill_qdisc (kpatch gap fixed)
 
 # --- programmatic socket / ioctl / BPF checks (Python) ----------------------
-/vpnhide-ctl targets 5555 2>/dev/null
-/vpnhide-ctl port_rules 5555 1 8080 8080 2 2>/dev/null
+apply_policy
 
 python3 /vector_tests.py > /tmp/py_res.log 2>&1
 cat /tmp/py_res.log

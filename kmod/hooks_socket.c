@@ -672,7 +672,6 @@ static int socket_connect_entry(struct kretprobe_instance *ri,
   struct sockaddr *addr = NULL;
   struct sockaddr_storage uaddr_buf;
   uid_t uid = from_kuid(&init_user_ns, current_uid());
-  struct vpnhide_port_targets *t;
   struct vpnhide_policy_snapshot *snapshot;
   struct vpnhide_uid_port_rules *urules = NULL;
   int fd = -1;
@@ -695,8 +694,10 @@ static int socket_connect_entry(struct kretprobe_instance *ri,
 
   rcu_read_lock();
   snapshot = rcu_dereference(global_policy_snapshot);
-  t = snapshot ? (struct vpnhide_port_targets *)&snapshot->payload.ports :
-                 rcu_dereference(global_port_targets);
+  if (!snapshot)
+    return false;
+  {
+    struct vpnhide_port_ioctl_data *t = &snapshot->payload.ports;
   if (t) {
     for (i = 0; i < t->count; i++) {
       if (t->targets[i].uid == uid) {
@@ -704,6 +705,7 @@ static int socket_connect_entry(struct kretprobe_instance *ri,
         break;
       }
     }
+  }
   }
 
   if (!urules || !addr || !sock || !sock->sk) {
@@ -812,7 +814,6 @@ static int socket_bind_entry(struct kretprobe_instance *ri,
   struct sockaddr_storage uaddr_buf;
   struct pt_regs *user_regs = NULL;
   uid_t uid = from_kuid(&init_user_ns, current_uid());
-  struct vpnhide_port_targets *t;
   struct vpnhide_policy_snapshot *snapshot;
   struct vpnhide_uid_port_rules *urules = NULL;
   int fd = -1;
@@ -834,8 +835,10 @@ static int socket_bind_entry(struct kretprobe_instance *ri,
 
   rcu_read_lock();
   snapshot = rcu_dereference(global_policy_snapshot);
-  t = snapshot ? (struct vpnhide_port_targets *)&snapshot->payload.ports :
-                 rcu_dereference(global_port_targets);
+  if (!snapshot)
+    return false;
+  {
+    struct vpnhide_port_ioctl_data *t = &snapshot->payload.ports;
   if (t) {
     for (i = 0; i < t->count; i++) {
       if (t->targets[i].uid == uid) {
@@ -843,6 +846,7 @@ static int socket_bind_entry(struct kretprobe_instance *ri,
         break;
       }
     }
+  }
   }
 
   if (!urules || !addr || !sock || !sock->sk) {
