@@ -73,6 +73,9 @@ chmod 0644 "$DMESG_FILE" 2>/dev/null
     printf 'uname_r=%s\n' "$UNAME_R"
     printf 'gki_variant=%s\n' "$GKI_VARIANT"
     printf 'kmod_version=%s\n' "$KMOD_VERSION"
+    printf 'runtime_version=%s\n' "$KMOD_VERSION"
+    printf 'version_code=%s\n' "$(grep '^versionCode=' "$MODULE_PROP" 2>/dev/null | cut -d= -f2-)"
+    printf 'provider=kmod\n'
     printf 'root_manager=%s\n' "$ROOT_MANAGER"
     printf 'kprobes=%s\n' "$KPROBES"
     printf 'kretprobes=%s\n' "$KRETPROBES"

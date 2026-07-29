@@ -218,10 +218,12 @@ def native_build_one(
             """
         )
 
-    build_version = "2.2.1"
-
     module_prop = staging / "module.prop"
     content = module_prop.read_text(encoding="utf-8")
+    version_match = re.search(r"^version=v?([^\n]+)", content, flags=re.MULTILINE)
+    if not version_match:
+        raise RuntimeError(f"module.prop has no version: {module_prop}")
+    build_version = version_match.group(1).strip()
     content = re.sub(
         r"^version=.*", f"version=v{build_version}", content, flags=re.MULTILINE
     )

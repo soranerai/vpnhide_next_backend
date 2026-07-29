@@ -11,6 +11,7 @@ mkdir -p "$STATUS_DIR"
 NOW=$(date +%s 2>/dev/null)
 BOOT_ID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
 UNAME_R=$(uname -r 2>/dev/null)
+VERSION=$(grep '^version=' "$MODULE_PROP" 2>/dev/null | cut -d= -f2-)
 
 if [ -c "/dev/vpnhide_ctrl" ]; then
     LOADED=1
@@ -25,6 +26,9 @@ fi
     printf 'boot_id=%s\n' "$BOOT_ID"
     printf 'uname_r=%s\n' "$UNAME_R"
     printf 'loaded=%s\n' "$LOADED"
+    printf 'runtime_version=%s\n' "$VERSION"
+    printf 'provider=built-in\n'
+    printf 'version_code=%s\n' "$(grep '^versionCode=' "$MODULE_PROP" 2>/dev/null | cut -d= -f2-)"
     printf 'msg=%s\n' "$MSG"
 } > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
 chmod 0644 "$STATUS_FILE" 2>/dev/null
