@@ -9,7 +9,6 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
-#include <sys/stat.h>
 #include <arpa/inet.h>
 #include <linux/types.h>
 #include <linux/netlink.h>
@@ -19,12 +18,10 @@
 #include <netinet/in.h>
 #include <stdbool.h>
 #include <poll.h>
-#include <dirent.h>
 #include <sys/inotify.h>
 #include <sys/wait.h>
 #include <limits.h>
-
-#define VPNHIDE_PM_STATE_DIR "/data/system"
+#include <stdint.h>
 
 #include "include/vpnhide.h"
 #include "generated/iface_lists.h"
@@ -400,36 +397,36 @@ static void drain_config_events(int inotify_fd, const char *config,
 	}
 }
 
-static bool drain_package_events(int inotify_fd)
+/* Package Manager reconciliation is deliberately filesystem-free. The
+ * daemon polls the same `pm` interface used by vpnhide_ctl and keeps only a
+ * fingerprint in memory; it never opens or watches Package Manager state
+ * files directly. */
+static int package_fingerprint(unsigned long long *out)
 {
-	char buffer[4096];
-	ssize_t length;
-	bool changed = false;
+	FILE *pipe;
+	char line[1024];
+	unsigned long long hash = 1469598103934665603ULL;
+	unsigned int lines = 0;
 
-	while ((length = read(inotify_fd, buffer, sizeof(buffer))) > 0) {
-		size_t offset = 0;
-		while (offset < (size_t)length) {
-			struct inotify_event *event =
-				(struct inotify_event *)(buffer + offset);
-			const char *name = event->len ? event->name : "";
-			/* packages.xml is the authoritative package/UID database. The
-			 * list and per-user restrictions files cover boot-time and user
-			 * changes on Android releases where packages.xml is not rewritten. */
-			if (event->len > 0 &&
-			    (!strcmp(name, "packages.xml") ||
-			     !strcmp(name, "packages.list") ||
-			     !strncmp(name, "package-restrictions-", 21)) &&
-			    (event->mask & (IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_ATTRIB)))
-				changed = true;
-			offset += sizeof(*event) + event->len;
+	pipe = popen("pm list packages -f -U --user all 2>/dev/null", "r");
+	if (!pipe)
+		return -1;
+	while (fgets(line, sizeof(line), pipe)) {
+		for (size_t i = 0; line[i] != '\0'; i++) {
+			hash ^= (unsigned char)line[i];
+			hash *= 1099511628211ULL;
 		}
+		lines++;
 	}
-	return changed;
+	if (pclose(pipe) != 0 || lines == 0)
+		return -1;
+	*out = hash;
+	return 0;
 }
 
 int main(int argc, char **argv)
 {
-	int fd, nl_fd, config_fd = -1, pm_fd = -1;
+	int fd, nl_fd, config_fd = -1;
 	const char *ctl = argc > 1 ? argv[1] : NULL;
 	const char *config = argc > 2 ? argv[2] : NULL;
 	const char *self_uid = argc > 3 ? argv[3] : NULL;
@@ -486,18 +483,6 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (ctl && access(VPNHIDE_PM_STATE_DIR, R_OK | X_OK) == 0) {
-		pm_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
-		if (pm_fd >= 0 && inotify_add_watch(pm_fd, VPNHIDE_PM_STATE_DIR,
-				IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_ATTRIB) < 0) {
-			close(pm_fd);
-			pm_fd = -1;
-		}
-		if (pm_fd < 0)
-			fprintf(stderr, "vpnhide-daemon: Package Manager watch unavailable: %s\n",
-				strerror(errno));
-	}
-
 	// Initial update
 	update_spoof_ip(fd, last_ipv4, last_ipv6);
 
@@ -505,6 +490,9 @@ int main(int argc, char **argv)
 	bool update_pending = false;
 	int retry_count = 0;
 	unsigned long long pm_reload_due = 0;
+	unsigned long long next_pm_poll = get_time_ms();
+	unsigned long long pm_fingerprint = 0;
+	bool pm_fingerprint_valid = false;
 
 	while (1) {
 		int poll_timeout = -1;
@@ -523,19 +511,21 @@ int main(int argc, char **argv)
 			if (poll_timeout < 0 || pm_timeout < poll_timeout)
 				poll_timeout = pm_timeout;
 		}
+		if (config && ctl) {
+			unsigned long long now = get_time_ms();
+			int pm_timeout = now >= next_pm_poll ? 0 :
+				(int)(next_pm_poll - now);
+			if (poll_timeout < 0 || pm_timeout < poll_timeout)
+				poll_timeout = pm_timeout;
+		}
 
-		struct pollfd pfds[3];
+		struct pollfd pfds[2];
 		int nfds = 1;
 		memset(pfds, 0, sizeof(pfds));
 		pfds[0].fd = nl_fd;
 		pfds[0].events = POLLIN;
 		if (config_fd >= 0) {
 			pfds[nfds].fd = config_fd;
-			pfds[nfds].events = POLLIN;
-			nfds++;
-		}
-		if (pm_fd >= 0) {
-			pfds[nfds].fd = pm_fd;
 			pfds[nfds].events = POLLIN;
 			nfds++;
 		}
@@ -563,12 +553,14 @@ int main(int argc, char **argv)
 		if (config_fd >= 0 && ret > 0 && (pfds[1].revents & POLLIN)) {
 			drain_config_events(config_fd, config, ctl, self_uid);
 		}
-		if (pm_fd >= 0 && ret > 0) {
-			int pm_index = config_fd >= 0 ? 2 : 1;
-			if (pfds[pm_index].revents & POLLIN && drain_package_events(pm_fd)) {
-				/* Package Manager emits several writes for one install/update.
-				 * Re-query only after a short quiet period. */
-				pm_reload_due = get_time_ms() + 500;
+		if (config && ctl && get_time_ms() >= next_pm_poll) {
+			unsigned long long current_fingerprint;
+			next_pm_poll = get_time_ms() + 30000;
+			if (package_fingerprint(&current_fingerprint) == 0) {
+				if (pm_fingerprint_valid && current_fingerprint != pm_fingerprint)
+					pm_reload_due = get_time_ms() + 500;
+				pm_fingerprint = current_fingerprint;
+				pm_fingerprint_valid = true;
 			}
 		}
 		if (pm_reload_due && get_time_ms() >= pm_reload_due) {
@@ -602,8 +594,6 @@ int main(int argc, char **argv)
 	close(nl_fd);
 	if (config_fd >= 0)
 		close(config_fd);
-	if (pm_fd >= 0)
-		close(pm_fd);
 	close(fd);
 	return 0;
 }

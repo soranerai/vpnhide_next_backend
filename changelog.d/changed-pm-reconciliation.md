@@ -1,4 +1,4 @@
 ---
-en: Reconcile allowlist and blacklist policies after Package Manager changes
-ru: Повторно применять allowlist и blacklist после изменений Package Manager
+en: Reconcile policies after Package Manager changes without touching state files
+ru: Повторно применять политики после изменений Package Manager без доступа к state-файлам
 ---

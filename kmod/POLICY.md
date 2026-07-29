@@ -68,7 +68,9 @@ rule-count overflow reject the configuration instead of truncating it.
 
 The daemon watches the JSON configuration directory and invokes the same
 `vpnhide-ctl load` path after an atomic config update, so frontend writes do
-not require a reboot or a separate privileged apply action. It also watches
-Package Manager state files (`packages.xml`, `packages.list`, and per-user
-package restrictions), debounces bursts, and re-resolves the policy after
-install, uninstall, UID, or user changes.
+not require a reboot or a separate privileged apply action. Package Manager
+reconciliation is filesystem-free: the daemon periodically fingerprints the
+authoritative `pm list packages -f -U --user all` output in memory and
+re-resolves after install, uninstall, UID, or user changes. No Package Manager
+state files are opened, watched, or created; persistent state remains in the
+application configuration directory.
