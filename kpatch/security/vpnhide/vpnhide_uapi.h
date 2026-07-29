@@ -3,7 +3,7 @@
 
 #include <linux/types.h>
 
-#define VPNHIDE_VERSION_CODE 20201
+#define VPNHIDE_VERSION_CODE 20202
 
 #define MAX_TARGET_UIDS 512
 #define MAX_PORT_RULES_PER_UID 16
@@ -35,6 +35,15 @@ struct vpnhide_ioctl_data {
 	uid_t uids[MAX_TARGET_UIDS];
 };
 
+/* Replace the two interface-hiding UID snapshots through one control call;
+ * the kernel allocates both new snapshots before publishing them. */
+struct vpnhide_target_bundle {
+	int kmod_count;
+	uid_t kmod_uids[MAX_TARGET_UIDS];
+	int lsposed_count;
+	uid_t lsposed_uids[MAX_TARGET_UIDS];
+};
+
 #define VH_IOCTL_MAGIC 0x56
 
 #define MAX_IFACE_PREFIXES 32
@@ -53,6 +62,8 @@ struct vpnhide_spoof_ip {
 };
 
 #define VH_SET_TARGETS _IOW(VH_IOCTL_MAGIC, 0x01, struct vpnhide_ioctl_data)
+#define VH_SET_TARGET_BUNDLE \
+	_IOW(VH_IOCTL_MAGIC, 0x20, struct vpnhide_target_bundle)
 #define VH_SET_DEBUG _IOW(VH_IOCTL_MAGIC, 0x03, int)
 #define VH_SET_PORT_TARGETS \
 	_IOW(VH_IOCTL_MAGIC, 0x05, struct vpnhide_ioctl_data)

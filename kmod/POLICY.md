@@ -42,5 +42,7 @@ larger result. Removing this limit requires a staged/committed kernel UAPI and
 must be implemented consistently in kmod and kpatch.
 
 The current `load` path validates the complete policy before issuing ioctls
-and returns failure if any ioctl fails. It is not yet a cross-ioctl atomic
-commit; that is the next backend ABI step.
+and applies kernel and LSPosed target snapshots through
+`VH_SET_TARGET_BUNDLE`. Hook masks, interface prefixes, and port rules still
+have independent ioctls; making the entire configuration one transaction is
+the next ABI step.

@@ -451,6 +451,55 @@ static int update_lsposed_targets(uid_t *uids, int count) {
   return 0;
 }
 
+/* Prepare both target snapshots before publishing either one. This keeps
+ * allocation failures from replacing only one side of the configuration. */
+static int update_target_bundle(const struct vpnhide_target_bundle *bundle) {
+  struct vpnhide_targets *new_kmod, *new_lsposed;
+  struct vpnhide_targets *old_kmod, *old_lsposed;
+
+  if (bundle->kmod_count < 0 || bundle->kmod_count > MAX_TARGET_UIDS ||
+      bundle->lsposed_count < 0 || bundle->lsposed_count > MAX_TARGET_UIDS)
+    return -EINVAL;
+
+  new_kmod = kzalloc(sizeof(*new_kmod), GFP_KERNEL);
+  new_lsposed = kzalloc(sizeof(*new_lsposed), GFP_KERNEL);
+  if (!new_kmod || !new_lsposed) {
+    kfree(new_kmod);
+    kfree(new_lsposed);
+    return -ENOMEM;
+  }
+
+  new_kmod->count = bundle->kmod_count;
+  new_lsposed->count = bundle->lsposed_count;
+  memcpy(new_kmod->uids, bundle->kmod_uids,
+         bundle->kmod_count * sizeof(uid_t));
+  memcpy(new_lsposed->uids, bundle->lsposed_uids,
+         bundle->lsposed_count * sizeof(uid_t));
+
+  spin_lock(&targets_update_lock);
+  spin_lock(&lsposed_targets_update_lock);
+  old_kmod = rcu_dereference_protected(
+      global_targets, lockdep_is_held(&targets_update_lock));
+  old_lsposed = rcu_dereference_protected(
+      global_lsposed_targets, lockdep_is_held(&lsposed_targets_update_lock));
+  rcu_assign_pointer(global_targets, new_kmod);
+  rcu_assign_pointer(global_lsposed_targets, new_lsposed);
+  spin_unlock(&lsposed_targets_update_lock);
+  spin_unlock(&targets_update_lock);
+
+  if (old_kmod) {
+    synchronize_rcu();
+    kfree(old_kmod);
+  }
+  if (old_lsposed) {
+    synchronize_rcu();
+    kfree(old_lsposed);
+  }
+  atomic_inc(&vpnhide_config_generation);
+  wake_up_interruptible(&vpnhide_config_wait);
+  return 0;
+}
+
 /* --- Control Device file operations --- */
 
 static char java_stats_buf[4096];
@@ -664,6 +713,22 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
     return -EPERM;
 
   switch (cmd) {
+  case VH_SET_TARGET_BUNDLE: {
+    struct vpnhide_target_bundle *bundle;
+    int bundle_ret;
+
+    bundle = kmalloc(sizeof(*bundle), GFP_KERNEL);
+    if (!bundle)
+      return -ENOMEM;
+    if (copy_from_user(bundle, (void __user *)arg, sizeof(*bundle))) {
+      kfree(bundle);
+      return -EFAULT;
+    }
+    bundle_ret = update_target_bundle(bundle);
+    kfree(bundle);
+    return bundle_ret;
+  }
+
   case VH_SET_TARGETS:
   case VH_SET_PORT_TARGETS:
   case VH_SET_LSPOSED_TARGETS:

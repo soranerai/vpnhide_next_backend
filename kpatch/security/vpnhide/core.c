@@ -554,6 +554,53 @@ static ssize_t vpnhide_dev_write(struct file *file, const char __user *buf,
 /* IOCTL dispatch                                                      */
 /* ------------------------------------------------------------------ */
 
+static int update_target_bundle(const struct vpnhide_target_bundle *bundle)
+{
+	struct vpnhide_targets *new_kmod, *new_lsposed;
+	struct vpnhide_targets *old_kmod, *old_lsposed;
+
+	if (bundle->kmod_count < 0 || bundle->kmod_count > MAX_TARGET_UIDS ||
+	    bundle->lsposed_count < 0 || bundle->lsposed_count > MAX_TARGET_UIDS)
+		return -EINVAL;
+
+	new_kmod = kzalloc(sizeof(*new_kmod), GFP_KERNEL);
+	new_lsposed = kzalloc(sizeof(*new_lsposed), GFP_KERNEL);
+	if (!new_kmod || !new_lsposed) {
+		kfree(new_kmod);
+		kfree(new_lsposed);
+		return -ENOMEM;
+	}
+
+	new_kmod->count = bundle->kmod_count;
+	new_lsposed->count = bundle->lsposed_count;
+	memcpy(new_kmod->uids, bundle->kmod_uids,
+	       bundle->kmod_count * sizeof(uid_t));
+	memcpy(new_lsposed->uids, bundle->lsposed_uids,
+	       bundle->lsposed_count * sizeof(uid_t));
+	sort(new_kmod->uids, new_kmod->count, sizeof(uid_t), uid_cmp, NULL);
+	sort(new_lsposed->uids, new_lsposed->count, sizeof(uid_t), uid_cmp, NULL);
+
+	spin_lock(&targets_update_lock);
+	spin_lock(&lsposed_targets_update_lock);
+	old_kmod = rcu_dereference_protected(
+		global_targets, lockdep_is_held(&targets_update_lock));
+	old_lsposed = rcu_dereference_protected(
+		global_lsposed_targets, lockdep_is_held(&lsposed_targets_update_lock));
+	rcu_assign_pointer(global_targets, new_kmod);
+	rcu_assign_pointer(global_lsposed_targets, new_lsposed);
+	WRITE_ONCE(g_has_targets, new_kmod->count > 0);
+	spin_unlock(&lsposed_targets_update_lock);
+	spin_unlock(&targets_update_lock);
+
+	if (old_kmod)
+		kfree_rcu(old_kmod, rcu);
+	if (old_lsposed)
+		kfree_rcu(old_lsposed, rcu);
+	atomic_inc(&vpnhide_config_generation);
+	wake_up_all(&vpnhide_config_wait);
+	return 0;
+}
+
 static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 				 unsigned long arg)
 {
@@ -564,6 +611,21 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		return -EPERM;
 
 	switch (cmd) {
+	case VH_SET_TARGET_BUNDLE: {
+		struct vpnhide_target_bundle *bundle;
+		int bundle_ret;
+
+		bundle = kzalloc(sizeof(*bundle), GFP_KERNEL);
+		if (!bundle)
+			return -ENOMEM;
+		if (copy_from_user(bundle, uarg, sizeof(*bundle))) {
+			kfree(bundle);
+			return -EFAULT;
+		}
+		bundle_ret = update_target_bundle(bundle);
+		kfree(bundle);
+		return bundle_ret;
+	}
 
 	case VH_SET_TARGETS: {
 		struct vpnhide_ioctl_data *td;

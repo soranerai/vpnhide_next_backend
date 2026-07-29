@@ -192,12 +192,14 @@ int main(int argc, char **argv)
 		JSON_Array *apps = json_object_get_array(root, "apps");
 		struct vpnhide_ioctl_data targets;
 		struct vpnhide_ioctl_data lsposed;
+		struct vpnhide_target_bundle target_bundle;
 		struct vpnhide_app_hook_ioctl_data app_hook_masks;
 		struct vpnhide_policy_summary policy_summary;
 		char policy_error[256];
 		int policy_ret;
 		memset(&targets, 0, sizeof(targets));
 		memset(&lsposed, 0, sizeof(lsposed));
+		memset(&target_bundle, 0, sizeof(target_bundle));
 		memset(&app_hook_masks, 0, sizeof(app_hook_masks));
 		memset(policy_error, 0, sizeof(policy_error));
 
@@ -279,13 +281,15 @@ int main(int argc, char **argv)
 		}
 		sort_uids(targets.uids, targets.count);
 		sort_uids(lsposed.uids, lsposed.count);
+		target_bundle.kmod_count = targets.count;
+		target_bundle.lsposed_count = lsposed.count;
+		memcpy(target_bundle.kmod_uids, targets.uids,
+		       targets.count * sizeof(targets.uids[0]));
+		memcpy(target_bundle.lsposed_uids, lsposed.uids,
+		       lsposed.count * sizeof(lsposed.uids[0]));
 
-		if (ioctl(fd, VH_SET_TARGETS, &targets) < 0) {
-			perror("VH_SET_TARGETS");
-			apply_failed = 1;
-		}
-		if (ioctl(fd, VH_SET_LSPOSED_TARGETS, &lsposed) < 0) {
-			perror("VH_SET_LSPOSED_TARGETS");
+		if (ioctl(fd, VH_SET_TARGET_BUNDLE, &target_bundle) < 0) {
+			perror("VH_SET_TARGET_BUNDLE");
 			apply_failed = 1;
 		}
 
