@@ -17,6 +17,11 @@ mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sys /sys 2>/dev/null
 mount -t devtmpfs dev /dev 2>/dev/null
 
+# The Android/Bionic static ctl uses /system/bin/sh for popen().  The Alpine
+# QEMU rootfs only provides /bin/sh, so provide the Android-compatible path.
+mkdir -p /system/bin
+ln -sf /bin/sh /system/bin/sh
+
 echo "##### VPNHIDE-QEMU-TEST START #####"
 echo "KREL=$(uname -r)"
 
@@ -54,8 +59,13 @@ cat > "$TEST_CONFIG" <<'EOF'
   "portRules": [{"enabled":true, "packageName":"com.vpnhide.test", "userId":1, "startPort":8080, "endPort":8080, "protocol":"BOTH"}]
 }
 EOF
-export VPNHIDE_PM_COMMAND="printf 'package:/data/app/test/base.apk=com.vpnhide.test uid:115555\\n'"
-apply_policy() { /vpnhide-ctl load "$TEST_CONFIG" 0 2>/dev/null; }
+export VPNHIDE_PM_COMMAND="echo 'package:/data/app/test/base.apk=com.vpnhide.test uid:115555'"
+apply_policy() {
+	/vpnhide-ctl load "$TEST_CONFIG" 0
+	rc=$?
+	echo "POLICY_APPLY_RC=$rc"
+	return "$rc"
+}
 REGISTERED=1
 echo "REGISTERED=$REGISTERED"
 

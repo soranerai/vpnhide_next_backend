@@ -644,63 +644,6 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		return policy_ret;
 	}
 
-	#if 0 /* removed legacy policy setters; VH_SET_POLICY is authoritative */
-	case VH_SET_TARGET_BUNDLE: {
-		struct vpnhide_target_bundle *bundle;
-		int bundle_ret;
-
-		bundle = kzalloc(sizeof(*bundle), GFP_KERNEL);
-		if (!bundle)
-			return -ENOMEM;
-		if (copy_from_user(bundle, uarg, sizeof(*bundle))) {
-			kfree(bundle);
-			return -EFAULT;
-		}
-		bundle_ret = update_target_bundle(bundle);
-		kfree(bundle);
-		return bundle_ret;
-	}
-
-	case VH_SET_TARGETS: {
-		struct vpnhide_ioctl_data *td;
-		struct vpnhide_targets *nt, *old;
-		int i;
-
-		td = kzalloc(sizeof(*td), GFP_KERNEL);
-		if (!td)
-			return -ENOMEM;
-		if (copy_from_user(td, uarg, sizeof(*td))) {
-			kfree(td);
-			return -EFAULT;
-		}
-		if (td->count < 0 || td->count > MAX_TARGET_UIDS) {
-			kfree(td);
-			return -EINVAL;
-		}
-		nt = kzalloc(sizeof(*nt), GFP_KERNEL);
-		if (!nt) {
-			kfree(td);
-			return -ENOMEM;
-		}
-		nt->count = td->count;
-		for (i = 0; i < td->count; i++)
-			nt->uids[i] = td->uids[i];
-		kfree(td);
-		sort(nt->uids, nt->count, sizeof(uid_t), uid_cmp, NULL);
-
-		spin_lock(&targets_update_lock);
-		old = rcu_dereference_protected(global_targets,
-				lockdep_is_held(&targets_update_lock));
-		rcu_assign_pointer(global_targets, nt);
-		WRITE_ONCE(g_has_targets, nt->count > 0);
-		spin_unlock(&targets_update_lock);
-		if (old) kfree_rcu(old, rcu);
-		atomic_inc(&vpnhide_config_generation);
-		wake_up_all(&vpnhide_config_wait);
-		break;
-	}
-
-	#endif
 	case VH_GET_TARGETS: {
 		struct vpnhide_ioctl_data *td;
 		struct vpnhide_policy_snapshot *snapshot;
@@ -725,78 +668,6 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		break;
 	}
 
-	#if 0
-	case VH_SET_LSPOSED_TARGETS: {
-		struct vpnhide_ioctl_data *td;
-		struct vpnhide_targets *nt, *old;
-		int i;
-
-		td = kzalloc(sizeof(*td), GFP_KERNEL);
-		if (!td)
-			return -ENOMEM;
-		if (copy_from_user(td, uarg, sizeof(*td))) {
-			kfree(td);
-			return -EFAULT;
-		}
-		if (td->count < 0 || td->count > MAX_TARGET_UIDS) {
-			kfree(td);
-			return -EINVAL;
-		}
-		nt = kzalloc(sizeof(*nt), GFP_KERNEL);
-		if (!nt) {
-			kfree(td);
-			return -ENOMEM;
-		}
-		nt->count = td->count;
-		for (i = 0; i < td->count; i++)
-			nt->uids[i] = td->uids[i];
-		kfree(td);
-		sort(nt->uids, nt->count, sizeof(uid_t), uid_cmp, NULL);
-
-		spin_lock(&lsposed_targets_update_lock);
-		old = rcu_dereference_protected(global_lsposed_targets,
-				lockdep_is_held(&lsposed_targets_update_lock));
-		rcu_assign_pointer(global_lsposed_targets, nt);
-		spin_unlock(&lsposed_targets_update_lock);
-		if (old) kfree_rcu(old, rcu);
-		break;
-	}
-
-	case VH_SET_PORT_TARGETS: {
-		struct vpnhide_port_ioctl_data *pd;
-		struct vpnhide_port_targets *np, *old;
-
-		pd = kzalloc(sizeof(*pd), GFP_KERNEL);
-		if (!pd)
-			return -ENOMEM;
-		if (copy_from_user(pd, uarg, sizeof(*pd))) {
-			kfree(pd);
-			return -EFAULT;
-		}
-		if (pd->count < 0 || pd->count > MAX_TARGET_UIDS) {
-			kfree(pd);
-			return -EINVAL;
-		}
-		np = kzalloc(sizeof(*np), GFP_KERNEL);
-		if (!np) {
-			kfree(pd);
-			return -ENOMEM;
-		}
-		np->count = pd->count;
-		memcpy(np->targets, pd->targets,
-		       pd->count * sizeof(np->targets[0]));
-		kfree(pd);
-
-		spin_lock(&port_targets_update_lock);
-		old = rcu_dereference_protected(global_port_targets,
-				lockdep_is_held(&port_targets_update_lock));
-		rcu_assign_pointer(global_port_targets, np);
-		spin_unlock(&port_targets_update_lock);
-		if (old) call_rcu(&old->rcu, vh_free_port_targets_rcu);
-		break;
-	}
-
-	#endif
 	case VH_SET_VPN_IFINDEXES: {
 		struct vpnhide_vpn_ifindexes idata;
 		struct vpnhide_active_vpns *nav, *old;
@@ -828,28 +699,6 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		break;
 	}
 
-	#if 0
-	case VH_SET_DEBUG: {
-		u32 val;
-
-		if (copy_from_user(&val, uarg, sizeof(val)))
-			return -EFAULT;
-		WRITE_ONCE(debug_enabled, !!val);
-		break;
-	}
-
-	case VH_SET_ACTIVE_HOOKS: {
-		u32 mask;
-
-		if (copy_from_user(&mask, uarg, sizeof(mask)))
-			return -EFAULT;
-		WRITE_ONCE(active_hooks_mask, mask);
-		atomic_inc(&vpnhide_config_generation);
-		wake_up_all(&vpnhide_config_wait);
-		break;
-	}
-
-	#endif
 	case VH_SET_SPOOF_IP: {
 		struct vpnhide_spoof_ip sip;
 
@@ -859,32 +708,6 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		break;
 	}
 
-	#if 0
-	case VH_SET_IFACE_PREFIXES: {
-		struct vpnhide_iface_ioctl_data pd;
-		struct vpnhide_iface_prefixes *np, *old;
-
-		if (copy_from_user(&pd, uarg, sizeof(pd)))
-			return -EFAULT;
-		if (pd.count < 0 || pd.count > MAX_IFACE_PREFIXES)
-			return -EINVAL;
-		np = kzalloc(sizeof(*np), GFP_KERNEL);
-		if (!np)
-			return -ENOMEM;
-		np->count = pd.count;
-		memcpy(np->prefixes, pd.prefixes,
-		       pd.count * MAX_IFACE_LEN);
-
-		spin_lock(&iface_prefixes_lock);
-		old = rcu_dereference_protected(global_iface_prefixes,
-				lockdep_is_held(&iface_prefixes_lock));
-		rcu_assign_pointer(global_iface_prefixes, np);
-		spin_unlock(&iface_prefixes_lock);
-		if (old) kfree_rcu(old, rcu);
-		break;
-	}
-
-	#endif
 	case VH_SET_COVER_IFACE: {
 		struct vpnhide_cover_iface ci;
 
@@ -894,19 +717,6 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		break;
 	}
 
-	#if 0
-	case VH_SET_JAVA_HOOK_MASK: {
-		u32 mask;
-
-		if (copy_from_user(&mask, uarg, sizeof(mask)))
-			return -EFAULT;
-		WRITE_ONCE(java_hooks_mask, mask);
-		atomic_inc(&vpnhide_config_generation);
-		wake_up_all(&vpnhide_config_wait);
-		break;
-	}
-
-	#endif
 	case VH_GET_JAVA_HOOK_MASK: {
 		u32 mask = vpnhide_java_hooks_mask();
 
@@ -915,43 +725,6 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		break;
 	}
 
-	#if 0
-	case VH_SET_APP_HOOK_MASKS: {
-		struct vpnhide_app_hook_ioctl_data *amd;
-		struct vpnhide_app_hook_masks *nm, *old;
-
-		amd = kzalloc(sizeof(*amd), GFP_KERNEL);
-		if (!amd)
-			return -ENOMEM;
-		if (copy_from_user(amd, uarg, sizeof(*amd))) {
-			kfree(amd);
-			return -EFAULT;
-		}
-		if (amd->count < 0 || amd->count > MAX_TARGET_UIDS) {
-			kfree(amd);
-			return -EINVAL;
-		}
-		nm = kzalloc(sizeof(*nm), GFP_KERNEL);
-		if (!nm) {
-			kfree(amd);
-			return -ENOMEM;
-		}
-		nm->count = amd->count;
-		memcpy(nm->masks, amd->masks,
-		       amd->count * sizeof(nm->masks[0]));
-		kfree(amd);
-
-		spin_lock(&app_hook_masks_update_lock);
-		old = rcu_dereference_protected(global_app_hook_masks,
-				lockdep_is_held(&app_hook_masks_update_lock));
-		rcu_assign_pointer(global_app_hook_masks, nm);
-		WRITE_ONCE(g_has_app_masks, nm->count > 0);
-		spin_unlock(&app_hook_masks_update_lock);
-		if (old) call_rcu(&old->rcu, vh_free_app_hook_masks_rcu);
-		break;
-	}
-
-	#endif
 	case VH_GET_APP_HOOK_MASKS: {
 		struct vpnhide_app_hook_ioctl_data *amd;
 		struct vpnhide_policy_snapshot *snapshot;
@@ -1088,42 +861,6 @@ found:
 		break;
 	}
 
-	#if 0
-	case VH_SET_PORT_RULES: {
-		struct vpnhide_port_ioctl_data *pd;
-		struct vpnhide_port_targets *np, *old;
-
-		pd = kzalloc(sizeof(*pd), GFP_KERNEL);
-		if (!pd)
-			return -ENOMEM;
-		if (copy_from_user(pd, uarg, sizeof(*pd))) {
-			kfree(pd);
-			return -EFAULT;
-		}
-		if (pd->count < 0 || pd->count > MAX_TARGET_UIDS) {
-			kfree(pd);
-			return -EINVAL;
-		}
-		np = kzalloc(sizeof(*np), GFP_KERNEL);
-		if (!np) {
-			kfree(pd);
-			return -ENOMEM;
-		}
-		np->count = pd->count;
-		memcpy(np->targets, pd->targets,
-		       pd->count * sizeof(np->targets[0]));
-		kfree(pd);
-
-		spin_lock(&port_targets_update_lock);
-		old = rcu_dereference_protected(global_port_targets,
-				lockdep_is_held(&port_targets_update_lock));
-		rcu_assign_pointer(global_port_targets, np);
-		spin_unlock(&port_targets_update_lock);
-		if (old) call_rcu(&old->rcu, vh_free_port_targets_rcu);
-		break;
-	}
-
-	#endif
 	case VH_GET_IFACE_PREFIXES: {
 		struct vpnhide_iface_ioctl_data pd;
 		struct vpnhide_policy_snapshot *snapshot;
