@@ -114,5 +114,7 @@ fi
 DAEMON="$MODDIR/vpnhide-daemon"
 chmod +x "$DAEMON"
 
+DAEMON_SELF_UID="$(pm list packages -U --user all 2>/dev/null | grep "^package:dev.soranerai.vpnhidenext " | awk '{print $2}' | sed 's/uid://' | tr ',' '\n' | head -n 1)"
+
 # Start the event-driven C daemon in the background
-"$DAEMON" >/data/adb/vpnhide_kmod/daemon.log 2>&1 &
+"$DAEMON" "$CTL" "$JSON_CONF" "$DAEMON_SELF_UID" >/data/adb/vpnhide_kmod/daemon.log 2>&1 &

@@ -64,6 +64,96 @@ static int add_uid_distinct(uid_t *uids, int *count, uid_t uid)
 	return 0;
 }
 
+static int add_port_rule(struct vpnhide_uid_port_rules *target,
+				 JSON_Object *rule, char *error, size_t error_len)
+{
+	long start = (long)json_object_get_number(rule, "startPort");
+	long end = (long)json_object_get_number(rule, "endPort");
+	const char *protocol = json_object_get_string(rule, "protocol");
+	unsigned char proto = VH_PROTO_BOTH;
+
+	if (!json_object_get_boolean(rule, "enabled"))
+		return 0;
+	if (start < 0 || end < 0 || start > 65535 || end > 65535 || start > end) {
+		set_error(error, error_len, "invalid port range");
+		return -EINVAL;
+	}
+	if (protocol) {
+		if (!strcmp(protocol, "TCP"))
+			proto = VH_PROTO_TCP;
+		else if (!strcmp(protocol, "UDP"))
+			proto = VH_PROTO_UDP;
+		else if (strcmp(protocol, "BOTH")) {
+			set_error(error, error_len, "invalid port protocol");
+			return -EINVAL;
+		}
+	}
+	if (target->rule_count >= MAX_PORT_RULES_PER_UID) {
+		set_error(error, error_len, "effective port rules exceed MAX_PORT_RULES_PER_UID");
+		return -E2BIG;
+	}
+	target->rules[target->rule_count].start_port = (unsigned short)start;
+	target->rules[target->rule_count].end_port = (unsigned short)end;
+	target->rules[target->rule_count].protocol = proto;
+	target->rule_count++;
+	return 1;
+}
+
+static int port_layer_enabled(const JSON_Array *apps)
+{
+	size_t i, count = apps ? json_array_get_count(apps) : 0;
+	for (i = 0; i < count; i++) {
+		JSON_Object *app = json_array_get_object(apps, i);
+		if (app && json_object_get_boolean(app, "portHiding") == 1)
+			return 1;
+	}
+	return 0;
+}
+
+static int resolve_package_port_rules(const JSON_Array *port_rules,
+					      const JSON_Array *mass_rules,
+					      const struct discovered_package *pkg,
+					      struct vpnhide_uid_port_rules *target,
+					      char *error, size_t error_len)
+{
+	size_t i, count;
+	int ret;
+
+	memset(target, 0, sizeof(*target));
+	target->uid = pkg->uid;
+	count = port_rules ? json_array_get_count(port_rules) : 0;
+	for (i = 0; i < count; i++) {
+		JSON_Object *rule = json_array_get_object(port_rules, i);
+		const char *name;
+		int user;
+		if (!rule)
+			continue;
+		name = json_object_get_string(rule, "packageName");
+		user = (int)json_object_get_number(rule, "userId");
+		if (name && !strcmp(name, pkg->name) && user == pkg->user_id) {
+			ret = add_port_rule(target, rule, error, error_len);
+			if (ret < 0)
+				return ret;
+		}
+	}
+	count = mass_rules ? json_array_get_count(mass_rules) : 0;
+	for (i = 0; i < count; i++) {
+		JSON_Object *rule = json_array_get_object(mass_rules, i);
+		if (!rule)
+			continue;
+		ret = add_port_rule(target, rule, error, error_len);
+		if (ret < 0)
+			return ret;
+	}
+	if (target->rule_count == 0) {
+		target->rules[0].start_port = 0;
+		target->rules[0].end_port = 65535;
+		target->rules[0].protocol = VH_PROTO_BOTH;
+		target->rule_count = 1;
+	}
+	return 0;
+}
+
 static int package_is_system(const char *path)
 {
 	/* Package Manager's APK path is the only system classification available
@@ -293,5 +383,121 @@ int vpnhide_resolve_targets(const JSON_Object *root, uid_t self_uid,
 		kmod->count : lsposed->count;
 	summary->kmod_targets = kmod->count;
 	summary->lsposed_targets = lsposed->count;
+	return 0;
+}
+
+int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
+				       struct vpnhide_port_ioctl_data *result,
+				       struct vpnhide_policy_summary *summary,
+				       char *error, size_t error_len)
+{
+	const JSON_Array *apps;
+	const JSON_Array *port_rules;
+	const JSON_Array *mass_rules;
+	struct discovered_package *packages = NULL;
+	int package_count = 0;
+	int ret;
+	int i;
+
+	if (!root || !result || !summary) {
+		set_error(error, error_len, "invalid port policy arguments");
+		return -EINVAL;
+	}
+	memset(result, 0, sizeof(*result));
+	apps = json_object_get_array(root, "apps");
+	port_rules = json_object_get_array(root, "portRules");
+	mass_rules = json_object_get_array(root, "massPortRules");
+	if (!port_layer_enabled(apps))
+		return 0;
+
+	if (summary->mode == VPNHIDE_LIST_BLACKLIST) {
+		size_t n = apps ? json_array_get_count(apps) : 0;
+		size_t j;
+		for (j = 0; j < n; j++) {
+			JSON_Object *app = json_array_get_object(apps, j);
+			struct vpnhide_uid_port_rules *target;
+			uid_t uid;
+			if (!app || json_object_get_boolean(app, "portHiding") != 1)
+				continue;
+			uid = (uid_t)json_object_get_number(app, "uid");
+			if (!uid || uid == self_uid || uid < 10000)
+				continue;
+			if (result->count >= MAX_TARGET_UIDS) {
+				set_error(error, error_len, "port target set exceeds MAX_TARGET_UIDS");
+				return -E2BIG;
+			}
+			target = &result->targets[result->count];
+			memset(target, 0, sizeof(*target));
+			target->uid = uid;
+			/* Blacklist entries may have stale package metadata, so use the
+			 * configured package key only when it is available. */
+			{
+				const char *name = json_object_get_string(app, "packageName");
+				int user = (int)json_object_get_number(app, "userId");
+				size_t k, m = port_rules ? json_array_get_count(port_rules) : 0;
+				for (k = 0; k < m; k++) {
+					JSON_Object *rule = json_array_get_object(port_rules, k);
+					const char *rule_name;
+					if (!rule)
+						continue;
+					rule_name = json_object_get_string(rule, "packageName");
+					if (name && rule_name && !strcmp(name, rule_name) &&
+					    (int)json_object_get_number(rule, "userId") == user) {
+						ret = add_port_rule(target, rule, error, error_len);
+						if (ret < 0)
+							return ret;
+					}
+				}
+			}
+			{
+				size_t k;
+				for (k = 0; mass_rules && k < json_array_get_count(mass_rules); k++) {
+				JSON_Object *rule = json_array_get_object(mass_rules, k);
+			if (!rule)
+				continue;
+			ret = add_port_rule(target, rule, error, error_len);
+			if (ret < 0)
+				return ret;
+				}
+			}
+			if (!target->rule_count) {
+				target->rules[0].start_port = 0;
+				target->rules[0].end_port = 65535;
+				target->rules[0].protocol = VH_PROTO_BOTH;
+				target->rule_count = 1;
+			}
+			result->count++;
+		}
+		summary->port_targets = result->count;
+		return 0;
+	}
+
+	ret = discover_packages(&packages, &package_count, error, error_len);
+	if (ret)
+		return ret;
+	for (i = 0; i < package_count; i++) {
+		struct discovered_package *pkg = &packages[i];
+		int selected;
+		if (pkg->system_package || pkg->uid == self_uid || pkg->uid < 10000)
+			continue;
+		selected = selected_for_layer(apps, pkg->name, pkg->user_id,
+					      pkg->uid, "portHiding");
+		if (selected)
+			continue;
+		if (result->count >= MAX_TARGET_UIDS) {
+			free(packages);
+			set_error(error, error_len, "port target set exceeds MAX_TARGET_UIDS");
+			return -E2BIG;
+		}
+		ret = resolve_package_port_rules(port_rules, mass_rules, pkg,
+						&result->targets[result->count], error, error_len);
+		if (ret) {
+			free(packages);
+			return ret;
+		}
+		result->count++;
+	}
+	free(packages);
+	summary->port_targets = result->count;
 	return 0;
 }

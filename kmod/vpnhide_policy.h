@@ -20,6 +20,7 @@ struct vpnhide_policy_summary {
 	int selected_exceptions;
 	int kmod_targets;
 	int lsposed_targets;
+	int port_targets;
 	int ignored_selected_system_packages;
 };
 
@@ -30,6 +31,12 @@ int vpnhide_resolve_targets(const JSON_Object *root, uid_t self_uid,
 				    struct vpnhide_ioctl_data *lsposed,
 				    struct vpnhide_policy_summary *summary,
 				    char *error, size_t error_len);
+
+/* Resolve port hiding using the same list mode and protected-package rules. */
+int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
+				       struct vpnhide_port_ioctl_data *result,
+				       struct vpnhide_policy_summary *summary,
+				       char *error, size_t error_len);
 
 const char *vpnhide_list_mode_name(enum vpnhide_list_mode mode);
 

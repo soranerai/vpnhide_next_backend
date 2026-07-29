@@ -17,6 +17,7 @@ OUTPUT="$($OUT validate "$HERE/policy_allowlist.json" 10003)"
 grep -q '^mode=ALLOWLIST$' <<<"$OUTPUT"
 grep -q '^kmod_targets=1$' <<<"$OUTPUT"
 grep -q '^lsposed_targets=1$' <<<"$OUTPUT"
+grep -q '^port_targets=1$' <<<"$OUTPUT"
 grep -q '^ignored_selected_system_packages=0$' <<<"$OUTPUT"
 
 OUTPUT="$($OUT validate "$HERE/policy_blacklist.json" 10003)"

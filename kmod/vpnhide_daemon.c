@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -18,6 +20,9 @@
 #include <stdbool.h>
 #include <poll.h>
 #include <dirent.h>
+#include <sys/inotify.h>
+#include <sys/wait.h>
+#include <limits.h>
 
 #include "include/vpnhide.h"
 #include "generated/iface_lists.h"
@@ -322,11 +327,15 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6)
 			char buf[64];
 			int len = snprintf(buf, sizeof(buf), "cover_iface:%s\n", best_ifname);
 			if (len > 0) {
-				write(fd, buf, len);
+				if (write(fd, buf, len) < 0) {
+					/* The control fd may disappear during module removal. */
+				}
 			}
 		}
 	} else {
-		write(fd, "cover_iface:none\n", 17);
+		if (write(fd, "cover_iface:none\n", 17) < 0) {
+			/* The control fd may disappear during module removal. */
+		}
 	}
 
 	/* Send the list of active VPNs to the kernel module */
@@ -340,9 +349,59 @@ static unsigned long long get_time_ms(void)
 	return (unsigned long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+static void reload_policy(const char *ctl, const char *config, const char *self_uid)
+{
+	pid_t pid;
+	int status;
+
+	if (!ctl || !config || access(config, R_OK) != 0)
+		return;
+	pid = fork();
+	if (pid < 0) {
+		fprintf(stderr, "vpnhide-daemon: cannot fork policy reload: %s\n",
+			strerror(errno));
+		return;
+	}
+	if (pid == 0) {
+		if (self_uid && self_uid[0])
+			execl(ctl, ctl, "load", config, self_uid, (char *)NULL);
+		else
+			execl(ctl, ctl, "load", config, (char *)NULL);
+		_exit(127);
+	}
+	if (waitpid(pid, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+		fprintf(stderr, "vpnhide-daemon: policy reload failed\n");
+}
+
+static void drain_config_events(int inotify_fd, const char *config,
+					const char *ctl, const char *self_uid)
+{
+	char buffer[4096];
+	ssize_t length;
+	bool changed = false;
+
+	while ((length = read(inotify_fd, buffer, sizeof(buffer))) > 0) {
+		size_t offset = 0;
+		while (offset < (size_t)length) {
+			struct inotify_event *event = (struct inotify_event *)(buffer + offset);
+			if (event->mask & (IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_ATTRIB))
+				changed = true;
+			offset += sizeof(*event) + event->len;
+		}
+	}
+	if (changed) {
+		fprintf(stderr, "vpnhide-daemon: configuration changed, reloading\n");
+		reload_policy(ctl, config, self_uid);
+	}
+}
+
 int main(int argc, char **argv)
 {
-	int fd, nl_fd;
+	int fd, nl_fd, config_fd = -1;
+	const char *ctl = argc > 1 ? argv[1] : NULL;
+	const char *config = argc > 2 ? argv[2] : NULL;
+	const char *self_uid = argc > 3 ? argv[3] : NULL;
+	char config_dir[PATH_MAX];
 	struct sockaddr_nl sa;
 	char last_ipv4[64];
 	char last_ipv6[64];
@@ -377,6 +436,24 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	if (config && ctl) {
+		const char *slash = strrchr(config, '/');
+		size_t dir_len = slash ? (size_t)(slash - config) : 0;
+		if (dir_len > 0 && dir_len < sizeof(config_dir)) {
+			memcpy(config_dir, config, dir_len);
+			config_dir[dir_len] = '\0';
+			config_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+			if (config_fd >= 0 && inotify_add_watch(config_fd, config_dir,
+					IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_ATTRIB) < 0) {
+				close(config_fd);
+				config_fd = -1;
+			}
+			if (config_fd < 0)
+				fprintf(stderr, "vpnhide-daemon: config watch unavailable: %s\n",
+					strerror(errno));
+		}
+	}
+
 	// Initial update
 	update_spoof_ip(fd, last_ipv4, last_ipv6);
 
@@ -395,11 +472,18 @@ int main(int argc, char **argv)
 			}
 		}
 
-		struct pollfd pfd;
-		pfd.fd = nl_fd;
-		pfd.events = POLLIN;
+		struct pollfd pfds[2];
+		int nfds = 1;
+		memset(pfds, 0, sizeof(pfds));
+		pfds[0].fd = nl_fd;
+		pfds[0].events = POLLIN;
+		if (config_fd >= 0) {
+			pfds[nfds].fd = config_fd;
+			pfds[nfds].events = POLLIN;
+			nfds++;
+		}
 
-		int ret = poll(&pfd, 1, poll_timeout);
+		int ret = poll(pfds, nfds, poll_timeout);
 		if (ret < 0) {
 			if (errno == EINTR)
 				continue;
@@ -408,14 +492,19 @@ int main(int argc, char **argv)
 		}
 
 		bool trigger_update = false;
+		bool netlink_event = false;
 
-		if (ret > 0 && (pfd.revents & POLLIN)) {
+		if (ret > 0 && (pfds[0].revents & POLLIN)) {
 			char buf[4096];
 			// Consume all pending data on netlink socket to clear the POLLIN state
 			while (recv(nl_fd, buf, sizeof(buf), MSG_DONTWAIT) > 0)
 				;
 			usleep(200000); // 200ms debounce
 			trigger_update = true;
+			netlink_event = true;
+		}
+		if (config_fd >= 0 && ret > 0 && (pfds[1].revents & POLLIN)) {
+			drain_config_events(config_fd, config, ctl, self_uid);
 		}
 
 		if (update_pending && get_time_ms() >= next_update_time) {
@@ -426,7 +515,7 @@ int main(int argc, char **argv)
 		if (trigger_update) {
 			update_spoof_ip(fd, last_ipv4, last_ipv6);
 
-			if (ret > 0) {
+			if (netlink_event) {
 				// Netlink event occurred, schedule follow-ups
 				next_update_time = get_time_ms() + 1000;
 				update_pending = true;
@@ -442,6 +531,8 @@ int main(int argc, char **argv)
 	}
 
 	close(nl_fd);
+	if (config_fd >= 0)
+		close(config_fd);
 	close(fd);
 	return 0;
 }

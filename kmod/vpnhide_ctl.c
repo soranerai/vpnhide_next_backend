@@ -102,6 +102,7 @@ int main(int argc, char **argv)
 		JSON_Value *root_value;
 		JSON_Object *root;
 		struct vpnhide_ioctl_data targets, lsposed;
+		struct vpnhide_port_ioctl_data ports;
 		struct vpnhide_policy_summary summary;
 		char error[256];
 		uid_t self_uid = 0;
@@ -123,12 +124,21 @@ int main(int argc, char **argv)
 		root = json_value_get_object(root_value);
 		memset(&targets, 0, sizeof(targets));
 		memset(&lsposed, 0, sizeof(lsposed));
+		memset(&ports, 0, sizeof(ports));
 		memset(error, 0, sizeof(error));
 		ret = vpnhide_resolve_targets(root, self_uid, &targets, &lsposed,
 						      &summary, error, sizeof(error));
 		if (ret) {
 			fprintf(stderr, "Policy rejected (%s): %s\n",
 				vpnhide_list_mode_name(summary.mode),
+				error[0] ? error : "unknown error");
+			json_value_free(root_value);
+			return 1;
+		}
+		ret = vpnhide_resolve_port_rules(root, self_uid, &ports, &summary,
+						 error, sizeof(error));
+		if (ret) {
+			fprintf(stderr, "Port policy rejected: %s\n",
 				error[0] ? error : "unknown error");
 			json_value_free(root_value);
 			return 1;
@@ -141,6 +151,7 @@ int main(int argc, char **argv)
 		       summary.ignored_selected_system_packages);
 		printf("kmod_targets=%d\n", summary.kmod_targets);
 		printf("lsposed_targets=%d\n", summary.lsposed_targets);
+		printf("port_targets=%d\n", summary.port_targets);
 		json_value_free(root_value);
 		return 0;
 	}
@@ -193,6 +204,7 @@ int main(int argc, char **argv)
 		struct vpnhide_ioctl_data targets;
 		struct vpnhide_ioctl_data lsposed;
 		struct vpnhide_target_bundle target_bundle;
+		struct vpnhide_port_ioctl_data pdata;
 		struct vpnhide_app_hook_ioctl_data app_hook_masks;
 		struct vpnhide_policy_summary policy_summary;
 		char policy_error[256];
@@ -200,6 +212,7 @@ int main(int argc, char **argv)
 		memset(&targets, 0, sizeof(targets));
 		memset(&lsposed, 0, sizeof(lsposed));
 		memset(&target_bundle, 0, sizeof(target_bundle));
+		memset(&pdata, 0, sizeof(pdata));
 		memset(&app_hook_masks, 0, sizeof(app_hook_masks));
 		memset(policy_error, 0, sizeof(policy_error));
 
@@ -248,6 +261,16 @@ int main(int argc, char **argv)
 		if (policy_ret) {
 			fprintf(stderr, "Policy rejected (%s): %s\n",
 				vpnhide_list_mode_name(policy_summary.mode),
+				policy_error[0] ? policy_error : "unknown error");
+			json_value_free(root_value);
+			close(fd);
+			return 1;
+		}
+		policy_ret = vpnhide_resolve_port_rules(root, self_uid, &pdata,
+								&policy_summary, policy_error,
+								sizeof(policy_error));
+		if (policy_ret) {
+			fprintf(stderr, "Port policy rejected: %s\n",
 				policy_error[0] ? policy_error : "unknown error");
 			json_value_free(root_value);
 			close(fd);
@@ -314,104 +337,6 @@ int main(int argc, char **argv)
 		}
 
 		// 4. Port rules
-		pdata.count = 0;
-		JSON_Array *port_rules = json_object_get_array(root, "portRules");
-		JSON_Array *mass_port_rules = json_object_get_array(root, "massPortRules");
-
-		if (apps) {
-			size_t apps_count = json_array_get_count(apps);
-			for (size_t i = 0; i < apps_count; i++) {
-				JSON_Object *app = json_array_get_object(apps, i);
-				if (!app)
-					continue;
-
-				int port_hiding = json_object_get_boolean(app, "portHiding");
-				uid_t uid = (uid_t)json_object_get_number(app, "uid");
-				const char *package_name = json_object_get_string(app, "packageName");
-				int user_id = (int)json_object_get_number(app, "userId");
-
-				if (port_hiding && uid != 0 && package_name) {
-					if (pdata.count >= MAX_TARGET_UIDS) {
-						fprintf(stderr, "port rule target set exceeds MAX_TARGET_UIDS\n");
-						apply_failed = 1;
-						break;
-					}
-					struct vpnhide_uid_port_rules *target = &pdata.targets[pdata.count];
-					target->uid = uid;
-					target->rule_count = 0;
-
-					// Add app-specific enabled rules
-					if (port_rules) {
-						size_t rules_count = json_array_get_count(port_rules);
-						for (size_t j = 0; j < rules_count; j++) {
-							JSON_Object *rule = json_array_get_object(port_rules, j);
-							if (!rule)
-								continue;
-
-							const char *rule_pkg = json_object_get_string(rule, "packageName");
-							int rule_user = (int)json_object_get_number(rule, "userId");
-							int enabled = json_object_get_boolean(rule, "enabled");
-
-							if (rule_pkg && strcmp(rule_pkg, package_name) == 0 &&
-							    rule_user == user_id && enabled) {
-								if (target->rule_count < MAX_PORT_RULES_PER_UID) {
-									target->rules[target->rule_count].start_port = (unsigned short)json_object_get_number(rule, "startPort");
-									target->rules[target->rule_count].end_port = (unsigned short)json_object_get_number(rule, "endPort");
-									const char *proto_str = json_object_get_string(rule, "protocol");
-									unsigned char proto = VH_PROTO_BOTH;
-									if (proto_str) {
-										if (strcmp(proto_str, "TCP") == 0)
-											proto = VH_PROTO_TCP;
-										else if (strcmp(proto_str, "UDP") == 0)
-											proto = VH_PROTO_UDP;
-									}
-									target->rules[target->rule_count].protocol = proto;
-									target->rule_count++;
-								}
-							}
-						}
-					}
-
-					// Add mass enabled rules
-					if (mass_port_rules) {
-						size_t mass_count = json_array_get_count(mass_port_rules);
-						for (size_t j = 0; j < mass_count; j++) {
-							JSON_Object *rule = json_array_get_object(mass_port_rules, j);
-							if (!rule)
-								continue;
-
-							int enabled = json_object_get_boolean(rule, "enabled");
-							if (enabled) {
-								if (target->rule_count < MAX_PORT_RULES_PER_UID) {
-									target->rules[target->rule_count].start_port = (unsigned short)json_object_get_number(rule, "startPort");
-									target->rules[target->rule_count].end_port = (unsigned short)json_object_get_number(rule, "endPort");
-									const char *proto_str = json_object_get_string(rule, "protocol");
-									unsigned char proto = VH_PROTO_BOTH;
-									if (proto_str) {
-										if (strcmp(proto_str, "TCP") == 0)
-											proto = VH_PROTO_TCP;
-										else if (strcmp(proto_str, "UDP") == 0)
-											proto = VH_PROTO_UDP;
-									}
-									target->rules[target->rule_count].protocol = proto;
-									target->rule_count++;
-								}
-							}
-						}
-					}
-
-					// Default block if no rules
-					if (target->rule_count == 0) {
-						target->rules[0].start_port = 0;
-						target->rules[0].end_port = 65535;
-						target->rules[0].protocol = VH_PROTO_BOTH;
-						target->rule_count = 1;
-					}
-					pdata.count++;
-				}
-			}
-		}
-
 		if (ioctl(fd, VH_SET_PORT_RULES, &pdata) < 0) {
 			perror("VH_SET_PORT_RULES");
 			apply_failed = 1;

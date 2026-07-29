@@ -46,3 +46,15 @@ and applies kernel and LSPosed target snapshots through
 `VH_SET_TARGET_BUNDLE`. Hook masks, interface prefixes, and port rules still
 have independent ioctls; making the entire configuration one transaction is
 the next ABI step.
+
+Port hiding follows the same `listMode`. In `BLACKLIST`, apps with
+`portHiding: true` are targeted. In `ALLOWLIST`, those apps are exceptions and
+all other eligible third-party applications are targeted. System packages,
+the manager UID, and isolated/system UIDs are never port targets. App-specific
+enabled `portRules` are combined with enabled `massPortRules`; an app with no
+resulting rule receives the legacy full-range TCP/UDP rule. Invalid ranges and
+rule-count overflow reject the configuration instead of truncating it.
+
+The daemon watches the JSON configuration directory and invokes the same
+`vpnhide-ctl load` path after an atomic config update, so frontend writes do
+not require a reboot or a separate privileged apply action.
