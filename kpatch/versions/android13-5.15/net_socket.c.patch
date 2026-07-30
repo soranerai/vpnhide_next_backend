@@ -55,15 +55,16 @@ index f7cfc703b..e8fc99a75 100644
  		fput_light(sock->file, fput_needed);
  	}
  	return err;
-@@ -2190,7 +2204,19 @@ int __sys_setsockopt(int fd, int level, int optname, char __user *user_optval,
+@@ -2190,7 +2204,20 @@ int __sys_setsockopt(int fd, int level, int optname, char __user *user_optval,
  
  	if (kernel_optval)
  		optval = KERNEL_SOCKPTR(kernel_optval);
 -	if (level == SOL_SOCKET && !sock_use_custom_sol_socket(sock))
 +	#ifdef CONFIG_VPNHIDE
 +	{
-+		int _ret = 0;
-+		if (vpnhide_setsockopt(fd, level, optname, user_optval, optlen, &_ret)) {
++		int _ret = vpnhide_setsockopt_sock(sock, level, optname,
++							   optval, optlen);
++		if (_ret) {
 +			/* _ret > 0: intercepted, success; <0: errno */
 +			err = (_ret > 0) ? 0 : _ret;
 +			fput_light(sock->file, fput_needed);

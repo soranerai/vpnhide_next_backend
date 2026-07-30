@@ -71,6 +71,8 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 		case SO_BINDTOIFINDEX: {
 			int ifindex = 0;
 
+			if (optlen != sizeof(ifindex))
+				break;
 			if (copy_from_sockptr(&ifindex, optval,
 					      sizeof(ifindex)))
 				break;
@@ -95,6 +97,8 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 		case SO_TIMESTAMPING: {
 			u32 flags = 0;
 
+			if (optlen != sizeof(flags))
+				break;
 			if (copy_from_sockptr(&flags, optval, sizeof(flags)))
 				break;
 			flags &= ~(SOF_TIMESTAMPING_TX_HARDWARE |
@@ -108,6 +112,11 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 		}
 	} else if (level == SOL_IP) {
 		if (optname == IP_MTU_DISCOVER) {
+			/* inet_sk() is only valid for IPv4 inet sockets.  The hook
+			 * runs before the normal protocol handler, so do the family
+			 * and ABI validation here instead of relying on it. */
+			if (sk->sk_family != AF_INET || optlen != sizeof(int))
+				return 0;
 			/* Force PMTUDISC_DONT; set directly on sk, skip real handler.
 			 * Mark socket as a probe so the UDP rate-limiter won't drop
 			 * the subsequent test send (check_udp_pmtu). */
@@ -118,6 +127,8 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 		}
 	} else if (level == SOL_IPV6) {
 		if (optname == IPV6_MTU_DISCOVER) {
+			if (sk->sk_family != AF_INET6 || optlen != sizeof(int))
+				return 0;
 			inet6_sk(sk)->pmtudisc = IPV6_PMTUDISC_DONT;
 			sk->sk_mark |= VH_SK_PROBE_MARK;
 			record_kmod_intercept(uid, HOOK_SETSOCKOPT);
@@ -125,6 +136,11 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 		}
 	} else if (level == SOL_UDP) {
 		if (optname == UDP_SEGMENT) {
+			/* udp_sk() is not a generic struct sock cast. */
+			if (sk->sk_protocol != IPPROTO_UDP ||
+			    sk->sk_type != SOCK_DGRAM ||
+			    optlen != sizeof(int))
+				return 0;
 			/* Zero gso_size directly; skip the real handler so it
 			 * cannot restore the user-supplied non-zero value.
 			 * Mark socket as a probe so the rate-limiter won't drop
