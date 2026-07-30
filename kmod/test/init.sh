@@ -18,11 +18,17 @@ mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sys /sys 2>/dev/null
 mount -t devtmpfs dev /dev 2>/dev/null
 
+# The Android/Bionic static ctl uses /system/bin/sh for popen().  The Alpine
+# QEMU rootfs only provides /bin/sh, so provide the Android-compatible path.
+mkdir -p /system/bin
+ln -sf /bin/sh /system/bin/sh
+
 echo "##### VPNHIDE-QEMU-TEST START #####"
 echo "KREL=$(uname -r)"
 
-# Add a non-root test user with UID 5555
-echo "testuser:x:5555:5555:testuser:/home/testuser:/bin/sh" >> /etc/passwd
+# Add a non-root Android-style app user with UID 115555 (user 1, appId 15555)
+echo "testuser:x:115555:115555:testuser:/home/testuser:/bin/sh" >> /etc/passwd
+echo "testallow:x:115556:115556:testallow:/home/testallow:/bin/sh" >> /etc/passwd
 
 # --- bring up user-mode networking so apk can fetch iproute2 ----------------
 ip link set lo up 2>/dev/null
@@ -38,10 +44,42 @@ if apk add --no-cache iproute2 python3 >/dev/null 2>&1; then echo "IPROUTE2=ok";
 if insmod /vpnhide_kmod.ko; then echo "INSMOD=ok"; else echo "INSMOD=FAIL"; fi
 # Wait for the device node /dev/vpnhide_ctrl to populate
 sleep 1
-# Initialize interface prefixes so the module knows to hide "vpn" interfaces
-/vpnhide-ctl iface_prefixes vpn 2>/dev/null
-# Enable debug mode
-/vpnhide-ctl debug 1 2>/dev/null
+# Configure all policy state through the transactional JSON path. The PM
+# command is an in-VM fixture; production uses the real Package Manager.
+TEST_CONFIG=/tmp/vpnhide-test-policy.json
+cat > "$TEST_CONFIG" <<'EOF'
+{
+  "globalConfig": {"listMode":"BLACKLIST", "kernelHookMask":4294967295, "javaHookMask":4294967295, "debugLogging":1},
+  "ifacePrefixes": ["vpn"],
+  "apps": [{"packageName":"com.vpnhide.test", "userId":1, "uid":115555, "kmod":true, "lsposed":true, "portHiding":true}],
+  "portRules": [{"enabled":true, "packageName":"com.vpnhide.test", "userId":1, "startPort":8080, "endPort":8080, "protocol":"BOTH"}]
+}
+EOF
+export VPNHIDE_PM_COMMAND="echo 'package:/data/app/test/base.apk=com.vpnhide.test uid:115555'; echo 'package:/data/app/keep/base.apk=com.vpnhide.keep uid:115556'; echo 'package:/system/priv-app/Settings/Settings.apk=com.android.settings uid:1000'"
+apply_policy() {
+	/vpnhide-ctl load "$TEST_CONFIG" 0
+	rc=$?
+	echo "POLICY_APPLY_RC=$rc"
+	return "$rc"
+}
+ALLOWLIST_CONFIG=/tmp/vpnhide-test-allowlist.json
+cat > "$ALLOWLIST_CONFIG" <<'EOF'
+{
+  "globalConfig": {"listMode":"ALLOWLIST", "kernelHookMask":4294967295, "javaHookMask":4294967295, "debugLogging":1},
+  "ifacePrefixes": ["vpn"],
+  "apps": [
+    {"packageName":"com.vpnhide.keep", "userId":1, "uid":115556, "kmod":true, "lsposed":true, "portHiding":true},
+    {"packageName":"com.vpnhide.test", "userId":1, "uid":115555, "kmod":false, "lsposed":false, "portHiding":false}
+  ],
+  "portRules": [{"enabled":true, "packageName":"com.vpnhide.test", "userId":1, "startPort":8080, "endPort":8080, "protocol":"BOTH"}]
+}
+EOF
+apply_allowlist() {
+	/vpnhide-ctl load "$ALLOWLIST_CONFIG" 0
+	rc=$?
+	echo "ALLOWLIST_APPLY_RC=$rc"
+	return "$rc"
+}
 REGISTERED=1
 echo "REGISTERED=$REGISTERED"
 # Start the event-driven C daemon in the background to automatically monitor interfaces and update ifindexes in the kmod
@@ -56,7 +94,7 @@ ip addr add 10.9.0.1/24 dev vpn0 2>/dev/null
 ip route add 10.9.9.0/24 dev vpn0 2>/dev/null
 ip -6 addr add fd00:9::1/64 dev vpn0 2>/dev/null
 ip -6 route add fd00:99::/64 dev vpn0 2>/dev/null
-ip rule add uidrange 5555-5555 table 199 2>/dev/null
+ip rule add uidrange 115555-115555 table 199 2>/dev/null
 # Give the daemon a moment to process the interface events and update active_vpns in the kernel
 sleep 3
 
@@ -64,19 +102,19 @@ PASS=0
 FAIL=0
 
 # check <name> <shell-command> <grep-pattern>
-# Asserts: non-target UID (root/0) sees the pattern, target UID (testuser/5555) does not.
+# Asserts: non-target UID (root/0) sees the pattern, target UID (testuser/115555) does not.
 check() {
 	_name=$1
 	_cmd=$2
 	_pat=$3
 	
-	# 1. Set UID 5555 as the target in the kernel module
-	/vpnhide-ctl targets 5555 2>/dev/null
+	# 1. Set UID 115555 as the target in the kernel module
+	apply_policy
 	
 	# 2. Non-target check (run as root / UID 0)
 	_nt=$(eval "$_cmd" 2>/dev/null | grep -c -- "$_pat")
 	
-	# 3. Target check (run as testuser / UID 5555)
+	# 3. Target check (run as testuser / UID 115555)
 	_tg=$(su testuser -c "$_cmd" 2>/dev/null | grep -c -- "$_pat")
 	
 	if [ "$_nt" -gt 0 ] && [ "$_tg" -eq 0 ]; then
@@ -102,9 +140,8 @@ check proc_net_dev    "cat /proc/net/dev"            "vpn0"   # dev_seq_show
 check proc_net_if_in6 "cat /proc/net/if_inet6"       "vpn0"   # if6_seq_show
 
 # --- execute programmatic socket and ioctl vector tests in Python ---
-# 1. Set targets and configure port rules for UID 5555
-/vpnhide-ctl targets 5555 2>/dev/null
-/vpnhide-ctl port_rules 5555 1 8080 8080 2 2>/dev/null
+# 1. Set targets and configure port rules for UID 115555
+apply_policy
 
 # 2. Run vector_tests.py and process its output
 python3 /vector_tests.py > /tmp/py_res.log 2>&1
@@ -120,6 +157,28 @@ while read -r line; do
 			;;
 	esac
 done < /tmp/py_res.log
+
+# --- end-to-end allowlist check --------------------------------------------
+apply_allowlist
+_al_nt=$(ip addr show 2>/dev/null | grep -c -- "vpn0")
+_al_keep=$(su testallow -c "ip addr show" 2>/dev/null | grep -c -- "vpn0")
+_al_target=$(su testuser -c "ip addr show" 2>/dev/null | grep -c -- "vpn0")
+if [ "$_al_nt" -gt 0 ] && [ "$_al_keep" -gt 0 ] && [ "$_al_target" -eq 0 ]; then
+	echo "RESULT allowlist_visibility=PASS (root=$_al_nt allowlisted=$_al_keep target=$_al_target)"
+	PASS=$((PASS + 1))
+else
+	echo "RESULT allowlist_visibility=FAIL (root=$_al_nt allowlisted=$_al_keep target=$_al_target)"
+	FAIL=$((FAIL + 1))
+fi
+
+python3 /vector_tests.py > /tmp/py_allowlist_res.log 2>&1
+cat /tmp/py_allowlist_res.log
+while read -r line; do
+	case "$line" in
+		"RESULT "*=PASS*) PASS=$((PASS + 1)) ;;
+		"RESULT "*=FAIL*) FAIL=$((FAIL + 1)) ;;
+	esac
+done < /tmp/py_allowlist_res.log
 
 PANIC=$(dmesg | grep -ci 'Unable to handle\|Internal error\|Oops\|BUG:\|Kernel panic')
 echo "=== DAEMON LOG ==="

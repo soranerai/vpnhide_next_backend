@@ -7,7 +7,7 @@ bool vpnhide_should_hide_dev(const struct net_device *dev)
 {
 	uid_t uid;
 
-	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_RTNL_FILL)))
+	if (!(vpnhide_active_hooks_mask() & BIT(HOOK_RTNL_FILL)))
 		return false;
 	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_RTNL_FILL, uid))
@@ -26,7 +26,7 @@ bool vpnhide_skip_fib_rule(struct sk_buff *skb, struct fib_rule *rule)
 {
 	uid_t uid;
 
-	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_FIB_RULE_FILL)))
+	if (!(vpnhide_active_hooks_mask() & BIT(HOOK_FIB_RULE_FILL)))
 		return false;
 	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_FIB_RULE_FILL, uid))

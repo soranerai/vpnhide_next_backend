@@ -3,7 +3,7 @@
 
 #include <linux/types.h>
 
-#define VPNHIDE_VERSION_CODE 20201
+#define VPNHIDE_VERSION_CODE 20202
 
 #define MAX_TARGET_UIDS 512
 #define MAX_PORT_RULES_PER_UID 16
@@ -35,6 +35,15 @@ struct vpnhide_ioctl_data {
 	uid_t uids[MAX_TARGET_UIDS];
 };
 
+/* Replace the two interface-hiding UID snapshots through one control call;
+ * the kernel allocates both new snapshots before publishing them. */
+struct vpnhide_target_bundle {
+	int kmod_count;
+	uid_t kmod_uids[MAX_TARGET_UIDS];
+	int lsposed_count;
+	uid_t lsposed_uids[MAX_TARGET_UIDS];
+};
+
 #define VH_IOCTL_MAGIC 0x56
 
 #define MAX_IFACE_PREFIXES 32
@@ -52,15 +61,9 @@ struct vpnhide_spoof_ip {
 	__u8 has_ipv6;
 };
 
-#define VH_SET_TARGETS _IOW(VH_IOCTL_MAGIC, 0x01, struct vpnhide_ioctl_data)
-#define VH_SET_DEBUG _IOW(VH_IOCTL_MAGIC, 0x03, int)
-#define VH_SET_PORT_TARGETS \
-	_IOW(VH_IOCTL_MAGIC, 0x05, struct vpnhide_ioctl_data)
-#define VH_SET_PORT_RULES _IO(VH_IOCTL_MAGIC, 0x06)
-#define VH_SET_IFACE_PREFIXES \
-	_IOW(VH_IOCTL_MAGIC, 0x07, struct vpnhide_iface_ioctl_data)
+#define VH_SET_POLICY \
+	_IOW(VH_IOCTL_MAGIC, 0x21, struct vpnhide_policy_ioctl)
 #define VH_SET_SPOOF_IP _IOW(VH_IOCTL_MAGIC, 0x08, struct vpnhide_spoof_ip)
-#define VH_SET_ACTIVE_HOOKS _IOW(VH_IOCTL_MAGIC, 0x09, unsigned int)
 #define VH_GET_ACTIVE_HOOKS _IOR(VH_IOCTL_MAGIC, 0x0A, unsigned int)
 #define VH_GET_VERSION _IOR(VH_IOCTL_MAGIC, 0x1E, int)
 
@@ -123,10 +126,7 @@ struct vpnhide_vpn_ifindexes {
 #define VH_SET_VPN_IFINDEXES \
 	_IOW(VH_IOCTL_MAGIC, 0x14, struct vpnhide_vpn_ifindexes)
 
-#define VH_SET_JAVA_HOOK_MASK _IOW(VH_IOCTL_MAGIC, 0x15, unsigned int)
 #define VH_GET_JAVA_HOOK_MASK _IOR(VH_IOCTL_MAGIC, 0x16, unsigned int)
-
-#define VH_SET_LSPOSED_TARGETS _IOW(VH_IOCTL_MAGIC, 0x17, struct vpnhide_ioctl_data)
 #define VH_GET_LSPOSED_TARGETS _IOR(VH_IOCTL_MAGIC, 0x18, struct vpnhide_ioctl_data)
 
 #define VH_GET_JAVA_STATS _IOR(VH_IOCTL_MAGIC, 0x19, char[4096])
@@ -147,8 +147,25 @@ struct vpnhide_app_hook_ioctl_data {
 	struct vpnhide_app_hook_mask masks[MAX_TARGET_UIDS];
 };
 
-#define VH_SET_APP_HOOK_MASKS \
-	_IOW(VH_IOCTL_MAGIC, 0x1B, struct vpnhide_app_hook_ioctl_data)
+#define VPNHIDE_POLICY_ABI_VERSION 1
+struct vpnhide_policy_payload {
+	struct vpnhide_target_bundle targets;
+	struct vpnhide_port_ioctl_data ports;
+	struct vpnhide_iface_ioctl_data iface_prefixes;
+	struct vpnhide_app_hook_ioctl_data app_hook_masks;
+	__u32 active_hooks_mask;
+	__u32 java_hooks_mask;
+	__u32 debug_enabled;
+	__u32 flags;
+};
+
+struct vpnhide_policy_ioctl {
+	__u32 abi_version;
+	__u32 payload_size;
+	__u64 payload_ptr;
+	__u64 expected_generation;
+};
+
 #define VH_GET_APP_HOOK_MASKS \
 	_IOR(VH_IOCTL_MAGIC, 0x1C, struct vpnhide_app_hook_ioctl_data)
 

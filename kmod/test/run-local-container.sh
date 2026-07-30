@@ -60,7 +60,7 @@ fi
 
 # 2. Build host utilities statically using NDK clang (built once)
 echo "[local-container] Compiling static host binaries..."
-"$CLANG_BIN" -O2 -Wall -static "$REPO/kmod/vpnhide_ctl.c" "$REPO/kmod/parson.c" -o "$REPO/kmod/vpnhide-ctl-host"
+"$CLANG_BIN" -O2 -Wall -static "$REPO/kmod/vpnhide_ctl.c" "$REPO/kmod/vpnhide_policy.c" "$REPO/kmod/parson.c" -o "$REPO/kmod/vpnhide-ctl-host"
 if [ -f "$STRIP_BIN" ]; then
     "$STRIP_BIN" "$REPO/kmod/vpnhide-ctl-host"
 fi
@@ -184,4 +184,3 @@ else
     echo "[local-container] ERROR: $failed target(s) failed."
     exit 1
 fi
-

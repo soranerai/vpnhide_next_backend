@@ -83,12 +83,12 @@ def test_dev_ioctl(vpn0_idx):
         print(f"FAIL: dev_ioctl SIOCGIFNETMASK non-target: {e}")
         return False
 
-    # 2. Target check (UID 5555)
+    # 2. Target check (UID 115555)
     pid = safe_fork()
     if pid == 0:
         # Child process
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             # Should fail (raises OSError/ValueError)
             try:
                 socket.if_nametoindex("vpn0")
@@ -209,11 +209,11 @@ def test_setsockopt(vpn0_idx):
         print(f"FAIL: setsockopt SO_BINDTOIFINDEX non-target: {e}")
         return False
 
-    # 2. Target check (UID 5555)
+    # 2. Target check (UID 115555)
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             s_tgt = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
                 s_tgt.setsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE, b"vpn0")
@@ -270,11 +270,11 @@ def test_getsockopt(vpn0_idx):
     s_idx = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s_idx.setsockopt(socket.SOL_SOCKET, SO_BINDTOIFINDEX, struct.pack("i", vpn0_idx))
 
-    # Drop privileges to target UID (5555)
+    # Drop privileges to target UID (115555)
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             # 1. getsockopt SO_BINDTODEVICE
             val = s_dev.getsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE, 256)
             clean_val = val.strip(b"\x00")
@@ -337,11 +337,11 @@ def test_getsockname():
         print(f"FAIL: getsockname IPv6 bind: {e}")
         return False
 
-    # Drop privileges to target UID (5555)
+    # Drop privileges to target UID (115555)
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             # IPv4 getsockname
             ip4, port4 = s_v4.getsockname()
             print(
@@ -402,7 +402,7 @@ def test_connect_port_block():
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             s_tgt = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s_tgt.settimeout(2.0)
             try:
@@ -439,7 +439,7 @@ def test_bind_port_block():
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
@@ -635,11 +635,11 @@ def test_bpf_laundering(vpn0_idx):
         print(f"FAIL: BPF non-target lookup verification failed: {e}")
         return False
 
-    # 4. Check under Target UID (5555): hook should be bypassed (raw stats visible)
+    # 4. Check under Target UID (115555): hook should be bypassed (raw stats visible)
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             vpn_val = lookup_map_elem(map_fd, vpn0_idx)
             eth_val = lookup_map_elem(map_fd, eth0_idx)
             print(f"[BPF Target] vpn0: rx={vpn_val.rxBytes}, tx={vpn_val.txBytes}")
@@ -683,11 +683,11 @@ def test_proc_sys_net():
         print(f"FAIL: proc/sysfs net non-target check failed: {e}")
         return False
 
-    # 2. Target check (UID 5555)
+    # 2. Target check (UID 115555)
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             ipv4_conf = os.listdir("/proc/sys/net/ipv4/conf")
             ipv6_neigh = os.listdir("/proc/sys/net/ipv6/neigh")
             with open("/proc/net/dev") as f:
@@ -741,11 +741,11 @@ def test_udp_queue_pressure():
         )
         return False
 
-    # 2. Target check (UID 5555)
+    # 2. Target check (UID 115555)
     pid = safe_fork()
     if pid == 0:
         try:
-            os.setuid(5555)
+            os.setuid(115555)
             s_tgt = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s_tgt.setblocking(False)
             success_count = 0

@@ -56,7 +56,7 @@ DAEMON_OUT="$REPO/kmod/vpnhide-daemon-host"
 
 echo "[kpatch] Building static host binaries…"
 "$CLANG_BIN" -O2 -Wall -static \
-    "$REPO/kmod/vpnhide_ctl.c" "$REPO/kmod/parson.c" -o "$CTL_OUT"
+    "$REPO/kmod/vpnhide_ctl.c" "$REPO/kmod/vpnhide_policy.c" "$REPO/kmod/parson.c" -o "$CTL_OUT"
 [ -f "$STRIP_BIN" ] && "$STRIP_BIN" "$CTL_OUT"
 
 "$CLANG_BIN" -O2 -Wall -static \

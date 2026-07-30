@@ -136,6 +136,7 @@ def build_ctl_host(repo_root: Path, kmod_dir: Path) -> Path:
         "-O2",
         "-Wall",
         str(kmod_dir / "vpnhide_ctl.c"),
+        str(kmod_dir / "vpnhide_policy.c"),
         str(kmod_dir / "parson.c"),
         "-o",
         str(out_bin),

@@ -1,0 +1,24 @@
+{
+  "globalConfig": {
+    "listMode": "BLACKLIST"
+  },
+  "apps": [
+    {
+      "packageName": "com.example.target",
+      "userId": 0,
+      "uid": 10002,
+      "kmod": true,
+      "lsposed": false,
+      "portHiding": true
+    }
+  ],
+  "portRules": [
+    {
+      "enabled": true,
+      "uid": 10002,
+      "startPort": 8081,
+      "endPort": 8081,
+      "protocol": "BOTH"
+    }
+  ]
+}

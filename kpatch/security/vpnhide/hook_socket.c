@@ -255,15 +255,18 @@ EXPORT_SYMBOL_GPL(vpnhide_getsockopt_post);
 /* connect — block connections to loopback ports matching rules        */
 /* ------------------------------------------------------------------ */
 
-static bool should_block_port(uid_t uid, __be16 port_be, bool is_ipv6)
+static bool should_block_port(uid_t uid, __be16 port_be,
+			      unsigned char protocol)
 {
-	struct vpnhide_port_targets *pt;
+	struct vpnhide_port_ioctl_data *pt;
+	struct vpnhide_policy_snapshot *snapshot;
 	u16 port = ntohs(port_be);
 	bool block = false;
 	int i, j;
 
 	rcu_read_lock();
-	pt = rcu_dereference(global_port_targets);
+	snapshot = rcu_dereference(global_policy_snapshot);
+	pt = snapshot ? &snapshot->payload.ports : NULL;
 	if (!pt)
 		goto out;
 
@@ -274,7 +277,9 @@ static bool should_block_port(uid_t uid, __be16 port_be, bool is_ipv6)
 			u16 lo = pt->targets[i].rules[j].start_port;
 			u16 hi = pt->targets[i].rules[j].end_port;
 
-			if (port >= lo && port <= hi) {
+			if (port >= lo && port <= hi &&
+			    (pt->targets[i].rules[j].protocol == VH_PROTO_BOTH ||
+			     pt->targets[i].rules[j].protocol == protocol)) {
 				block = true;
 				goto out;
 			}
@@ -290,21 +295,26 @@ int vpnhide_connect_pre(struct socket *sock,
 {
 	uid_t uid;
 	sa_family_t family;
+	unsigned char protocol;
 
-	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_CONNECT)))
+	if (!(vpnhide_active_hooks_mask() & BIT(HOOK_CONNECT)))
 		return 0;
 	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_CONNECT, uid))
 		return 0;
+	if (!sock || !sock->sk)
+		return 0;
 
 	family = addr->sa_family;
+	protocol = sock->sk->sk_type == SOCK_STREAM ?
+		VH_PROTO_TCP : VH_PROTO_UDP;
 
 	if (family == AF_INET) {
 		struct sockaddr_in *sin = (struct sockaddr_in *)addr;
 
 		if (ipv4_is_loopback(sin->sin_addr.s_addr) ||
 		    sin->sin_addr.s_addr == 0) {
-			if (should_block_port(uid, sin->sin_port, false)) {
+			if (should_block_port(uid, sin->sin_port, protocol)) {
 				record_kmod_intercept(uid, HOOK_CONNECT);
 				return -ECONNREFUSED;
 			}
@@ -312,9 +322,15 @@ int vpnhide_connect_pre(struct socket *sock,
 	} else if (family == AF_INET6) {
 		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
 
-		if (ipv6_addr_loopback(&sin6->sin6_addr) ||
-		    ipv6_addr_any(&sin6->sin6_addr)) {
-			if (should_block_port(uid, sin6->sin6_port, true)) {
+		bool local = ipv6_addr_loopback(&sin6->sin6_addr) ||
+			     ipv6_addr_any(&sin6->sin6_addr);
+
+		if (!local && ipv6_addr_v4mapped(&sin6->sin6_addr)) {
+			__be32 v4addr = sin6->sin6_addr.s6_addr32[3];
+			local = ipv4_is_loopback(v4addr) || v4addr == 0;
+		}
+		if (local) {
+			if (should_block_port(uid, sin6->sin6_port, protocol)) {
 				record_kmod_intercept(uid, HOOK_CONNECT);
 				return -ECONNREFUSED;
 			}
@@ -333,28 +349,40 @@ int vpnhide_bind_pre(struct socket *sock,
 {
 	uid_t uid;
 	sa_family_t family;
+	unsigned char protocol;
 
-	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_BIND)))
+	if (!(vpnhide_active_hooks_mask() & BIT(HOOK_BIND)))
 		return 0;
 	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_BIND, uid))
 		return 0;
+	if (!sock || !sock->sk)
+		return 0;
 
 	family = addr->sa_family;
+	protocol = sock->sk->sk_type == SOCK_STREAM ?
+		VH_PROTO_TCP : VH_PROTO_UDP;
 
 	if (family == AF_INET) {
 		struct sockaddr_in *sin = (struct sockaddr_in *)addr;
 
-		if (ipv4_is_loopback(sin->sin_addr.s_addr) &&
-		    should_block_port(uid, sin->sin_port, false)) {
+		if ((ipv4_is_loopback(sin->sin_addr.s_addr) ||
+		     sin->sin_addr.s_addr == 0) &&
+		    should_block_port(uid, sin->sin_port, protocol)) {
 			sin->sin_port = 0;
 			record_kmod_intercept(uid, HOOK_BIND);
 		}
 	} else if (family == AF_INET6) {
 		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
+		bool local = ipv6_addr_loopback(&sin6->sin6_addr) ||
+			     ipv6_addr_any(&sin6->sin6_addr);
 
-		if (ipv6_addr_loopback(&sin6->sin6_addr) &&
-		    should_block_port(uid, sin6->sin6_port, true)) {
+		if (!local && ipv6_addr_v4mapped(&sin6->sin6_addr)) {
+			__be32 v4addr = sin6->sin6_addr.s6_addr32[3];
+			local = ipv4_is_loopback(v4addr) || v4addr == 0;
+		}
+		if (local &&
+		    should_block_port(uid, sin6->sin6_port, protocol)) {
 			sin6->sin6_port = 0;
 			record_kmod_intercept(uid, HOOK_BIND);
 		}
@@ -483,7 +511,7 @@ bool vpnhide_udpv6_sendmsg_ll(struct sock *sk, struct msghdr *msg)
 	uid_t uid;
 	u32 oifindex;
 
-	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_UDPV6_SENDMSG)))
+	if (!(vpnhide_active_hooks_mask() & BIT(HOOK_UDPV6_SENDMSG)))
 		return false;
 	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_UDPV6_SENDMSG, uid))
@@ -601,7 +629,7 @@ bool vpnhide_udp_sendmsg(struct sock *sk)
 	int regen;
 	bool drop = false;
 
-	if (!(READ_ONCE(active_hooks_mask) & BIT(HOOK_UDP_SENDMSG)))
+	if (!(vpnhide_active_hooks_mask() & BIT(HOOK_UDP_SENDMSG)))
 		return false;
 
 	/* Probe sockets (IP_MTU_DISCOVER / UDP_SEGMENT intercepted) must not
