@@ -1,0 +1,24 @@
+{
+  "globalConfig": {
+    "listMode": "ALLOWLIST"
+  },
+  "apps": [
+    {
+      "packageName": "com.example.keep",
+      "userId": 0,
+      "uid": 10001,
+      "kmod": true,
+      "lsposed": true,
+      "portHiding": true
+    }
+  ],
+  "portRules": [
+    {
+      "enabled": true,
+      "uid": 10001,
+      "startPort": 8081,
+      "endPort": 8081,
+      "protocol": "BOTH"
+    }
+  ]
+}

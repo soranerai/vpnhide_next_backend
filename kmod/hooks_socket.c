@@ -694,8 +694,12 @@ static int socket_connect_entry(struct kretprobe_instance *ri,
 
   rcu_read_lock();
   snapshot = rcu_dereference(global_policy_snapshot);
-  if (!snapshot)
-    return false;
+  if (!snapshot) {
+    rcu_read_unlock();
+    if (put_needed)
+      sockfd_put(sock);
+    return 1;
+  }
   {
     struct vpnhide_port_ioctl_data *t = &snapshot->payload.ports;
   if (t) {
@@ -835,8 +839,12 @@ static int socket_bind_entry(struct kretprobe_instance *ri,
 
   rcu_read_lock();
   snapshot = rcu_dereference(global_policy_snapshot);
-  if (!snapshot)
-    return false;
+  if (!snapshot) {
+    rcu_read_unlock();
+    if (put_needed)
+      sockfd_put(sock);
+    return 1;
+  }
   {
     struct vpnhide_port_ioctl_data *t = &snapshot->payload.ports;
   if (t) {

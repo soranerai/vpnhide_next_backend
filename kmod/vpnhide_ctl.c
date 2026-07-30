@@ -143,6 +143,20 @@ int main(int argc, char **argv)
 		printf("kmod_targets=%d\n", summary.kmod_targets);
 		printf("lsposed_targets=%d\n", summary.lsposed_targets);
 		printf("port_targets=%d\n", summary.port_targets);
+		if (strcmp(argv[1], "preview") == 0) {
+			for (int i = 0; i < ports.count; i++) {
+				printf("port_target[%d].uid=%u\n", i,
+				       (unsigned int)ports.targets[i].uid);
+				for (int j = 0; j < ports.targets[i].rule_count; j++) {
+					const struct vpnhide_port_rule *rule =
+						&ports.targets[i].rules[j];
+					printf("port_target[%d].rule[%d]=%u-%u/%u\n",
+					       i, j, (unsigned int)rule->start_port,
+					       (unsigned int)rule->end_port,
+					       (unsigned int)rule->protocol);
+				}
+			}
+		}
 		json_value_free(root_value);
 		return 0;
 	}
@@ -166,6 +180,7 @@ int main(int argc, char **argv)
 		unsigned int java_mask = 0;
 		int debug_logging = 0;
 		int have_global_config = 0;
+		int allowlist_mode = 0;
 		if (argc > 3) {
 			self_uid = (uid_t)atoi(argv[3]);
 		}
@@ -187,6 +202,12 @@ int main(int argc, char **argv)
 			kernel_mask = (unsigned int)json_object_get_number(global_config, "kernelHookMask");
 			java_mask = (unsigned int)json_object_get_number(global_config, "javaHookMask");
 			debug_logging = (int)json_object_get_number(global_config, "debugLogging");
+			{
+				const char *list_mode = json_object_get_string(global_config, "listMode");
+				allowlist_mode = list_mode &&
+					(!strcmp(list_mode, "ALLOWLIST") ||
+					 !strcmp(list_mode, "allowlist"));
+			}
 			have_global_config = 1;
 		}
 
@@ -237,13 +258,22 @@ int main(int argc, char **argv)
 					if (has_kernel || has_java) {
 						struct vpnhide_app_hook_mask *m =
 							&app_hook_masks.masks[app_hook_masks.count];
+						unsigned int raw_kernel_mask = has_kernel ?
+							(unsigned int)json_object_get_number(app, "kernelHookMask") : 0;
+						unsigned int raw_java_mask = has_java ?
+							(unsigned int)json_object_get_number(app, "javaHookMask") : 0;
 						m->uid = uid;
 						m->has_kernel_override = has_kernel ? 1 : 0;
-						m->kernel_mask = has_kernel ?
-							(unsigned int)json_object_get_number(app, "kernelHookMask") : 0;
+						/* In allowlist an enabled per-app hook bit is an
+						 * exception, not an active hook. Store the effective
+						 * active mask expected by the kernel. */
+						m->kernel_mask = allowlist_mode ?
+							(have_global_config ? kernel_mask : 0xFFFFFFFFu) &
+							~raw_kernel_mask : raw_kernel_mask;
 						m->has_java_override = has_java ? 1 : 0;
-						m->java_mask = has_java ?
-							(unsigned int)json_object_get_number(app, "javaHookMask") : 0;
+						m->java_mask = allowlist_mode ?
+							(have_global_config ? java_mask : 0xFFFFFFFFu) &
+							~raw_java_mask : raw_java_mask;
 						app_hook_masks.count++;
 					}
 				}

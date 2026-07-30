@@ -63,10 +63,17 @@ Port hiding follows the same `listMode`. In `BLACKLIST`, apps with
 `portHiding: true` are targeted. In `ALLOWLIST`, those apps are exceptions and
 all other eligible third-party applications are targeted. System packages,
 the manager UID in `BLACKLIST`, and isolated/system UIDs are never port
-targets. App-specific
-enabled `portRules` are combined with enabled `massPortRules`; an app with no
-resulting rule receives the legacy full-range TCP/UDP rule. Invalid ranges and
-rule-count overflow reject the configuration instead of truncating it.
+targets. Port rules are resolved independently from the application exception
+set. In `ALLOWLIST`, a `portHiding: true` app with no enabled matching rules
+sees all ports; when rules exist, its matching app-specific rules and enabled
+`massPortRules` form its visible-port set, and the kernel receives the
+complement to hide. An allowlist app with no `portHiding` exception remains a
+normal port target: with no explicit rules it receives full-range hiding, and
+with explicit rules it receives only the configured hidden rules. In
+`BLACKLIST`, matching app-specific rules and enabled `massPortRules` are
+combined; a selected app receives full-range hiding only when no resulting
+rule exists. Invalid ranges and rule-count overflow reject the configuration
+instead of truncating it.
 
 The daemon watches the JSON configuration directory and invokes the same
 `vpnhide-ctl load` path after an atomic config update, so frontend writes do
@@ -76,3 +83,8 @@ authoritative `pm list packages -f -U --user all` output in memory and
 re-resolves after install, uninstall, UID, or user changes. No Package Manager
 state files are opened, watched, or created; persistent state remains in the
 application configuration directory.
+
+Per-app hook masks use the same exception semantics in `ALLOWLIST`: enabled
+bits are removed from the effective global active mask for that application.
+The kernel still receives effective active masks, so it does not need to know
+which list mode produced them.
