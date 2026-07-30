@@ -60,7 +60,7 @@ cat > "$TEST_CONFIG" <<'EOF'
   "portRules": [{"enabled":true, "packageName":"com.vpnhide.test", "userId":1, "startPort":8080, "endPort":8080, "protocol":"BOTH"}]
 }
 EOF
-export VPNHIDE_PM_COMMAND="echo 'package:/data/app/test/base.apk=com.vpnhide.test uid:115555'; echo 'package:/data/app/keep/base.apk=com.vpnhide.keep uid:115556'; echo 'package:/system/priv-app/Settings/Settings.apk=com.android.settings uid:1000'"
+export VPNHIDE_PM_COMMAND="echo 'package:/data/app/~~test==/test-install==/base.apk=com.vpnhide.test uid:115555'; echo 'package:/data/app/~~keep==/keep-install==/base.apk=com.vpnhide.keep uid:115556'; echo 'package:/system/priv-app/Settings/Settings.apk=com.android.settings uid:1000'"
 apply_policy() {
 	/vpnhide-ctl load "$TEST_CONFIG" 0
 	rc=$?
@@ -76,7 +76,10 @@ cat > "$ALLOWLIST_CONFIG" <<'EOF'
     {"packageName":"com.vpnhide.keep", "userId":1, "uid":115556, "kmod":true, "lsposed":true, "portHiding":true},
     {"packageName":"com.vpnhide.test", "userId":1, "uid":115555, "kmod":false, "lsposed":false, "portHiding":false}
   ],
-  "portRules": [{"enabled":true, "packageName":"com.vpnhide.test", "userId":1, "startPort":8080, "endPort":8080, "protocol":"BOTH"}]
+  "portRules": [
+    {"enabled":true, "packageName":"com.vpnhide.test", "userId":1, "startPort":8080, "endPort":8080, "protocol":"BOTH"},
+    {"enabled":true, "packageName":"com.vpnhide.keep", "userId":1, "startPort":8081, "endPort":8081, "protocol":"TCP"}
+  ]
 }
 EOF
 apply_allowlist() {
@@ -171,6 +174,16 @@ if [ "$_al_nt" -gt 0 ] && [ "$_al_keep" -gt 0 ] && [ "$_al_target" -eq 0 ]; then
     PASS=$((PASS + 1))
 else
     echo "RESULT allowlist_visibility=FAIL (root=$_al_nt allowlisted=$_al_keep target=$_al_target)"
+    FAIL=$((FAIL + 1))
+fi
+
+# A selected P app with local allow-rule 8081 must see 8081 but not 8080.
+python3 /vector_tests.py --allowlist-port-only
+if [ "$?" -eq 0 ]; then
+    echo "RESULT allowlist_local_port=PASS"
+    PASS=$((PASS + 1))
+else
+    echo "RESULT allowlist_local_port=FAIL"
     FAIL=$((FAIL + 1))
 fi
 

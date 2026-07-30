@@ -289,6 +289,63 @@ def test_connect_port_block():
     return True
 
 
+def test_allowlist_local_port():
+    print("\n--- allowlist local port checks ---")
+    listeners = []
+    try:
+        for port in (8080, 8081):
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", port))
+            listener.listen(1)
+            listeners.append(listener)
+    except Exception as e:
+        print(f"FAIL: allowlist listener setup: {e}")
+        for listener in listeners:
+            listener.close()
+        return False
+
+    pid = safe_fork()
+    if pid == 0:
+        try:
+            os.setuid(115556)
+            blocked = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            blocked.settimeout(2.0)
+            try:
+                blocked.connect(("127.0.0.1", 8080))
+                print("FAIL: allowlisted app unexpectedly reached TCP 8080")
+                sys.exit(1)
+            except OSError as e:
+                if e.errno != errno.ECONNREFUSED:
+                    print(f"FAIL: TCP 8080 expected ECONNREFUSED, got {e.errno}")
+                    sys.exit(1)
+
+            allowed = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            allowed.settimeout(2.0)
+            allowed.connect(("127.0.0.1", 8081))
+
+            udp_blocked = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                udp_blocked.connect(("127.0.0.1", 8081))
+                print("FAIL: TCP-only allow rule unexpectedly allowed UDP 8081")
+                sys.exit(1)
+            except OSError as e:
+                if e.errno != errno.ECONNREFUSED:
+                    print(f"FAIL: UDP 8081 expected ECONNREFUSED, got {e.errno}")
+                    sys.exit(1)
+
+            print("[allowlist_port] TCP 8080 blocked, TCP 8081 allowed, UDP 8081 blocked")
+            sys.exit(0)
+        except Exception as e:
+            print(f"FAIL: allowlist port child exception: {e}")
+            sys.exit(1)
+
+    _, status = os.waitpid(pid, 0)
+    for listener in listeners:
+        listener.close()
+    return status == 0
+
+
 def test_bind_port_block():
     print("\n--- bind port block checks ---")
 
@@ -955,6 +1012,10 @@ def test_netlink_getrule_uid_leak(vpn0_name):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--allowlist-port-only":
+        ok = test_allowlist_local_port()
+        sys.exit(0 if ok else 1)
+
     try:
         vpn0_idx = socket.if_nametoindex("vpn0")
     except Exception as e:
