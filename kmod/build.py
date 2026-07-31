@@ -42,6 +42,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -71,6 +73,7 @@ GKI_VARIANTS = (
 )
 
 DEFAULT_KMI = "android14-6.1"
+BRIDGE_ZIP = "vpnhide-bridge.zip"
 
 
 # ----- Native build (in-container or local kernel-source) ------------------
@@ -258,6 +261,62 @@ def native_build_one(
     return 0
 
 
+def build_bridge(repo_root: Path, kmod_dir: Path) -> None:
+    """Rebuild the built-in-driver bridge module from the root template.
+
+    The bridge contains no kernel object of its own.  It only installs the
+    userspace policy tools and the boot/service integration used with the
+    built-in vpnhide driver, so refresh the two host binaries from the
+    current build while preserving the template's scripts and metadata.
+    """
+    template = repo_root / BRIDGE_ZIP
+    ctl_src = kmod_dir / "vpnhide-ctl-host"
+    daemon_src = kmod_dir / "vpnhide-daemon-host"
+
+    if not template.is_file():
+        raise RuntimeError(
+            f"bridge template not found: {template}; "
+            "keep the example vpnhide-bridge.zip at the repository root"
+        )
+    for binary in (ctl_src, daemon_src):
+        if not binary.is_file():
+            raise RuntimeError(f"bridge binary not found: {binary}")
+
+    with tempfile.TemporaryDirectory(prefix="vpnhide-bridge-") as tmp:
+        staging = Path(tmp)
+        with zipfile.ZipFile(template) as archive:
+            archive.extractall(staging)
+
+        shutil.copy2(ctl_src, staging / "vpnhide-ctl")
+        shutil.copy2(daemon_src, staging / "vpnhide-daemon")
+        os.chmod(staging / "vpnhide-ctl", 0o755)
+        os.chmod(staging / "vpnhide-daemon", 0o755)
+
+        kmod_prop = kmod_dir / "module" / "module.prop"
+        bridge_prop = staging / "module.prop"
+        version_match = re.search(
+            r"^version=v?([^\n]+)", kmod_prop.read_text(encoding="utf-8"),
+            flags=re.MULTILINE,
+        )
+        if version_match:
+            content = bridge_prop.read_text(encoding="utf-8")
+            content = re.sub(
+                r"^version=.*",
+                f"version=v{version_match.group(1).strip()}",
+                content,
+                flags=re.MULTILINE,
+            )
+            bridge_prop.write_text(content, encoding="utf-8")
+
+        out_zip = repo_root / BRIDGE_ZIP
+        if out_zip.exists():
+            out_zip.unlink()
+        make_zip(staging, out_zip)
+
+    size_kb = out_zip.stat().st_size / 1024
+    print(f"[bridge] built {out_zip} ({size_kb:.1f} KB)")
+
+
 def run_native_mode(args: argparse.Namespace, kmod_dir: Path) -> int:
     """Resolve kdir + clang-dir from args/env/auto-detect and build each
     requested kmi natively. Multi-kmi only makes sense when kdir is the
@@ -292,6 +351,7 @@ def run_native_mode(args: argparse.Namespace, kmod_dir: Path) -> int:
         rc = native_build_one(kmod_dir, kmi, kdir, clang_dir, args.out)
         if rc:
             return rc
+    build_bridge(kmod_dir.parent, kmod_dir)
     return 0
 
 
@@ -370,6 +430,10 @@ def run_container_mode(args: argparse.Namespace, repo_root: Path) -> int:
 
     print()
     print("Built artifacts (at repo root):")
+    bridge = repo_root / BRIDGE_ZIP
+    bridge_marker = "ok" if bridge.is_file() else "MISSING"
+    bridge_size = f"{bridge.stat().st_size / 1024:.1f} KB" if bridge.is_file() else ""
+    print(f"  [{bridge_marker}] {bridge.name} {bridge_size}")
     for kmi in kmis:
         out = repo_root / f"vpnhide-kmod-{kmi}.zip"
         marker = "ok" if out.is_file() else "MISSING"
