@@ -18,6 +18,7 @@
 #endif
 #define VPNHIDE_PACKAGE_NAME_MAX 256
 #define VPNHIDE_APK_PATH_MAX 512
+#define VPNHIDE_UIDS_PER_PM_LINE 64
 
 struct discovered_package {
 	char name[VPNHIDE_PACKAGE_NAME_MAX];
@@ -276,10 +277,14 @@ static int package_is_system(const char *path)
 	return strncmp(path, "/data/app/", 10) != 0;
 }
 
-static int parse_pm_line(char *line, struct discovered_package *out)
+/* `pm list packages -U --user all` reports all installed-user UIDs for a
+ * package on one line, e.g. `uid:10001,110001`. Keep one discovered record
+ * per UID: the kernel policy is keyed by the full UID, not by appId. */
+static int parse_pm_line(char *line, struct discovered_package *out,
+			 size_t out_capacity)
 {
 	char *pkg_start, *equals, *uid_marker, *end;
-	long uid;
+	int count = 0;
 
 	pkg_start = strstr(line, "package:");
 	if (!pkg_start)
@@ -298,20 +303,37 @@ static int parse_pm_line(char *line, struct discovered_package *out)
 		return 0;
 	*equals = '\0';
 
-	uid = strtol(uid_marker, &end, 10);
-	if (end == uid_marker || uid <= 0 || uid > UINT_MAX)
-		return 0;
-
 	if (strlen(equals + 1) >= sizeof(out->name) ||
 	    strlen(pkg_start) >= sizeof(out->apk_path))
 		return 0;
-	strcpy(out->apk_path, pkg_start);
-	strcpy(out->name, equals + 1);
-	out->uid = (uid_t)uid;
-	out->user_id = (int)(uid / 100000);
-	out->app_id = (unsigned int)(uid % 100000);
-	out->system_package = package_is_system(out->apk_path) || out->app_id < 10000;
-	return 1;
+
+	while (*uid_marker) {
+		unsigned long uid;
+
+		errno = 0;
+		uid = strtoul(uid_marker, &end, 10);
+		if (end == uid_marker || errno == ERANGE || uid == 0 ||
+		    uid > UINT_MAX)
+			return count;
+		if ((size_t)count >= out_capacity)
+			return -E2BIG;
+
+		memset(&out[count], 0, sizeof(out[count]));
+		strcpy(out[count].apk_path, pkg_start);
+		strcpy(out[count].name, equals + 1);
+		out[count].uid = (uid_t)uid;
+		out[count].user_id = (int)(uid / 100000);
+		out[count].app_id = (unsigned int)(uid % 100000);
+		out[count].system_package = package_is_system(out[count].apk_path) ||
+			out[count].app_id < 10000;
+		count++;
+
+		if (*end != ',')
+			break;
+		uid_marker = end + 1;
+	}
+
+	return count;
 }
 
 static void mark_system_packages(struct discovered_package *packages, int count)
@@ -368,14 +390,26 @@ static int discover_packages(struct discovered_package **out, int *count,
 	}
 
 	while (fgets(line, sizeof(line), pipe)) {
-		struct discovered_package parsed;
+		struct discovered_package parsed[VPNHIDE_UIDS_PER_PM_LINE];
 		struct discovered_package *grown;
+		int parsed_count;
 
-		if (!parse_pm_line(line, &parsed))
+		parsed_count = parse_pm_line(line, parsed,
+					    VPNHIDE_UIDS_PER_PM_LINE);
+		if (parsed_count < 0) {
+			pclose(pipe);
+			free(packages);
+			set_error(error, error_len,
+				  "too many user UIDs in Package Manager output");
+			return parsed_count;
+		}
+		if (parsed_count == 0)
 			continue;
-		if (*count == capacity) {
-			capacity *= 2;
-			grown = realloc(packages, (size_t)capacity * sizeof(*packages));
+		if (*count > capacity - parsed_count) {
+			int new_capacity = capacity;
+			while (new_capacity < *count + parsed_count)
+				new_capacity *= 2;
+			grown = realloc(packages, (size_t)new_capacity * sizeof(*packages));
 			if (!grown) {
 				pclose(pipe);
 				free(packages);
@@ -383,8 +417,11 @@ static int discover_packages(struct discovered_package **out, int *count,
 				return -ENOMEM;
 			}
 			packages = grown;
+			capacity = new_capacity;
 		}
-		packages[(*count)++] = parsed;
+		memcpy(&packages[*count], parsed,
+		       (size_t)parsed_count * sizeof(parsed[0]));
+		*count += parsed_count;
 	}
 
 	if (pclose(pipe) == -1 || *count == 0) {
