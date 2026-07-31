@@ -5,6 +5,8 @@ MODDIR="${0%/*}"
 MODULE_PROP="$MODDIR/module.prop"
 STATUS_DIR="/data/adb/vpnhide_kmod"
 STATUS_FILE="$STATUS_DIR/load_status"
+CTL="$MODDIR/vpnhide-ctl"
+DEV_NODE="/dev/vpnhide_ctrl"
 
 mkdir -p "$STATUS_DIR"
 
@@ -13,13 +15,40 @@ BOOT_ID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
 UNAME_R=$(uname -r 2>/dev/null)
 VERSION=$(grep '^version=' "$MODULE_PROP" 2>/dev/null | cut -d= -f2-)
 
-if [ -c "/dev/vpnhide_ctrl" ]; then
-    LOADED=1
-    MSG="VPNHide Next built-in driver detected and active."
-else
+write_module_status() {
+    status="$1"
+    tmp="$MODULE_PROP.tmp"
+
+    awk -v status="$status" '
+        BEGIN { replaced = 0 }
+        /^description=/ {
+            if (!replaced) {
+                print "description=" status
+                replaced = 1
+            }
+            next
+        }
+        { print }
+        END {
+            if (!replaced)
+                print "description=" status
+        }
+    ' "$MODULE_PROP" > "$tmp" && mv "$tmp" "$MODULE_PROP"
+    chmod 0644 "$MODULE_PROP" 2>/dev/null
+}
+
+if [ ! -c "$DEV_NODE" ]; then
     LOADED=0
-    MSG="VPNHide Next built-in driver (/dev/vpnhide_ctrl) not found!"
+    MSG="status: error (device missing) 😵"
+elif [ ! -x "$CTL" ] || ! "$CTL" hook_status >/dev/null 2>&1; then
+    LOADED=0
+    MSG="status: error (connection failed) 😵"
+else
+    LOADED=1
+    MSG="status: ok 😋"
 fi
+
+write_module_status "$MSG"
 
 {
     printf 'timestamp=%s\n' "$NOW"

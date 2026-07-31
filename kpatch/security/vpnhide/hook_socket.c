@@ -289,6 +289,12 @@ static bool should_block_port(uid_t uid, __be16 port_be,
 	for (i = 0; i < pt->count; i++) {
 		if (pt->targets[i].uid != uid)
 			continue;
+		if (pt->targets[i].mode == VH_PORT_POLICY_UNRESTRICTED)
+			goto out;
+		if (pt->targets[i].mode == VH_PORT_POLICY_DENY_ALL) {
+			block = true;
+			goto out;
+		}
 		for (j = 0; j < pt->targets[i].rule_count; j++) {
 			u16 lo = pt->targets[i].rules[j].start_port;
 			u16 hi = pt->targets[i].rules[j].end_port;

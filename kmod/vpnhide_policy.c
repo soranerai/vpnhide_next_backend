@@ -115,20 +115,13 @@ static int port_layer_enabled(const JSON_Array *apps)
 	return 0;
 }
 
-static int has_enabled_port_rules(const JSON_Array *port_rules,
-					 const JSON_Array *mass_rules)
+static void set_full_range_port_rules(struct vpnhide_uid_port_rules *target)
 {
-	const JSON_Array *arrays[2] = { port_rules, mass_rules };
-
-	for (int a = 0; a < 2; a++) {
-		size_t count = arrays[a] ? json_array_get_count(arrays[a]) : 0;
-		for (size_t i = 0; i < count; i++) {
-			JSON_Object *rule = json_array_get_object(arrays[a], i);
-			if (rule && json_object_get_boolean(rule, "enabled") == 1)
-				return 1;
-		}
-	}
-	return 0;
+	target->rule_count = 1;
+	target->mode = VH_PORT_POLICY_DENY_ALL;
+	target->rules[0].start_port = 0;
+	target->rules[0].end_port = 65535;
+	target->rules[0].protocol = VH_PROTO_BOTH;
 }
 
 static int resolve_named_port_rules(const JSON_Array *port_rules,
@@ -174,27 +167,9 @@ static int resolve_named_port_rules(const JSON_Array *port_rules,
 	/* Preserve denylist behavior: a selected app receives full-range hiding
 	 * only when neither a matching local rule nor a mass rule was resolved. */
 	if (full_range_fallback && target->rule_count == 0) {
-		target->rule_count = 0;
-		target->rules[0].start_port = 0;
-		target->rules[0].end_port = 65535;
-		target->rules[0].protocol = VH_PROTO_BOTH;
-		target->rule_count = 1;
+		set_full_range_port_rules(target);
 	}
 	return 0;
-}
-
-static int resolve_package_port_rules(const JSON_Array *port_rules,
-					      const JSON_Array *mass_rules,
-					      const struct discovered_package *pkg,
-					      int full_range_fallback,
-					      struct vpnhide_uid_port_rules *target,
-					      char *error, size_t error_len)
-{
-	memset(target, 0, sizeof(*target));
-	target->uid = pkg->uid;
-	return resolve_named_port_rules(port_rules, mass_rules, pkg->name,
-					       pkg->user_id, pkg->uid, full_range_fallback, target,
-					       error, error_len);
 }
 
 static int port_rule_allows(const struct vpnhide_uid_port_rules *allowed,
@@ -230,8 +205,11 @@ static int resolve_allowlist_exception_rules(
 	if (ret)
 		return ret;
 	memset(target, 0, sizeof(*target));
-	if (allowed.rule_count == 0)
+	if (allowed.rule_count == 0) {
+		target->mode = VH_PORT_POLICY_UNRESTRICTED;
 		return 0;
+	}
+	target->mode = VH_PORT_POLICY_RULES;
 
 	for (int port = 0; port <= 65536; port++) {
 		int protocol = -1;
@@ -624,7 +602,6 @@ int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
 	const JSON_Array *mass_rules;
 	struct discovered_package *packages = NULL;
 	int package_count = 0;
-	int explicit_rules;
 	int ret;
 	int i;
 
@@ -636,7 +613,6 @@ int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
 	apps = json_object_get_array(root, "apps");
 	port_rules = json_object_get_array(root, "portRules");
 	mass_rules = json_object_get_array(root, "massPortRules");
-	explicit_rules = has_enabled_port_rules(port_rules, mass_rules);
 	/* Blacklist is opt-in. In allowlist every eligible app is a target unless
 	 * explicitly selected as an exception, even when apps[] has no such entry. */
 	if (summary->mode == VPNHIDE_LIST_BLACKLIST && !port_layer_enabled(apps))
@@ -677,6 +653,7 @@ int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
 				target, error, error_len);
 			if (ret)
 				return ret;
+			target->mode = VH_PORT_POLICY_RULES;
 			result->count++;
 		}
 		free(packages);
@@ -702,8 +679,6 @@ int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
 				goto next_package;
 		}
 		if (selected) {
-			if (!explicit_rules)
-				goto next_package;
 			if (result->count >= MAX_TARGET_UIDS) {
 				free(packages);
 				set_error(error, error_len, "port target set exceeds MAX_TARGET_UIDS");
@@ -716,8 +691,6 @@ int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
 				free(packages);
 				return ret;
 			}
-			if (result->targets[result->count].rule_count == 0)
-				goto next_package;
 			result->targets[result->count].uid = pkg->uid;
 			result->count++;
 			goto next_package;
@@ -727,15 +700,16 @@ int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
 			set_error(error, error_len, "port target set exceeds MAX_TARGET_UIDS");
 			return -E2BIG;
 		}
-		ret = resolve_package_port_rules(port_rules, mass_rules, pkg,
-						summary->mode == VPNHIDE_LIST_BLACKLIST || !explicit_rules,
-						&result->targets[result->count], error, error_len);
-		if (ret) {
-			free(packages);
-			return ret;
-		}
-		if (explicit_rules && result->targets[result->count].rule_count == 0)
-			goto next_package;
+		/* In ALLOWLIST, an app outside the selected exception set is denied
+		 * every port. Do not resolve global rules here: they describe the
+		 * selected app's visible set and must never become an allowlist for
+		 * unselected apps. */
+		memset(&result->targets[result->count], 0,
+		       sizeof(result->targets[result->count]));
+		result->targets[result->count].uid = pkg->uid;
+		/* Keep the full range as a compatibility fallback for an older
+		 * backend that does not know the explicit DENY_ALL mode yet. */
+		set_full_range_port_rules(&result->targets[result->count]);
 		result->count++;
 	next_package:
 		;

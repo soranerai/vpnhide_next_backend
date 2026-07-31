@@ -20,8 +20,6 @@
 #include "vpnhide_uapi.h"
 
 #define MODNAME        "vpnhide_ctrl"
-#define BUCKETS_COUNT  30
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 #define vh_fd_file(f) fd_file(f)
 #else
@@ -170,7 +168,6 @@ extern spinlock_t g_vpn_name_cache_lock;
 
 extern atomic_t global_cover_ifindex;
 extern bool     g_stats_pkts_first;
-extern atomic_t stats_bucket_secs;
 
 /* ------------------------------------------------------------------ */
 /* Core helpers (core.c)                                               */

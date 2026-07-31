@@ -43,7 +43,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -74,6 +73,7 @@ GKI_VARIANTS = (
 
 DEFAULT_KMI = "android14-6.1"
 BRIDGE_ZIP = "vpnhide-bridge.zip"
+BRIDGE_MODULE_DIR = "kpatch/module"
 
 
 # ----- Native build (in-container or local kernel-source) ------------------
@@ -101,7 +101,7 @@ def detect_kdir(kmi: str) -> str | None:
 
 def build_ctl_host(repo_root: Path, kmod_dir: Path) -> Path:
     """Build the vpnhide-ctl tool on the host using the Android NDK."""
-    ndk_home = os.environ.get("ANDROID_NDK_HOME")
+    ndk_home = os.environ.get("ANDROID_NDK_HOME") or os.environ.get("ANDROID_NDK_ROOT")
     if not ndk_home:
         # Check standard locations (Astra/Linux)
         ndk_base = Path.home() / "android-sdk" / "ndk"
@@ -116,10 +116,10 @@ def build_ctl_host(repo_root: Path, kmod_dir: Path) -> Path:
 
     if not ndk_home:
         raise RuntimeError(
-            "ANDROID_NDK_HOME not set and NDK not found in standard locations"
+            "ANDROID_NDK_HOME/ANDROID_NDK_ROOT not set and NDK not found in standard locations"
         )
 
-    print(f"Using NDK to build ctl: {ndk_home}")
+    print(f"Using NDK to build policy tools: {ndk_home}", flush=True)
 
     # Locate clang in NDK
     clang_glob = list(Path(ndk_home).glob("**/bin/aarch64-linux-android*-clang"))
@@ -175,6 +175,11 @@ def build_ctl_host(repo_root: Path, kmod_dir: Path) -> Path:
     if strip_bin.exists():
         subprocess.run([str(strip_bin), str(out_daemon)], check=True)
 
+    print(
+        f"Built userspace tools: {out_bin.name} (policy) and {out_daemon.name} (daemon)",
+        flush=True,
+    )
+
     return out_bin
 
 
@@ -200,7 +205,8 @@ def native_build_one(
     subprocess.run(["make", "-C", str(kmod_dir), "strip"], env=env, check=True)
     shutil.copy(kmod_dir / "vpnhide_kmod.ko", staging / "vpnhide_kmod.ko")
 
-    # Copy the host-built ctl binary (visible in /work/kmod/)
+    # The userspace tools are rebuilt before native_build_one() and therefore
+    # always contain the current vpnhide_policy.c implementation.
     ctl_src = kmod_dir / "vpnhide-ctl-host"
     if ctl_src.exists():
         shutil.copy(ctl_src, staging / "vpnhide-ctl")
@@ -215,6 +221,7 @@ def native_build_one(
     if daemon_src.exists():
         shutil.copy(daemon_src, staging / "vpnhide-daemon")
         os.chmod(staging / "vpnhide-daemon", 0o755)
+        print(f"[{kmi}] packaged vpnhide-daemon", flush=True)
     else:
         print(
             f"""
@@ -262,21 +269,20 @@ def native_build_one(
 
 
 def build_bridge(repo_root: Path, kmod_dir: Path) -> None:
-    """Rebuild the built-in-driver bridge module from the root template.
+    """Build the built-in-driver bridge module from its tracked source.
 
     The bridge contains no kernel object of its own.  It only installs the
     userspace policy tools and the boot/service integration used with the
-    built-in vpnhide driver, so refresh the two host binaries from the
-    current build while preserving the template's scripts and metadata.
+    built-in vpnhide driver. Its module files live in kpatch/module and are
+    packaged directly; no pre-existing ZIP is used as a template.
     """
-    template = repo_root / BRIDGE_ZIP
+    source = repo_root / BRIDGE_MODULE_DIR
     ctl_src = kmod_dir / "vpnhide-ctl-host"
     daemon_src = kmod_dir / "vpnhide-daemon-host"
 
-    if not template.is_file():
+    if not source.is_dir():
         raise RuntimeError(
-            f"bridge template not found: {template}; "
-            "keep the example vpnhide-bridge.zip at the repository root"
+            f"bridge source directory not found: {source}"
         )
     for binary in (ctl_src, daemon_src):
         if not binary.is_file():
@@ -284,13 +290,13 @@ def build_bridge(repo_root: Path, kmod_dir: Path) -> None:
 
     with tempfile.TemporaryDirectory(prefix="vpnhide-bridge-") as tmp:
         staging = Path(tmp)
-        with zipfile.ZipFile(template) as archive:
-            archive.extractall(staging)
+        shutil.copytree(source, staging, dirs_exist_ok=True)
 
         shutil.copy2(ctl_src, staging / "vpnhide-ctl")
         shutil.copy2(daemon_src, staging / "vpnhide-daemon")
         os.chmod(staging / "vpnhide-ctl", 0o755)
         os.chmod(staging / "vpnhide-daemon", 0o755)
+        print("[bridge] packaged vpnhide-ctl and vpnhide-daemon", flush=True)
 
         kmod_prop = kmod_dir / "module" / "module.prop"
         bridge_prop = staging / "module.prop"
@@ -338,6 +344,21 @@ def run_native_mode(args: argparse.Namespace, kmod_dir: Path) -> int:
         print("error: --out is only valid with a single --kmi", file=sys.stderr)
         return 2
 
+    # The outer host process builds the Android userspace tools before
+    # entering the DDK container. The container has no NDK, so it must reuse
+    # those freshly built binaries rather than trying to compile them again.
+    if not args.skip_userspace_build:
+        # vpnhide_policy.c is compiled into vpnhide-ctl. Rebuild it as part of
+        # every module build so a policy change can never be masked by a stale
+        # ignored vpnhide-ctl-host binary.
+        build_ctl_host(kmod_dir.parent, kmod_dir)
+    else:
+        for binary in (kmod_dir / "vpnhide-ctl-host", kmod_dir / "vpnhide-daemon-host"):
+            if not binary.is_file():
+                raise RuntimeError(
+                    f"prepared userspace binary missing in container: {binary}"
+                )
+
     for kmi in kmis:
         kdir = explicit_kdir or detect_kdir(kmi)
         if not kdir:
@@ -379,12 +400,6 @@ def find_runtime() -> tuple[str, bool]:
 def container_build_one(
     runtime: str, is_podman: bool, repo_root: Path, kmi: str
 ) -> None:
-    # Build ctl utility on host first
-    try:
-        build_ctl_host(repo_root, repo_root / "kmod")
-    except Exception as e:
-        print(f"[{kmi}] warning: could not build ctl utility on host: {e}")
-
     image = f"ghcr.io/ylarod/ddk-min:{kmi}-{DDK_IMAGE_TAG}"
     mount_spec = f"{repo_root}:/work"
     cmd = [runtime, "run", "--rm"]
@@ -403,6 +418,7 @@ def container_build_one(
         "python3",
         "kmod/build.py",
         "--inside-container",
+        "--skip-userspace-build",
         "--kmi",
         kmi,
     ]
@@ -423,6 +439,9 @@ def run_container_mode(args: argparse.Namespace, repo_root: Path) -> int:
         return 2
 
     kmis = _select_kmis(args)
+    # Build once on the host; the resulting Android binaries are mounted into
+    # each DDK container and copied into every module archive.
+    build_ctl_host(repo_root, repo_root / "kmod")
     runtime, is_podman = find_runtime()
     print(f"Using {'podman' if is_podman else 'docker'} at {runtime}")
     for kmi in kmis:
@@ -497,6 +516,11 @@ def main() -> int:
         "--out",
         type=Path,
         help="Output zip path (single --kmi only). Default: vpnhide-kmod-<kmi>.zip in repo root.",
+    )
+    parser.add_argument(
+        "--skip-userspace-build",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     args = parser.parse_args()
 

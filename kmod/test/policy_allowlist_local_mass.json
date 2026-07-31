@@ -12,7 +12,15 @@
       "portHiding": true
     }
   ],
-  "portRules": [],
+  "portRules": [
+    {
+      "enabled": true,
+      "uid": 10001,
+      "startPort": 8080,
+      "endPort": 8080,
+      "protocol": "TCP"
+    }
+  ],
   "massPortRules": [
     {
       "enabled": true,

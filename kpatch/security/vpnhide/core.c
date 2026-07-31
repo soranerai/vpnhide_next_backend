@@ -17,6 +17,7 @@
 #include <linux/vmalloc.h>
 #include <linux/sort.h>
 #include <linux/netdevice.h>
+#include <linux/timekeeping.h>
 
 #include "vpnhide.h"
 
@@ -44,16 +45,24 @@ spinlock_t g_vpn_name_cache_lock;
 
 atomic_t global_cover_ifindex = ATOMIC_INIT(0);
 bool     g_stats_pkts_first;
-atomic_t stats_bucket_secs = ATOMIC_INIT(3);
+/* Current-session cumulative intercept statistics. */
+struct vh_uid_stats_total {
+	uid_t uid;
+	u64 ioctl_count;
+	u64 netlink_count;
+	u64 proc_count;
+	u64 sockopt_count;
+	u64 connect_count;
+	u64 getname_count;
+	u64 port_count;
+};
 
-/* Rolling intercept stats: BUCKETS_COUNT circular buckets */
 static struct {
 	spinlock_t lock;
-	u32 uid[BUCKETS_COUNT];
-	int type[BUCKETS_COUNT];
-	ktime_t ts[BUCKETS_COUNT];
-	int head;
-} intercept_ring;
+ struct vh_uid_stats_total stats[MAX_TARGET_UIDS];
+ int count;
+} intercept_stats;
+static atomic64_t intercept_stats_sequence = ATOMIC64_INIT(0);
 
 /* Java-side stats/status written via device write() */
 static char java_stats_buf[4096];
@@ -322,12 +331,82 @@ bool is_active_vpn_ifname(const char *name)
 
 void record_kmod_intercept(uid_t uid, int type)
 {
-	spin_lock(&intercept_ring.lock);
-	intercept_ring.uid[intercept_ring.head]  = uid;
-	intercept_ring.type[intercept_ring.head] = type;
-	intercept_ring.ts[intercept_ring.head]   = ktime_get();
-	intercept_ring.head = (intercept_ring.head + 1) % BUCKETS_COUNT;
-	spin_unlock(&intercept_ring.lock);
+	int i;
+
+	if (uid == 0 || uid == 1000)
+		return;
+
+	spin_lock(&intercept_stats.lock);
+	for (i = 0; i < intercept_stats.count; i++) {
+		if (intercept_stats.stats[i].uid == uid)
+			goto increment;
+	}
+
+	if (intercept_stats.count >= MAX_TARGET_UIDS) {
+		spin_unlock(&intercept_stats.lock);
+		return;
+	}
+	i = intercept_stats.count++;
+	memset(&intercept_stats.stats[i], 0, sizeof(intercept_stats.stats[i]));
+	intercept_stats.stats[i].uid = uid;
+
+increment:
+	switch (type) {
+	case HOOK_SETSOCKOPT:
+	case HOOK_GETSOCKOPT:
+		intercept_stats.stats[i].sockopt_count++;
+		break;
+	case HOOK_RTNL_FILL:
+	case HOOK_INET6_FILL:
+	case HOOK_INET_FILL:
+	case HOOK_FIB_DUMP:
+	case HOOK_RT6_FILL:
+	case HOOK_RT_FILL:
+		intercept_stats.stats[i].netlink_count++;
+		break;
+	case HOOK_GETDENTS64:
+	case HOOK_OPENAT ... HOOK_READLINKAT:
+		intercept_stats.stats[i].proc_count++;
+		break;
+	case HOOK_CONNECT:
+	case HOOK_BIND:
+		intercept_stats.stats[i].connect_count++;
+		break;
+	case HOOK_GETNAME_INET:
+	case HOOK_GETNAME_INET6:
+		intercept_stats.stats[i].getname_count++;
+		break;
+	default:
+		intercept_stats.stats[i].ioctl_count++;
+		break;
+	}
+	spin_unlock(&intercept_stats.lock);
+}
+
+static void intercept_stats_prune(const struct vpnhide_policy_payload *payload)
+{
+	int i, j;
+
+	spin_lock(&intercept_stats.lock);
+	for (i = 0; i < intercept_stats.count;) {
+		bool keep = false;
+
+		for (j = 0; j < payload->targets.kmod_count; j++) {
+			if (payload->targets.kmod_uids[j] == intercept_stats.stats[i].uid) {
+				keep = true;
+				break;
+			}
+		}
+		if (keep) {
+			i++;
+			continue;
+		}
+		intercept_stats.stats[i] =
+			intercept_stats.stats[--intercept_stats.count];
+		memset(&intercept_stats.stats[intercept_stats.count], 0,
+		       sizeof(intercept_stats.stats[0]));
+	}
+	spin_unlock(&intercept_stats.lock);
 }
 
 /* ------------------------------------------------------------------ */
@@ -432,8 +511,7 @@ static ssize_t vpnhide_dev_read(struct file *file, char __user *buf,
 				    "java_stats_clear_gen: %d\n",
 				    atomic_read(&java_stats_clear_generation));
 		offset += scnprintf(reader->buf + offset, 65536 - offset,
-				    "stats_bucket_secs: %d\n",
-				    atomic_read(&stats_bucket_secs));
+				    "stats_mode: cumulative_session\n");
 		offset += scnprintf(reader->buf + offset, 65536 - offset,
 				    "debug_enabled: %d\n", vpnhide_debug_is_enabled());
 
@@ -594,6 +672,15 @@ int vpnhide_apply_policy(const struct vpnhide_policy_payload *payload,
 		return -ENOMEM;
 
 	snapshot->payload = *payload;
+	/* Port policy is authoritative and must not be disabled by a global or
+	 * per-app hook mask. CONNECT/BIND are required for port enforcement. */
+	snapshot->payload.active_hooks_mask |= BIT(HOOK_CONNECT) | BIT(HOOK_BIND);
+	for (i = 0; i < snapshot->payload.app_hook_masks.count; i++) {
+		if (snapshot->payload.app_hook_masks.masks[i].has_kernel_override)
+				snapshot->payload.app_hook_masks.masks[i].kernel_mask |=
+					BIT(HOOK_CONNECT) | BIT(HOOK_BIND);
+	}
+	intercept_stats_prune(&snapshot->payload);
 	sort(snapshot->payload.targets.kmod_uids,
 	     snapshot->payload.targets.kmod_count, sizeof(uid_t), uid_cmp, NULL);
 	sort(snapshot->payload.targets.lsposed_uids,
@@ -748,87 +835,65 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 	}
 
 	case VH_GET_STATS: {
-		struct vpnhide_kmod_stats_data *sd;
-		int i, j;
+		struct vpnhide_stats_snapshot request;
+		struct vpnhide_uid_stats *out;
+		u32 count;
+		int i;
 
-		sd = kzalloc(sizeof(*sd), GFP_KERNEL);
-		if (!sd)
+		if (copy_from_user(&request, uarg, sizeof(request)))
+			return -EFAULT;
+		if (request.capacity > MAX_TARGET_UIDS)
+			return -EINVAL;
+		if (request.capacity && !request.entries_ptr)
+			return -EINVAL;
+		out = request.capacity ? kvmalloc_array(request.capacity,
+							 sizeof(*out), GFP_KERNEL) : NULL;
+		if (request.capacity && !out)
 			return -ENOMEM;
 
-		spin_lock(&intercept_ring.lock);
-		for (i = 0; i < BUCKETS_COUNT; i++) {
-			uid_t r_uid = intercept_ring.uid[i];
-
-			if (!r_uid)
-				continue;
-			for (j = 0; j < sd->count; j++) {
-				if (sd->stats[j].uid == r_uid)
-					goto found;
-			}
-			if (sd->count < MAX_STATS_UIDS) {
-				sd->stats[sd->count].uid = r_uid;
-				j = sd->count++;
-			} else {
-				continue;
-			}
-found:
-			switch (intercept_ring.type[i]) {
-			case HOOK_SETSOCKOPT:
-			case HOOK_GETSOCKOPT:
-				sd->stats[j].sockopt_count++;
-				break;
-			case HOOK_RTNL_FILL:
-			case HOOK_INET6_FILL:
-			case HOOK_INET_FILL:
-			case HOOK_FIB_DUMP:
-			case HOOK_RT6_FILL:
-			case HOOK_RT_FILL:
-				sd->stats[j].netlink_count++;
-				break;
-			case HOOK_GETDENTS64:
-			case HOOK_OPENAT ... HOOK_READLINKAT:
-				sd->stats[j].proc_count++;
-				break;
-			case HOOK_CONNECT:
-			case HOOK_BIND:
-				sd->stats[j].connect_count++;
-				break;
-			case HOOK_GETNAME_INET:
-			case HOOK_GETNAME_INET6:
-				sd->stats[j].getname_count++;
-				break;
-			default:
-				sd->stats[j].ioctl_count++;
-				break;
+		spin_lock(&intercept_stats.lock);
+		count = intercept_stats.count;
+		request.sequence = atomic64_inc_return(&intercept_stats_sequence);
+		request.monotonic_ns = ktime_get_ns();
+		request.count = count;
+		if (out && request.capacity >= count) {
+			for (i = 0; i < count; i++) {
+				out[i].uid = intercept_stats.stats[i].uid;
+				out[i].ioctl_count = intercept_stats.stats[i].ioctl_count;
+				out[i].netlink_count = intercept_stats.stats[i].netlink_count;
+				out[i].proc_count = intercept_stats.stats[i].proc_count;
+				out[i].sockopt_count = intercept_stats.stats[i].sockopt_count;
+				out[i].connect_count = intercept_stats.stats[i].connect_count;
+				out[i].getname_count = intercept_stats.stats[i].getname_count;
+				out[i].port_count = intercept_stats.stats[i].port_count;
 			}
 		}
-		spin_unlock(&intercept_ring.lock);
+		spin_unlock(&intercept_stats.lock);
 
-		if (copy_to_user(uarg, sd, sizeof(*sd))) {
-			kfree(sd);
+		if (request.capacity < count) {
+			kvfree(out);
+			if (copy_to_user(uarg, &request, sizeof(request)))
+				return -EFAULT;
+			return -ENOSPC;
+		}
+		if (out && copy_to_user((void __user *)(unsigned long)request.entries_ptr,
+					out, count * sizeof(*out))) {
+			kvfree(out);
 			return -EFAULT;
 		}
-		kfree(sd);
+		kvfree(out);
+		if (copy_to_user(uarg, &request, sizeof(request)))
+			return -EFAULT;
 		break;
 	}
 
 	case VH_CLEAR_STATS:
-		spin_lock(&intercept_ring.lock);
-		memset(intercept_ring.uid,  0, sizeof(intercept_ring.uid));
-		memset(intercept_ring.type, 0, sizeof(intercept_ring.type));
-		memset(intercept_ring.ts,   0, sizeof(intercept_ring.ts));
-		intercept_ring.head = 0;
-		spin_unlock(&intercept_ring.lock);
+		spin_lock(&intercept_stats.lock);
+		memset(intercept_stats.stats, 0, sizeof(intercept_stats.stats));
+		intercept_stats.count = 0;
+		atomic64_set(&intercept_stats_sequence, 0);
+		spin_unlock(&intercept_stats.lock);
 		break;
-
-	case VH_SET_STATS_WINDOW: {
-		u32 secs;
-
-		if (copy_from_user(&secs, uarg, sizeof(secs)))
-			return -EFAULT;
-		atomic_set(&stats_bucket_secs, secs);
-		break;
-	}
 
 	case VH_GET_ACTIVE_HOOKS: {
 		u32 mask = vpnhide_active_hooks_mask();
@@ -942,7 +1007,7 @@ static int __init vpnhide_init(void)
 	spin_lock_init(&spoof_ip_lock);
 	spin_lock_init(&active_vpns_lock);
 	spin_lock_init(&g_vpn_name_cache_lock);
-	spin_lock_init(&intercept_ring.lock);
+	spin_lock_init(&intercept_stats.lock);
 	init_waitqueue_head(&vpnhide_config_wait);
 
 	ret = misc_register(&vpnhide_misc);

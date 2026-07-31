@@ -14,6 +14,12 @@
 #define VH_PROTO_UDP 1
 #define VH_PROTO_BOTH 2
 
+/* Port policy is block-only at the kernel boundary. Keep an explicit mode
+ * so an empty target cannot be confused with a missing/stale UID entry. */
+#define VH_PORT_POLICY_RULES        0
+#define VH_PORT_POLICY_UNRESTRICTED 1
+#define VH_PORT_POLICY_DENY_ALL     2
+
 struct vpnhide_port_rule {
 	unsigned short start_port;
 	unsigned short end_port;
@@ -23,6 +29,7 @@ struct vpnhide_port_rule {
 struct vpnhide_uid_port_rules {
 	uid_t uid;
 	int rule_count;
+	unsigned char mode; /* VH_PORT_POLICY_* */
 	struct vpnhide_port_rule rules[MAX_PORT_RULES_PER_UID];
 };
 
@@ -68,34 +75,29 @@ struct vpnhide_spoof_ip {
 #define VH_GET_ACTIVE_HOOKS _IOR(VH_IOCTL_MAGIC, 0x0A, unsigned int)
 #define VH_GET_VERSION _IOR(VH_IOCTL_MAGIC, 0x1E, int)
 
+/* Current-session cumulative intercept counters.  The array is supplied by
+ * userspace because the snapshot no longer has a fixed-size ioctl payload. */
 struct vpnhide_uid_stats {
 	uid_t uid;
-	unsigned int ioctl_count;
-	unsigned int netlink_count;
-	unsigned int proc_count;
-	unsigned int sockopt_count;
-	unsigned int connect_count;
-	unsigned int getname_count;
-	unsigned int port_count;
+	__u64 ioctl_count;
+	__u64 netlink_count;
+	__u64 proc_count;
+	__u64 sockopt_count;
+	__u64 connect_count;
+	__u64 getname_count;
+	__u64 port_count;
 };
 
-/* Kept below MAX_TARGET_UIDS: the ioctl size field is 14 bits (max 16383
- * bytes), and MAX_TARGET_UIDS * sizeof(struct vpnhide_uid_stats) no longer
- * fits since port_count was added. */
-#define MAX_STATS_UIDS 480
-
-struct vpnhide_kmod_stats_data {
-	int count;
-	struct vpnhide_uid_stats stats[MAX_STATS_UIDS];
+struct vpnhide_stats_snapshot {
+	__u32 capacity;       /* entries available at entries_ptr */
+	__u32 count;          /* required/returned entry count */
+	__u64 sequence;       /* increments for every successful snapshot */
+	__u64 monotonic_ns;   /* ktime_get_ns() at snapshot time */
+	__u64 entries_ptr;    /* userspace struct vpnhide_uid_stats[] */
 };
 
-#define VH_GET_STATS _IOR(VH_IOCTL_MAGIC, 0x0B, struct vpnhide_kmod_stats_data)
+#define VH_GET_STATS _IOWR(VH_IOCTL_MAGIC, 0x0B, struct vpnhide_stats_snapshot)
 #define VH_CLEAR_STATS _IO(VH_IOCTL_MAGIC, 0x0C)
-
-/* Seconds represented by each of the BUCKETS_COUNT rolling stats buckets;
- * window = BUCKETS_COUNT * stats_bucket_secs. Also clears existing stats
- * since old bucket alignment becomes invalid under a new duration. */
-#define VH_SET_STATS_WINDOW _IOW(VH_IOCTL_MAGIC, 0x1D, unsigned int)
 #define VH_GET_TARGETS _IOR(VH_IOCTL_MAGIC, 0x0D, struct vpnhide_ioctl_data)
 #define VH_SET_BPF_MAP_FOPS _IOW(VH_IOCTL_MAGIC, 0x0E, unsigned long)
 #define VH_SET_STATS_MAP_A _IOW(VH_IOCTL_MAGIC, 0x0F, int)
