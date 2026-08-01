@@ -153,7 +153,7 @@ struct vpnhide_app_hook_ioctl_data {
  * through the payload-size/ABI check instead of silently applying garbage. */
 #define VPNHIDE_POLICY_ABI_VERSION_V2 2
 #define VPNHIDE_POLICY_ABI_VERSION_V3 3
-#define VPNHIDE_POLICY_ABI_VERSION VPNHIDE_POLICY_ABI_VERSION_V2
+#define VPNHIDE_POLICY_ABI_VERSION VPNHIDE_POLICY_ABI_VERSION_V3
 #define VPNHIDE_POLICY_MAX_BYTES (16U * 1024U * 1024U)
 struct vpnhide_policy_payload {
 	struct vpnhide_target_bundle targets;

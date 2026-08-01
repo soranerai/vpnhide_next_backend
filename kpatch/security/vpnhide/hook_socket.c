@@ -274,37 +274,30 @@ EXPORT_SYMBOL_GPL(vpnhide_getsockopt_post);
 static bool should_block_port(uid_t uid, __be16 port_be,
 			      unsigned char protocol)
 {
-	struct vpnhide_port_ioctl_data *pt;
 	struct vpnhide_policy_snapshot *snapshot;
+	const struct vpnhide_port_target_v3 *target;
 	u16 port = ntohs(port_be);
 	bool block = false;
-	int i, j;
+	u32 j;
 
 	rcu_read_lock();
 	snapshot = rcu_dereference(global_policy_snapshot);
-	pt = snapshot ? &snapshot->payload.ports : NULL;
-	if (!pt)
+	target = vpnhide_find_port_target(snapshot, uid);
+	if (!target)
 		goto out;
-
-	for (i = 0; i < pt->count; i++) {
-		if (pt->targets[i].uid != uid)
-			continue;
-		if (pt->targets[i].mode == VH_PORT_POLICY_UNRESTRICTED)
-			goto out;
-		if (pt->targets[i].mode == VH_PORT_POLICY_DENY_ALL) {
+	if (target->mode == VH_PORT_POLICY_UNRESTRICTED)
+		goto out;
+	if (target->mode == VH_PORT_POLICY_DENY_ALL) {
+		block = true;
+		goto out;
+	}
+	for (j = 0; j < target->rule_count; j++) {
+		const struct vpnhide_port_rule_v3 *rule =
+			&snapshot->port_rules[target->first_rule + j];
+		if (port >= rule->start_port && port <= rule->end_port &&
+		    (rule->protocol == VH_PROTO_BOTH || rule->protocol == protocol)) {
 			block = true;
 			goto out;
-		}
-		for (j = 0; j < pt->targets[i].rule_count; j++) {
-			u16 lo = pt->targets[i].rules[j].start_port;
-			u16 hi = pt->targets[i].rules[j].end_port;
-
-			if (port >= lo && port <= hi &&
-			    (pt->targets[i].rules[j].protocol == VH_PROTO_BOTH ||
-			     pt->targets[i].rules[j].protocol == protocol)) {
-				block = true;
-				goto out;
-			}
 		}
 	}
 out:
