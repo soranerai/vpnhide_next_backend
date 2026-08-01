@@ -646,15 +646,17 @@ static struct socket *resolve_sock_addr(struct pt_regs *regs, bool uses_wrapper,
   return sock;
 }
 
-static bool should_block_port(const struct vpnhide_uid_port_rules *urules,
+static bool should_block_port(const struct vpnhide_policy_snapshot *snapshot,
+                              const struct vpnhide_port_target_v3 *urules,
                               unsigned short port, unsigned char proto) {
-  int i;
+  u32 i;
   if (urules->mode == VH_PORT_POLICY_UNRESTRICTED)
     return false;
   if (urules->mode == VH_PORT_POLICY_DENY_ALL)
     return true;
   for (i = 0; i < urules->rule_count; i++) {
-    const struct vpnhide_port_rule *r = &urules->rules[i];
+    const struct vpnhide_port_rule_v3 *r =
+        &snapshot->port_rules[urules->first_rule + i];
     if (port >= r->start_port && port <= r->end_port) {
       if (r->protocol == VH_PROTO_BOTH || r->protocol == proto) {
         return true;
@@ -677,10 +679,9 @@ static int socket_connect_entry(struct kretprobe_instance *ri,
   struct sockaddr_storage uaddr_buf;
   uid_t uid = from_kuid(&init_user_ns, current_uid());
   struct vpnhide_policy_snapshot *snapshot;
-  struct vpnhide_uid_port_rules *urules = NULL;
+  const struct vpnhide_port_target_v3 *urules = NULL;
   int fd = -1;
   bool put_needed = false;
-  int i;
 
   if (!is_hook_active(HOOK_CONNECT, from_kuid(&init_user_ns, current_uid())))
     return 1;
@@ -704,17 +705,7 @@ static int socket_connect_entry(struct kretprobe_instance *ri,
       sockfd_put(sock);
     return 1;
   }
-  {
-    struct vpnhide_port_ioctl_data *t = &snapshot->payload.ports;
-  if (t) {
-    for (i = 0; i < t->count; i++) {
-      if (t->targets[i].uid == uid) {
-        urules = &t->targets[i];
-        break;
-      }
-    }
-  }
-  }
+  urules = vpnhide_find_port_target(snapshot, uid);
 
   if (!urules || !addr || !sock || !sock->sk) {
     rcu_read_unlock();
@@ -731,7 +722,7 @@ static int socket_connect_entry(struct kretprobe_instance *ri,
       unsigned char proto =
           (sock->sk->sk_type == SOCK_STREAM) ? VH_PROTO_TCP : VH_PROTO_UDP;
 
-      if (should_block_port(urules, port, proto)) {
+      if (should_block_port(snapshot, urules, port, proto)) {
         data->should_block = true;
         if (sys_connect_uses_wrapper) {
           struct pt_regs *user_regs = (struct pt_regs *)regs->regs[0];
@@ -763,7 +754,7 @@ static int socket_connect_entry(struct kretprobe_instance *ri,
       unsigned char proto =
           (sock->sk->sk_type == SOCK_STREAM) ? VH_PROTO_TCP : VH_PROTO_UDP;
 
-      if (should_block_port(urules, port, proto)) {
+      if (should_block_port(snapshot, urules, port, proto)) {
         data->should_block = true;
         if (sys_connect_uses_wrapper) {
           struct pt_regs *user_regs = (struct pt_regs *)regs->regs[0];
@@ -823,10 +814,9 @@ static int socket_bind_entry(struct kretprobe_instance *ri,
   struct pt_regs *user_regs = NULL;
   uid_t uid = from_kuid(&init_user_ns, current_uid());
   struct vpnhide_policy_snapshot *snapshot;
-  struct vpnhide_uid_port_rules *urules = NULL;
+  const struct vpnhide_port_target_v3 *urules = NULL;
   int fd = -1;
   bool put_needed = false;
-  int i;
 
   if (!is_hook_active(HOOK_BIND, from_kuid(&init_user_ns, current_uid())))
     return 1;
@@ -849,17 +839,7 @@ static int socket_bind_entry(struct kretprobe_instance *ri,
       sockfd_put(sock);
     return 1;
   }
-  {
-    struct vpnhide_port_ioctl_data *t = &snapshot->payload.ports;
-  if (t) {
-    for (i = 0; i < t->count; i++) {
-      if (t->targets[i].uid == uid) {
-        urules = &t->targets[i];
-        break;
-      }
-    }
-  }
-  }
+  urules = vpnhide_find_port_target(snapshot, uid);
 
   if (!urules || !addr || !sock || !sock->sk) {
     rcu_read_unlock();
@@ -876,7 +856,7 @@ static int socket_bind_entry(struct kretprobe_instance *ri,
       unsigned char proto =
           (sock->sk->sk_type == SOCK_STREAM) ? VH_PROTO_TCP : VH_PROTO_UDP;
 
-      if (should_block_port(urules, port, proto)) {
+      if (should_block_port(snapshot, urules, port, proto)) {
         if (sys_bind_uses_wrapper && user_regs) {
           unsigned short zero_port = 0;
           void __user *uaddr_ptr = (void __user *)user_regs->regs[1];
@@ -911,7 +891,7 @@ static int socket_bind_entry(struct kretprobe_instance *ri,
       unsigned char proto =
           (sock->sk->sk_type == SOCK_STREAM) ? VH_PROTO_TCP : VH_PROTO_UDP;
 
-      if (should_block_port(urules, port, proto)) {
+      if (should_block_port(snapshot, urules, port, proto)) {
         if (sys_bind_uses_wrapper && user_regs) {
           unsigned short zero_port = 0;
           void __user *uaddr_ptr = (void __user *)user_regs->regs[1];

@@ -137,8 +137,23 @@ enum vpnhide_hook_idx {
 /* One immutable policy generation.  Runtime discovery state remains outside
  * this object; this snapshot contains only declarative hiding policy. */
 struct vpnhide_policy_snapshot {
-	struct vpnhide_policy_payload payload;
+	u32 active_hooks_mask;
+	u32 java_hooks_mask;
+	u32 debug_enabled;
+	u32 flags;
+	struct vpnhide_iface_ioctl_data iface_prefixes;
+	u32 kmod_count;
+	u32 lsposed_count;
+	u32 port_target_count;
+	u32 port_rule_count;
+	u32 app_hook_mask_count;
+	uid_t *kmod_uids;
+	uid_t *lsposed_uids;
+	struct vpnhide_port_target_v3 *port_targets;
+	struct vpnhide_port_rule_v3 *port_rules;
+	struct vpnhide_app_hook_mask_v3 *app_hook_masks;
 	struct rcu_head rcu;
+	u8 data[];
 };
 
 struct vpnhide_spoof_ip_rcu {
@@ -220,6 +235,11 @@ bool is_target_uid_val(uid_t uid);
 bool is_target_uid(void);
 int vpnhide_apply_policy(const struct vpnhide_policy_payload *payload,
                          u64 expected_generation);
+int vpnhide_apply_policy_v3(const void *payload, size_t payload_size,
+			    u64 expected_generation);
+const struct vpnhide_port_target_v3 *
+vpnhide_find_port_target(const struct vpnhide_policy_snapshot *snapshot,
+			 uid_t uid);
 bool vpnhide_udp_dst_is_vpn_bound(struct sock *sk, struct msghdr *msg);
 bool udp_rate_limit_exceeded(uid_t uid);
 void record_kmod_intercept(uid_t uid, int type);
