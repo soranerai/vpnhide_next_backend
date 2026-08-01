@@ -6,9 +6,10 @@ REPO="$(cd "$HERE/.." && pwd)"
 OUT="/tmp/vpnhide-policy-test-$$"
 ABI_OUT="${OUT}.abi"
 KPATCH_ABI_OUT="${OUT}.kpatch-abi"
+PACK_OUT="${OUT}.pack"
 DYNAMIC_JSON="${OUT}.dynamic.json"
 DYNAMIC_PM="${OUT}.pm.sh"
-trap 'rm -f "$OUT" "$ABI_OUT" "$KPATCH_ABI_OUT" "$DYNAMIC_JSON" "$DYNAMIC_PM"' EXIT
+trap 'rm -f "$OUT" "$ABI_OUT" "$KPATCH_ABI_OUT" "$PACK_OUT" "$DYNAMIC_JSON" "$DYNAMIC_PM"' EXIT
 
 PM_COMMAND="printf 'package:/system/priv-app/Settings/Settings.apk=com.android.settings uid:1000\\npackage:/data/app/manager/base.apk=dev.soranerai.vpnhidenext uid:10003\\npackage:/data/app/~~abc==/com.example.keep-def==/base.apk=com.example.keep uid:10001,110001\\npackage:/data/app/hide/base.apk=com.example.hide uid:10002\\npackage:/data/app/target/base.apk=com.example.target uid:10002\\n'"
 
@@ -24,6 +25,11 @@ ${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror \
 ${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror \
   -I"$REPO/.." "$REPO/../kpatch/test/test_policy_abi.c" -o "$KPATCH_ABI_OUT"
 "$KPATCH_ABI_OUT"
+
+${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror \
+  -I"$REPO" "$HERE/test_policy_pack.c" "$REPO/vpnhide_policy.c" \
+  "$REPO/parson.c" -o "$PACK_OUT"
+"$PACK_OUT"
 
 OUTPUT="$($OUT validate "$HERE/policy_allowlist.json" 10003)"
 grep -q '^mode=ALLOWLIST$' <<<"$OUTPUT"
@@ -112,19 +118,19 @@ grep -q '^port_target\[3\]\.rule\[0\]=0-65535/2$' <<<"$OUTPUT"
 OUTPUT="$("$OUT" preview "$DYNAMIC_JSON" 10003)"
 grep -q '^port_target\[0\]\.rule\[16\]=17-17/0$' <<<"$OUTPUT"
 
-# Exercise a policy beyond the former 512 UID ceiling without involving the
-# kernel ABI serializer.
+# Exercise resolver allocation with several thousand UIDs. The dedicated pack
+# test above sends the same scale through every variable-length ABI section.
 {
 	echo '#!/usr/bin/env bash'
-	for i in $(seq 10000 10512); do
+	for i in $(seq 10000 14095); do
 		echo "echo 'package:/data/app/app${i}/base.apk=com.example.app${i} uid:${i}'"
 	done
 } >"$DYNAMIC_PM"
 chmod +x "$DYNAMIC_PM"
 printf '{"globalConfig":{"listMode":"ALLOWLIST"},"apps":[]}\n' >"$DYNAMIC_JSON"
 OUTPUT="$(VPNHIDE_PM_COMMAND="$DYNAMIC_PM" "$OUT" validate "$DYNAMIC_JSON")"
-grep -q '^kmod_targets=513$' <<<"$OUTPUT"
-grep -q '^lsposed_targets=513$' <<<"$OUTPUT"
-grep -q '^port_targets=513$' <<<"$OUTPUT"
+grep -q '^kmod_targets=4096$' <<<"$OUTPUT"
+grep -q '^lsposed_targets=4096$' <<<"$OUTPUT"
+grep -q '^port_targets=4096$' <<<"$OUTPUT"
 
 echo "policy list modes: PASS"
