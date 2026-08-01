@@ -22,13 +22,34 @@ def _find_function(lines, needle, start=0):
 
 
 def _leading_ws(line):
-    return line[:len(line) - len(line.lstrip())]
+    return line[: len(line) - len(line.lstrip())]
 
 
 _DECL_KEYWORDS = (
-    'struct ', 'union ', 'enum ', 'unsigned ', 'signed ', 'const ', 'static ',
-    'int ', 'long ', 'short ', 'char ', 'void ', 'bool ', 'size_t ', 'ssize_t ',
-    'sockptr_t ', 'u8 ', 'u16 ', 'u32 ', 'u64 ', 's8 ', 's16 ', 's32 ', 's64 ',
+    "struct ",
+    "union ",
+    "enum ",
+    "unsigned ",
+    "signed ",
+    "const ",
+    "static ",
+    "int ",
+    "long ",
+    "short ",
+    "char ",
+    "void ",
+    "bool ",
+    "size_t ",
+    "ssize_t ",
+    "sockptr_t ",
+    "u8 ",
+    "u16 ",
+    "u32 ",
+    "u64 ",
+    "s8 ",
+    "s16 ",
+    "s32 ",
+    "s64 ",
 )
 
 
@@ -40,9 +61,9 @@ def _looks_like_decl(line):
     s = line.strip()
     if not s:
         return True
-    if s.startswith('/*') or s.startswith('//') or s.startswith('*'):
+    if s.startswith("/*") or s.startswith("//") or s.startswith("*"):
         return True
-    if s.startswith('CLASS('):
+    if s.startswith("CLASS("):
         return True
     return any(s.startswith(kw) for kw in _DECL_KEYWORDS)
 
@@ -54,12 +75,12 @@ def _statement_span(lines, start_idx, open_marker):
     depth = 0
     started = False
     for i in range(start_idx, len(lines)):
-        text = lines[i][lines[i].index(open_marker):] if i == start_idx else lines[i]
+        text = lines[i][lines[i].index(open_marker) :] if i == start_idx else lines[i]
         for ch in text:
-            if ch == '(':
+            if ch == "(":
                 depth += 1
                 started = True
-            elif ch == ')':
+            elif ch == ")":
                 depth -= 1
         if started and depth == 0:
             return start_idx, i
@@ -67,24 +88,24 @@ def _statement_span(lines, start_idx, open_marker):
 
 
 def fix_bind(lines):
-    func_start = _find_function(lines, 'int __sys_bind_socket(')
+    func_start = _find_function(lines, "int __sys_bind_socket(")
     if func_start is None:
         print("ERROR: __sys_bind_socket not found in socket.c")
         return lines
 
     func_end = len(lines)
     for i in range(func_start + 1, len(lines)):
-        if lines[i].startswith('int __sys_bind('):
+        if lines[i].startswith("int __sys_bind("):
             func_end = i
             break
 
-    if any('vpnhide_bind_pre' in lines[i] for i in range(func_start, func_end)):
+    if any("vpnhide_bind_pre" in lines[i] for i in range(func_start, func_end)):
         print("bind hook already present, skipping.")
         return lines
 
     target_idx = None
     for i in range(func_start, func_end):
-        if 'READ_ONCE(sock->ops)->bind(sock,' in lines[i]:
+        if "READ_ONCE(sock->ops)->bind(sock," in lines[i]:
             target_idx = i
             break
     if target_idx is None:
@@ -92,47 +113,56 @@ def fix_bind(lines):
         return lines
 
     guard_idx = target_idx - 1
-    if 'if (!err)' not in lines[guard_idx]:
-        print("ERROR: unexpected code shape before bind() call, aborting bind hook injection")
+    if "if (!err)" not in lines[guard_idx]:
+        print(
+            "ERROR: unexpected code shape before bind() call, aborting bind hook injection"
+        )
         return lines
 
     stmt_end = target_idx
-    while ');' not in lines[stmt_end]:
+    while ");" not in lines[stmt_end]:
         stmt_end += 1
 
     guard_indent = _leading_ws(lines[guard_idx])
-    lines[guard_idx] = lines[guard_idx].rstrip('\n').replace('if (!err)', 'if (!err) {') + '\n'
+    lines[guard_idx] = (
+        lines[guard_idx].rstrip("\n").replace("if (!err)", "if (!err) {") + "\n"
+    )
 
     hook = [
         "#ifdef CONFIG_VPNHIDE\n",
         "\t\tvpnhide_bind_pre(sock, (struct sockaddr *)address, addrlen);\n",
         "#endif\n",
     ]
-    lines = lines[:target_idx] + hook + lines[target_idx:stmt_end + 1] + \
-        [guard_indent + "}\n"] + lines[stmt_end + 1:]
+    lines = (
+        lines[:target_idx]
+        + hook
+        + lines[target_idx : stmt_end + 1]
+        + [guard_indent + "}\n"]
+        + lines[stmt_end + 1 :]
+    )
     print(f"bind hook injected before bind() call at line {target_idx + 1}")
     return lines
 
 
 def fix_connect(lines):
-    func_start = _find_function(lines, 'int __sys_connect(')
+    func_start = _find_function(lines, "int __sys_connect(")
     if func_start is None:
         print("ERROR: __sys_connect not found in socket.c")
         return lines
 
     func_end = len(lines)
     for i in range(func_start + 1, len(lines)):
-        if lines[i].startswith('SYSCALL_DEFINE'):
+        if lines[i].startswith("SYSCALL_DEFINE"):
             func_end = i
             break
 
-    if any('vpnhide_connect(' in lines[i] for i in range(func_start, func_end)):
+    if any("vpnhide_connect(" in lines[i] for i in range(func_start, func_end)):
         print("connect hook already present, skipping.")
         return lines
 
     brace_idx = None
     for i in range(func_start, min(func_start + 4, len(lines))):
-        if lines[i].strip() == '{':
+        if lines[i].strip() == "{":
             brace_idx = i
             break
     if brace_idx is None:
@@ -157,52 +187,58 @@ def fix_connect(lines):
     # checking whether fd_file( appears anywhere in the file, rather than
     # hardcoding it per KMI version (that's what made the 6.12 patch brittle
     # in the first place -- the same drift can happen on any branch).
-    full_text = ''.join(lines)
-    fd_expr = 'fd_file(_f)' if 'fd_file(' in full_text else '_f.file'
+    full_text = "".join(lines)
+    fd_expr = "fd_file(_f)" if "fd_file(" in full_text else "_f.file"
 
     # sock_from_file() used to take an `int *err` out-param on older trees
     # (e.g. 5.10) and was simplified to a single arg later. Its own
     # definition is always present in this file, so sniff the arity there
     # instead of hardcoding per version.
     arity = 1
-    m = re.search(r'sock_from_file\(([^)]*)\)', full_text)
+    m = re.search(r"sock_from_file\(([^)]*)\)", full_text)
     if m:
-        params = [p for p in m.group(1).split(',') if p.strip()]
+        params = [p for p in m.group(1).split(",") if p.strip()]
         if len(params) >= 2:
             arity = 2
 
     pre_decl = []
     if arity == 2:
-        sock_from_file_call = f'sock_from_file({fd_expr}, &_err)'
+        sock_from_file_call = f"sock_from_file({fd_expr}, &_err)"
         pre_decl = ["\t\t\tint _err = 0;\n"]
     else:
-        sock_from_file_call = f'sock_from_file({fd_expr})'
+        sock_from_file_call = f"sock_from_file({fd_expr})"
 
     # Fully self-contained: does its own fdget()/fdput(), so it doesn't
     # depend on whatever local variables the surrounding function shape
     # declares (old sockfd_lookup_light style vs. new CLASS(fd, f) style).
-    hook = [
-        "#ifdef CONFIG_VPNHIDE\n",
-        "\t{\n",
-        "\t\tstruct fd _f = fdget(fd);\n",
-        f"\t\tif ({fd_expr}) {{\n",
-    ] + pre_decl + [
-        f"\t\t\tstruct socket *_sock = {sock_from_file_call};\n",
-        "\t\t\tif (_sock) {\n",
-        "\t\t\t\tint _ret = 0;\n",
-        "\t\t\t\tif (vpnhide_connect(_sock, uservaddr, addrlen, &_ret)) {\n",
-        "\t\t\t\t\tfdput(_f);\n",
-        "\t\t\t\t\treturn _ret;\n",
-        "\t\t\t\t}\n",
-        "\t\t\t}\n",
-        "\t\t\tfdput(_f);\n",
-        "\t\t}\n",
-        "\t}\n",
-        "#endif\n",
-    ]
+    hook = (
+        [
+            "#ifdef CONFIG_VPNHIDE\n",
+            "\t{\n",
+            "\t\tstruct fd _f = fdget(fd);\n",
+            f"\t\tif ({fd_expr}) {{\n",
+        ]
+        + pre_decl
+        + [
+            f"\t\t\tstruct socket *_sock = {sock_from_file_call};\n",
+            "\t\t\tif (_sock) {\n",
+            "\t\t\t\tint _ret = 0;\n",
+            "\t\t\t\tif (vpnhide_connect(_sock, uservaddr, addrlen, &_ret)) {\n",
+            "\t\t\t\t\tfdput(_f);\n",
+            "\t\t\t\t\treturn _ret;\n",
+            "\t\t\t\t}\n",
+            "\t\t\t}\n",
+            "\t\t\tfdput(_f);\n",
+            "\t\t}\n",
+            "\t}\n",
+            "#endif\n",
+        ]
+    )
     lines = lines[:insert_idx] + hook + lines[insert_idx:]
-    print(f"connect hook injected after leading declarations at line {insert_idx + 1} "
-          f"(fd_expr={fd_expr}, sock_from_file arity={arity})")
+    print(
+        f"connect hook injected after leading declarations at line {insert_idx + 1} "
+        f"(fd_expr={fd_expr}, sock_from_file arity={arity})"
+    )
     return lines
 
 
@@ -214,36 +250,40 @@ def fix_getname(lines, func_needle, peer_flag):
 
     func_end = len(lines)
     for i in range(func_start + 1, len(lines)):
-        if lines[i].startswith('SYSCALL_DEFINE'):
+        if lines[i].startswith("SYSCALL_DEFINE"):
             func_end = i
             break
 
-    hook_marker = f'vpnhide_getname(sock, (struct sockaddr *)&address, {peer_flag},'
+    hook_marker = f"vpnhide_getname(sock, (struct sockaddr *)&address, {peer_flag},"
     if any(hook_marker in lines[i] for i in range(func_start, func_end)):
         print(f"{func_needle.strip()} getname hook already present, skipping.")
         return lines
 
-    call_needle = f'getname(sock, (struct sockaddr *)&address, {peer_flag});'
+    call_needle = f"getname(sock, (struct sockaddr *)&address, {peer_flag});"
     call_idx = None
     for i in range(func_start, func_end):
         if call_needle in lines[i]:
             call_idx = i
             break
     if call_idx is None:
-        print(f"ERROR: getname(peer={peer_flag}) call not found in {func_needle.strip()}")
+        print(
+            f"ERROR: getname(peer={peer_flag}) call not found in {func_needle.strip()}"
+        )
         return lines
 
     move_idx = None
     for i in range(call_idx, func_end):
-        if 'move_addr_to_user(&address, err, usockaddr' in lines[i]:
+        if "move_addr_to_user(&address, err, usockaddr" in lines[i]:
             move_idx = i
             break
     if move_idx is None:
-        print(f"ERROR: move_addr_to_user() not found after getname() in {func_needle.strip()}")
+        print(
+            f"ERROR: move_addr_to_user() not found after getname() in {func_needle.strip()}"
+        )
         return lines
 
     stmt_end = move_idx
-    while ';' not in lines[stmt_end]:
+    while ";" not in lines[stmt_end]:
         stmt_end += 1
 
     # Nearest 'if (' between the getname() call and move_addr_to_user() tells
@@ -254,12 +294,12 @@ def fix_getname(lines, func_needle, peer_flag):
     # both shapes, and getpeername in the CLASS(fd)/LTS shape).
     guard_idx = None
     for i in range(call_idx + 1, move_idx):
-        if lines[i].strip().startswith('if ('):
+        if lines[i].strip().startswith("if ("):
             guard_idx = i
     wraps_success = (
         guard_idx is not None
-        and '>= 0' in lines[guard_idx]
-        and not lines[guard_idx].rstrip().endswith('{')
+        and ">= 0" in lines[guard_idx]
+        and not lines[guard_idx].rstrip().endswith("{")
     )
 
     move_indent = _leading_ws(lines[move_idx])
@@ -271,13 +311,23 @@ def fix_getname(lines, func_needle, peer_flag):
 
     if wraps_success:
         guard_indent = _leading_ws(lines[guard_idx])
-        lines[guard_idx] = lines[guard_idx].rstrip('\n') + ' {\n'
-        lines = lines[:call_idx + 1] + lines[call_idx + 1:move_idx] + hook + \
-            lines[move_idx:stmt_end + 1] + [guard_indent + "}\n"] + lines[stmt_end + 1:]
-        print(f"getname(peer={peer_flag}) hook injected (braced) before move_addr_to_user at line {move_idx + 1}")
+        lines[guard_idx] = lines[guard_idx].rstrip("\n") + " {\n"
+        lines = (
+            lines[: call_idx + 1]
+            + lines[call_idx + 1 : move_idx]
+            + hook
+            + lines[move_idx : stmt_end + 1]
+            + [guard_indent + "}\n"]
+            + lines[stmt_end + 1 :]
+        )
+        print(
+            f"getname(peer={peer_flag}) hook injected (braced) before move_addr_to_user at line {move_idx + 1}"
+        )
     else:
         lines = lines[:move_idx] + hook + lines[move_idx:]
-        print(f"getname(peer={peer_flag}) hook injected before move_addr_to_user at line {move_idx + 1}")
+        print(
+            f"getname(peer={peer_flag}) hook injected before move_addr_to_user at line {move_idx + 1}"
+        )
 
     return lines
 
@@ -285,7 +335,7 @@ def fix_getname(lines, func_needle, peer_flag):
 def fix_getsockopt(lines):
     func_start = None
     for i, line in enumerate(lines):
-        if 'int __sys_getsockopt(' in line:
+        if "int __sys_getsockopt(" in line:
             func_start = i
             break
 
@@ -295,11 +345,11 @@ def fix_getsockopt(lines):
 
     func_end = len(lines)
     for i in range(func_start + 1, len(lines)):
-        if lines[i].startswith('SYSCALL_DEFINE'):
+        if lines[i].startswith("SYSCALL_DEFINE"):
             func_end = i
             break
 
-    if any('vpnhide_getsockopt' in lines[i] for i in range(func_start, func_end)):
+    if any("vpnhide_getsockopt" in lines[i] for i in range(func_start, func_end)):
         print("getsockopt hook already present, skipping.")
         return lines
 
@@ -307,17 +357,19 @@ def fix_getsockopt(lines):
     # post-hook right before the fput_light() release.
     target_idx = None
     for i in range(func_start, func_end):
-        if 'fput_light(' in lines[i]:
+        if "fput_light(" in lines[i]:
             target_idx = i
             break
 
     if target_idx is not None:
-        print(f"Injecting getsockopt hook right before fput_light at line {target_idx + 1}")
+        print(
+            f"Injecting getsockopt hook right before fput_light at line {target_idx + 1}"
+        )
         hook = [
             "\n",
             "#ifdef CONFIG_VPNHIDE\n",
             "\tvpnhide_getsockopt(sock, level, optname, optval, optlen, &err);\n",
-            "#endif\n"
+            "#endif\n",
         ]
         lines = lines[:target_idx] + hook + lines[target_idx:]
         print("getsockopt hook successfully injected.")
@@ -328,22 +380,26 @@ def fix_getsockopt(lines):
     # return value ourselves so the post-hook can still see/mutate it.
     call_idx = None
     for i in range(func_start, func_end):
-        if 'return do_sock_getsockopt(' in lines[i]:
+        if "return do_sock_getsockopt(" in lines[i]:
             call_idx = i
             break
 
     if call_idx is None:
-        print("ERROR: neither fput_light() nor 'return do_sock_getsockopt(' found inside __sys_getsockopt")
+        print(
+            "ERROR: neither fput_light() nor 'return do_sock_getsockopt(' found inside __sys_getsockopt"
+        )
         return lines
 
-    start_idx, end_idx = _statement_span(lines, call_idx, 'do_sock_getsockopt(')
+    start_idx, end_idx = _statement_span(lines, call_idx, "do_sock_getsockopt(")
     indent = _leading_ws(lines[start_idx])
     # Wrapped in its own { } scope: `int _vh_err = ...` must be the first
     # statement of a fresh block, not a declaration slipped in after the
     # `if (fd_empty(f)) ...`/`if (unlikely(!sock)) ...` statements earlier
     # in the function -- kernel builds error on -Wdeclaration-after-statement.
-    call_text = ''.join(l.strip() + ' ' for l in lines[start_idx:end_idx + 1]).strip()
-    call_text = call_text.replace('return do_sock_getsockopt(', 'do_sock_getsockopt(', 1)
+    call_text = "".join(l.strip() + " " for l in lines[start_idx : end_idx + 1]).strip()
+    call_text = call_text.replace(
+        "return do_sock_getsockopt(", "do_sock_getsockopt(", 1
+    )
     new_block = [
         f"{indent}{{\n",
         f"{indent}\tint _vh_err = {call_text}\n",
@@ -353,7 +409,7 @@ def fix_getsockopt(lines):
         f"{indent}\treturn _vh_err;\n",
         f"{indent}}}\n",
     ]
-    lines = lines[:start_idx] + new_block + lines[end_idx + 1:]
+    lines = lines[:start_idx] + new_block + lines[end_idx + 1 :]
     print(f"getsockopt hook injected (CLASS(fd) shape) around line {start_idx + 1}")
     return lines
 
@@ -361,7 +417,7 @@ def fix_getsockopt(lines):
 def fix_setsockopt(lines):
     func_start = None
     for i, line in enumerate(lines):
-        if 'int __sys_setsockopt(' in line:
+        if "int __sys_setsockopt(" in line:
             func_start = i
             break
 
@@ -371,12 +427,17 @@ def fix_setsockopt(lines):
 
     func_end = len(lines)
     for i in range(func_start + 1, len(lines)):
-        if lines[i].startswith('SYSCALL_DEFINE5(setsockopt') or lines[i].startswith('COMPAT_SYSCALL_DEFINE5(setsockopt') or lines[i].startswith('SYSCALL_DEFINE') or lines[i].startswith('int do_sock_getsockopt'):
+        if (
+            lines[i].startswith("SYSCALL_DEFINE5(setsockopt")
+            or lines[i].startswith("COMPAT_SYSCALL_DEFINE5(setsockopt")
+            or lines[i].startswith("SYSCALL_DEFINE")
+            or lines[i].startswith("int do_sock_getsockopt")
+        ):
             func_end = i
             break
 
     for i in range(func_start, func_end):
-        if 'vpnhide_setsockopt' in lines[i]:
+        if "vpnhide_setsockopt" in lines[i]:
             print("setsockopt hook already present, skipping.")
             return lines
 
@@ -384,7 +445,7 @@ def fix_setsockopt(lines):
     #    directly, no separate err var, nothing to fput_light -- the pre-hook
     #    just short-circuits with its own return before the real call.
     for i in range(func_start, func_end):
-        if 'return do_sock_setsockopt(' in lines[i]:
+        if "return do_sock_setsockopt(" in lines[i]:
             indent = _leading_ws(lines[i])
             hook = [
                 "#ifdef CONFIG_VPNHIDE\n",
@@ -396,33 +457,38 @@ def fix_setsockopt(lines):
                 "#endif\n",
             ]
             lines = lines[:i] + hook + lines[i:]
-            print(f"setsockopt hook injected (CLASS(fd) shape, pre-hook) before line {i + 1}")
+            print(
+                f"setsockopt hook injected (CLASS(fd) shape, pre-hook) before line {i + 1}"
+            )
             return lines
 
     target_idx = None
     # 1. Check for newer 6.6 sublevel pattern: do_sock_setsockopt
     for i in range(func_start, func_end):
-        if 'err = do_sock_setsockopt(' in lines[i]:
+        if "err = do_sock_setsockopt(" in lines[i]:
             target_idx = i
             break
 
     # 2. Check for older 6.6 / 5.10 / 5.15 / 6.1 pattern: if (kernel_optval) or sock_use_custom_sol_socket
     if target_idx is None:
         for i in range(func_start, func_end):
-            if 'if (kernel_optval)' in lines[i]:
-                if i + 1 < func_end and 'optval =' in lines[i + 1]:
+            if "if (kernel_optval)" in lines[i]:
+                if i + 1 < func_end and "optval =" in lines[i + 1]:
                     target_idx = i + 2
                 else:
                     target_idx = i + 1
                 break
-            elif 'sock_use_custom_sol_socket' in lines[i] or 'sock_setsockopt(' in lines[i]:
+            elif (
+                "sock_use_custom_sol_socket" in lines[i]
+                or "sock_setsockopt(" in lines[i]
+            ):
                 target_idx = i
                 break
 
     # 3. Fallback: right before fput_light in __sys_setsockopt
     if target_idx is None:
         for i in range(func_start, func_end):
-            if 'fput_light(' in lines[i]:
+            if "fput_light(" in lines[i]:
                 target_idx = i
                 break
 
@@ -441,7 +507,7 @@ def fix_setsockopt(lines):
         "\t\t\treturn err;\n",
         "\t\t}\n",
         "\t}\n",
-        "#endif\n"
+        "#endif\n",
     ]
     lines = lines[:target_idx] + hook + lines[target_idx:]
     print("setsockopt hook successfully injected.")
@@ -450,7 +516,9 @@ def fix_setsockopt(lines):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: fix_socket_hooks.py <socket.c path> [--setsockopt] [--connect] [--bind-getname]")
+        print(
+            "Usage: fix_socket_hooks.py <socket.c path> [--setsockopt] [--connect] [--bind-getname]"
+        )
         sys.exit(1)
 
     file_path = sys.argv[1]
@@ -459,7 +527,7 @@ def main():
     do_connect = "--connect" in flags
     do_bind_getname = "--bind-getname" in flags
 
-    with open(file_path, 'r') as f:
+    with open(file_path, "r") as f:
         lines = f.readlines()
 
     lines = fix_getsockopt(lines)
@@ -469,11 +537,12 @@ def main():
         lines = fix_connect(lines)
     if do_bind_getname:
         lines = fix_bind(lines)
-        lines = fix_getname(lines, 'int __sys_getsockname(', 0)
-        lines = fix_getname(lines, 'int __sys_getpeername(', 1)
+        lines = fix_getname(lines, "int __sys_getsockname(", 0)
+        lines = fix_getname(lines, "int __sys_getpeername(", 1)
 
-    with open(file_path, 'w') as f:
+    with open(file_path, "w") as f:
         f.writelines(lines)
+
 
 if __name__ == "__main__":
     main()
