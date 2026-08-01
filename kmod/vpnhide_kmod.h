@@ -6,6 +6,7 @@
 #include <linux/delay.h>
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/hashtable.h>
 #include <linux/if.h>
 #include <linux/in.h>
 #include <linux/in6.h>
@@ -242,6 +243,8 @@ vpnhide_find_port_target(const struct vpnhide_policy_snapshot *snapshot,
 			 uid_t uid);
 bool vpnhide_udp_dst_is_vpn_bound(struct sock *sk, struct msghdr *msg);
 bool udp_rate_limit_exceeded(uid_t uid);
+void vpnhide_udp_rates_prune(const struct vpnhide_policy_snapshot *snapshot);
+void vpnhide_udp_rates_destroy(void);
 void record_kmod_intercept(uid_t uid, int type);
 void get_spoof_ip(struct vpnhide_spoof_ip *dst);
 int update_spoof_ip(const struct vpnhide_spoof_ip *sip);

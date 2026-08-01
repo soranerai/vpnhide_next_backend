@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
@@ -613,22 +614,29 @@ int main(int argc, char **argv)
 			}
 		} else {
 			struct vpnhide_stats_snapshot request;
-			struct vpnhide_uid_stats *stats;
+			struct vpnhide_uid_stats *stats = NULL;
+			uint32_t capacity = 0;
 
-			stats = calloc(MAX_TARGET_UIDS, sizeof(*stats));
-			if (!stats) {
-				perror("calloc stats");
-				close(fd);
-				return 1;
-			}
-			memset(&request, 0, sizeof(request));
-			request.capacity = MAX_TARGET_UIDS;
-			request.entries_ptr = (uint64_t)(uintptr_t)stats;
-			if (ioctl(fd, VH_GET_STATS, &request) < 0) {
-				perror("VH_GET_STATS");
+			for (;;) {
+				memset(&request, 0, sizeof(request));
+				request.capacity = capacity;
+				request.entries_ptr = (uint64_t)(uintptr_t)stats;
+				if (ioctl(fd, VH_GET_STATS, &request) == 0)
+					break;
+				if (errno != ENOSPC || request.count <= capacity) {
+					perror("VH_GET_STATS");
+					free(stats);
+					close(fd);
+					return 1;
+				}
+				capacity = request.count;
 				free(stats);
-				close(fd);
-				return 1;
+				stats = calloc(capacity, sizeof(*stats));
+				if (!stats) {
+					perror("calloc stats");
+					close(fd);
+					return 1;
+				}
 			}
 			for (uint32_t i = 0; i < request.count; i++) {
 				printf("%u;%llu;%llu;%llu;%llu;%llu;%llu;%llu\n",

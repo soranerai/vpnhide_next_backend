@@ -611,28 +611,56 @@ static bool vpnhide_udp_dst_is_vpn(struct sock *sk, struct msghdr *msg)
 /* UDP rate limiter — token bucket per UID                             */
 /* ------------------------------------------------------------------ */
 
-#define VH_RL_MAX_UIDS 16
-
-static struct vh_udp_uid_rate rl_table[VH_RL_MAX_UIDS];
+static DEFINE_HASHTABLE(rl_table, 8);
 static DEFINE_SPINLOCK(rl_lock);
 
 static struct vh_udp_uid_rate *rl_find_or_alloc(uid_t uid)
 {
-	int i, empty = -1;
+	struct vh_udp_uid_rate *rate;
+	hash_for_each_possible(rl_table, rate, node, uid)
+		if (rate->uid == uid)
+			return rate;
+	rate = kmalloc(sizeof(*rate), GFP_ATOMIC);
+	if (!rate)
+		return NULL;
+	rate->uid = uid;
+	rate->tokens = VH_UDP_BUCKET_MAX;
+	rate->last_regen = ktime_get();
+	hash_add(rl_table, &rate->node, uid);
+	return rate;
+}
 
-	for (i = 0; i < VH_RL_MAX_UIDS; i++) {
-		if (rl_table[i].uid == uid)
-			return &rl_table[i];
-		if (rl_table[i].uid == 0 && empty < 0)
-			empty = i;
+void vpnhide_udp_rates_prune(const struct vpnhide_policy_snapshot *snapshot)
+{
+	struct vh_udp_uid_rate *rate;
+	struct hlist_node *tmp;
+	unsigned int bucket;
+	spin_lock(&rl_lock);
+	hash_for_each_safe(rl_table, bucket, tmp, rate, node) {
+		int lo = 0, hi = snapshot ? snapshot->kmod_count - 1 : -1;
+		bool keep = false;
+		while (lo <= hi) {
+			int mid = lo + ((hi - lo) >> 1);
+			if (snapshot->kmod_uids[mid] == rate->uid) {
+				keep = true;
+				break;
+			}
+			if (snapshot->kmod_uids[mid] < rate->uid)
+				lo = mid + 1;
+			else
+				hi = mid - 1;
+		}
+		if (!keep) {
+			hash_del(&rate->node);
+			kfree(rate);
+		}
 	}
-	if (empty >= 0) {
-		rl_table[empty].uid    = uid;
-		rl_table[empty].tokens = VH_UDP_BUCKET_MAX;
-		rl_table[empty].last_regen = ktime_get();
-		return &rl_table[empty];
-	}
-	return NULL;
+	spin_unlock(&rl_lock);
+}
+
+void vpnhide_udp_rates_destroy(void)
+{
+	vpnhide_udp_rates_prune(NULL);
 }
 
 bool vpnhide_udp_sendmsg(struct sock *sk)

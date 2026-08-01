@@ -11,6 +11,7 @@
 #include <linux/in6.h>
 #include <linux/bpf.h>
 #include <linux/fs.h>
+#include <linux/hashtable.h>
 #include <linux/tcp.h>
 #include <linux/version.h>
 #include <linux/miscdevice.h>
@@ -158,6 +159,7 @@ struct vh_udp_uid_rate {
 	uid_t    uid;
 	int      tokens;
 	ktime_t  last_regen;
+	struct hlist_node node;
 };
 
 /* ------------------------------------------------------------------ */
@@ -210,6 +212,8 @@ int  update_spoof_ip(const struct vpnhide_spoof_ip *sip);
 u32  fnv1a_name(const char *s, int maxlen);
 void vh_rebuild_name_cache(const struct vpnhide_vpn_ifindexes *idata);
 bool vh_is_vpn_name_cached(const char *name, size_t len);
+void vpnhide_udp_rates_prune(const struct vpnhide_policy_snapshot *snapshot);
+void vpnhide_udp_rates_destroy(void);
 
 /* ------------------------------------------------------------------ */
 /* Stats helpers (inline)                                              */

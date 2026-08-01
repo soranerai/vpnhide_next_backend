@@ -8,6 +8,7 @@ atomic_t java_stats_clear_generation = ATOMIC_INIT(1);
 
 struct vpnhide_policy_snapshot __rcu *global_policy_snapshot = NULL;
 DEFINE_SPINLOCK(policy_snapshot_lock);
+static DEFINE_MUTEX(policy_apply_lock);
 
 struct vpnhide_spoof_ip_rcu __rcu *global_spoof_ip = NULL;
 DEFINE_SPINLOCK(spoof_ip_lock);
@@ -303,21 +304,24 @@ struct kmod_uid_stats_total {
   u64 port_count;
 };
 
-static struct kmod_uid_stats_total kmod_stats[MAX_TARGET_UIDS];
-static int kmod_stats_count = 0;
+static struct kmod_uid_stats_total *kmod_stats;
+static u32 kmod_stats_count;
 DEFINE_SPINLOCK(kmod_stats_lock);
 static atomic64_t kmod_stats_sequence = ATOMIC64_INIT(0);
 static u64 kmod_stats_session_id;
 
 void record_kmod_intercept(uid_t uid, int type) {
-  int i;
+  int lo, hi;
   unsigned long flags;
 
   if (uid == 0 || uid == 1000)
     return;
 
   spin_lock_irqsave(&kmod_stats_lock, flags);
-  for (i = 0; i < kmod_stats_count; i++) {
+  lo = 0;
+  hi = (int)kmod_stats_count - 1;
+  while (lo <= hi) {
+    int i = lo + ((hi - lo) >> 1);
     if (kmod_stats[i].uid == uid) {
       if (type == 0)
         kmod_stats[i].ioctl_count++;
@@ -336,51 +340,43 @@ void record_kmod_intercept(uid_t uid, int type) {
       spin_unlock_irqrestore(&kmod_stats_lock, flags);
       return;
     }
-  }
-
-  if (kmod_stats_count < MAX_TARGET_UIDS) {
-    i = kmod_stats_count++;
-    memset(&kmod_stats[i], 0, sizeof(kmod_stats[i]));
-    kmod_stats[i].uid = uid;
-    if (type == 0)
-      kmod_stats[i].ioctl_count++;
-    else if (type == 1)
-      kmod_stats[i].netlink_count++;
-    else if (type == 2)
-      kmod_stats[i].proc_count++;
-    else if (type == 3)
-      kmod_stats[i].sockopt_count++;
-    else if (type == 4)
-      kmod_stats[i].connect_count++;
-    else if (type == 5)
-      kmod_stats[i].getname_count++;
-    else if (type == 6)
-      kmod_stats[i].port_count++;
+    if (kmod_stats[i].uid < uid)
+      lo = i + 1;
+    else
+      hi = i - 1;
   }
   spin_unlock_irqrestore(&kmod_stats_lock, flags);
 }
 
-static void kmod_stats_prune(const struct vpnhide_policy_snapshot *snapshot) {
+static int kmod_stats_reconcile(const struct vpnhide_policy_snapshot *snapshot) {
+  struct kmod_uid_stats_total *replacement = NULL, *old;
   unsigned long flags;
-  int i, j;
+  u32 i, j;
+
+  if (snapshot->kmod_count) {
+    replacement = kvmalloc_array(snapshot->kmod_count,
+                                 sizeof(*replacement), GFP_KERNEL | __GFP_ZERO);
+    if (!replacement)
+      return -ENOMEM;
+    for (i = 0; i < snapshot->kmod_count; i++)
+      replacement[i].uid = snapshot->kmod_uids[i];
+  }
 
   spin_lock_irqsave(&kmod_stats_lock, flags);
-  for (i = 0; i < kmod_stats_count;) {
-    bool keep = false;
-    for (j = 0; j < snapshot->kmod_count; j++) {
-      if (snapshot->kmod_uids[j] == kmod_stats[i].uid) {
-        keep = true;
+  for (i = 0; i < snapshot->kmod_count; i++) {
+    for (j = 0; j < kmod_stats_count; j++) {
+      if (replacement[i].uid == kmod_stats[j].uid) {
+        replacement[i] = kmod_stats[j];
         break;
       }
     }
-    if (keep) {
-      i++;
-      continue;
-    }
-    kmod_stats[i] = kmod_stats[--kmod_stats_count];
-    memset(&kmod_stats[kmod_stats_count], 0, sizeof(kmod_stats[0]));
   }
+  old = kmod_stats;
+  kmod_stats = replacement;
+  kmod_stats_count = snapshot->kmod_count;
   spin_unlock_irqrestore(&kmod_stats_lock, flags);
+  kvfree(old);
+  return 0;
 }
 
 static void free_policy_snapshot_rcu(struct rcu_head *head)
@@ -557,21 +553,26 @@ static int publish_policy_snapshot(struct vpnhide_policy_snapshot *snapshot,
   struct vpnhide_policy_snapshot *old;
   int ret = 0;
 
-  spin_lock(&policy_snapshot_lock);
+  mutex_lock(&policy_apply_lock);
   if (expected_generation && expected_generation !=
       (u64)atomic_read(&vpnhide_config_generation)) {
-    ret = -EAGAIN;
-  } else {
-    old = rcu_dereference_protected(global_policy_snapshot,
-                                    lockdep_is_held(&policy_snapshot_lock));
-    rcu_assign_pointer(global_policy_snapshot, snapshot);
+    mutex_unlock(&policy_apply_lock);
+    kvfree(snapshot);
+    return -EAGAIN;
   }
-  spin_unlock(&policy_snapshot_lock);
+  ret = kmod_stats_reconcile(snapshot);
   if (ret) {
+    mutex_unlock(&policy_apply_lock);
     kvfree(snapshot);
     return ret;
   }
-  kmod_stats_prune(snapshot);
+  spin_lock(&policy_snapshot_lock);
+  old = rcu_dereference_protected(global_policy_snapshot,
+                                  lockdep_is_held(&policy_snapshot_lock));
+  rcu_assign_pointer(global_policy_snapshot, snapshot);
+  spin_unlock(&policy_snapshot_lock);
+  vpnhide_udp_rates_prune(snapshot);
+  mutex_unlock(&policy_apply_lock);
   if (old)
     call_rcu(&old->rcu, free_policy_snapshot_rcu);
   atomic_inc(&vpnhide_config_generation);
@@ -758,6 +759,8 @@ static ssize_t vpnhide_dev_read(struct file *file, char __user *buf,
 
   if (reader->read_pos >= reader->buf_len) {
     unsigned long gen = (unsigned long)atomic_read(&vpnhide_config_generation);
+    size_t reader_capacity = 1024;
+    struct vpnhide_policy_snapshot *size_snapshot;
     if (reader->generation >= gen) {
       if (from_kuid(&init_user_ns, current_uid()) != 1000)
         return 0;
@@ -771,78 +774,91 @@ static ssize_t vpnhide_dev_read(struct file *file, char __user *buf,
     }
 
     kvfree(reader->buf);
-    reader->buf = kvmalloc(65536, GFP_KERNEL);
+    mutex_lock(&policy_apply_lock);
+    size_snapshot = rcu_dereference_protected(global_policy_snapshot,
+                                               lockdep_is_held(&policy_apply_lock));
+    if (size_snapshot) {
+      reader_capacity += (size_t)size_snapshot->lsposed_count * 16;
+      reader_capacity += (size_t)size_snapshot->app_hook_mask_count * 32;
+      reader_capacity += (size_t)size_snapshot->iface_prefixes.count *
+                         (MAX_IFACE_LEN + 1);
+    }
+    reader->buf = kvmalloc(reader_capacity, GFP_KERNEL);
     if (!reader->buf)
+    {
+      mutex_unlock(&policy_apply_lock);
       return -ENOMEM;
+    }
 
     {
       int offset = 0;
       struct vpnhide_policy_snapshot *snapshot;
       int i;
 
-      offset += scnprintf(reader->buf + offset, 65536 - offset,
+      offset += scnprintf(reader->buf + offset, reader_capacity - offset,
                           "version_code: %d\n", VPNHIDE_VERSION_CODE);
 
-      offset += scnprintf(reader->buf + offset, 65536 - offset,
+      offset += scnprintf(reader->buf + offset, reader_capacity - offset,
                           "java_hook_mask: %u\n", vpnhide_java_hooks_mask());
 
-      offset += scnprintf(reader->buf + offset, 65536 - offset,
+      offset += scnprintf(reader->buf + offset, reader_capacity - offset,
                           "java_stats_clear_gen: %d\n",
                           atomic_read(&java_stats_clear_generation));
 
       offset +=
-          scnprintf(reader->buf + offset, 65536 - offset,
+          scnprintf(reader->buf + offset, reader_capacity - offset,
                     "stats_mode: cumulative_session\n");
 
-      offset += scnprintf(reader->buf + offset, 65536 - offset,
+      offset += scnprintf(reader->buf + offset, reader_capacity - offset,
                           "debug_enabled: %d\n", vpnhide_debug_is_enabled());
 
       rcu_read_lock();
       snapshot = rcu_dereference(global_policy_snapshot);
       offset +=
-          scnprintf(reader->buf + offset, 65536 - offset, "lsposed_targets:");
+          scnprintf(reader->buf + offset, reader_capacity - offset, "lsposed_targets:");
       if (snapshot) {
         for (i = 0; i < snapshot->lsposed_count; i++) {
-          offset += scnprintf(reader->buf + offset, 65536 - offset, " %u",
+          offset += scnprintf(reader->buf + offset, reader_capacity - offset, " %u",
                               snapshot->lsposed_uids[i]);
         }
       }
-      offset += scnprintf(reader->buf + offset, 65536 - offset, "\n");
+      offset += scnprintf(reader->buf + offset, reader_capacity - offset, "\n");
 
       offset +=
-          scnprintf(reader->buf + offset, 65536 - offset, "iface_prefixes:");
+          scnprintf(reader->buf + offset, reader_capacity - offset, "iface_prefixes:");
       if (snapshot) {
         for (i = 0; i < snapshot->iface_prefixes.count; i++) {
-          offset += scnprintf(reader->buf + offset, 65536 - offset, " %s",
+          offset += scnprintf(reader->buf + offset, reader_capacity - offset, " %s",
                               snapshot->iface_prefixes.prefixes[i]);
         }
       }
-      offset += scnprintf(reader->buf + offset, 65536 - offset, "\n");
+      offset += scnprintf(reader->buf + offset, reader_capacity - offset, "\n");
 
-      offset += scnprintf(reader->buf + offset, 65536 - offset,
+      offset += scnprintf(reader->buf + offset, reader_capacity - offset,
                           "app_java_hook_mask:");
       if (snapshot) {
         for (i = 0; i < snapshot->app_hook_mask_count; i++) {
           if (!snapshot->app_hook_masks[i].has_java_override)
             continue;
-          offset += scnprintf(reader->buf + offset, 65536 - offset, " %u:%u",
+          offset += scnprintf(reader->buf + offset, reader_capacity - offset, " %u:%u",
                               snapshot->app_hook_masks[i].uid,
                               snapshot->app_hook_masks[i].java_mask);
         }
       }
-      offset += scnprintf(reader->buf + offset, 65536 - offset, "\n");
+      offset += scnprintf(reader->buf + offset, reader_capacity - offset, "\n");
       rcu_read_unlock();
 
       spin_lock(&cover_ifname_lock);
       offset +=
-          scnprintf(reader->buf + offset, 65536 - offset, "cover_iface: %s\n",
+          scnprintf(reader->buf + offset, reader_capacity - offset, "cover_iface: %s\n",
                     global_cover_ifname[0] ? global_cover_ifname : "none");
       spin_unlock(&cover_ifname_lock);
 
-      offset += scnprintf(reader->buf + offset, 65536 - offset, "\n");
+      offset += scnprintf(reader->buf + offset, reader_capacity - offset, "\n");
 
       reader->buf_len = offset;
     }
+	mutex_unlock(&policy_apply_lock);
 
     reader->generation = (unsigned long)atomic_read(&vpnhide_config_generation);
     reader->read_pos = 0;
@@ -1149,18 +1165,20 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
     struct vpnhide_stats_snapshot request;
     struct vpnhide_uid_stats *out;
     unsigned long flags;
-    u32 count;
+    u32 count, allocated;
     int i;
 
     if (copy_from_user(&request, (void __user *)arg, sizeof(request)))
       return -EFAULT;
-    if (request.capacity > MAX_TARGET_UIDS)
-      return -EINVAL;
     if (request.capacity && !request.entries_ptr)
       return -EINVAL;
 
-    out = request.capacity ? kvmalloc_array(request.capacity, sizeof(*out), GFP_KERNEL) : NULL;
-    if (request.capacity && !out)
+    spin_lock_irqsave(&kmod_stats_lock, flags);
+    count = kmod_stats_count;
+    spin_unlock_irqrestore(&kmod_stats_lock, flags);
+    allocated = min(request.capacity, count);
+    out = allocated ? kvmalloc_array(allocated, sizeof(*out), GFP_KERNEL) : NULL;
+    if (allocated && !out)
       return -ENOMEM;
 
     spin_lock_irqsave(&kmod_stats_lock, flags);
@@ -1168,7 +1186,7 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
     request.sequence = atomic64_inc_return(&kmod_stats_sequence);
     request.monotonic_ns = ktime_get_ns();
     request.count = count;
-    if (out && request.capacity >= count) {
+    if (out && request.capacity >= count && allocated >= count) {
       for (i = 0; i < count; i++) {
         out[i].uid = kmod_stats[i].uid;
         out[i].ioctl_count = kmod_stats[i].ioctl_count;
@@ -1209,9 +1227,13 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
   }
   case VH_CLEAR_STATS: {
     unsigned long flags;
+    u32 i;
     spin_lock_irqsave(&kmod_stats_lock, flags);
-    kmod_stats_count = 0;
-    memset(kmod_stats, 0, sizeof(kmod_stats));
+    for (i = 0; i < kmod_stats_count; i++) {
+      uid_t uid = kmod_stats[i].uid;
+      memset(&kmod_stats[i], 0, sizeof(kmod_stats[i]));
+      kmod_stats[i].uid = uid;
+    }
     atomic64_set(&kmod_stats_sequence, 0);
     spin_unlock_irqrestore(&kmod_stats_lock, flags);
     ret = 0;
@@ -1467,6 +1489,10 @@ static void __exit vpnhide_exit(void) {
     synchronize_rcu();
     kvfree(snapshot);
   }
+  kvfree(kmod_stats);
+  kmod_stats = NULL;
+  kmod_stats_count = 0;
+  vpnhide_udp_rates_destroy();
 
   spin_lock(&active_vpns_lock);
   vpns = rcu_dereference_protected(global_active_vpns,

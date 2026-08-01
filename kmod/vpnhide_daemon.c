@@ -377,7 +377,8 @@ struct daemon_stats_ring {
 	uint64_t latest_sequence;
 	uint64_t previous_sequence;
 	char session_id[128];
-	struct vpnhide_uid_stats previous[MAX_TARGET_UIDS];
+	struct vpnhide_uid_stats *previous;
+	uint32_t previous_capacity;
 	uint32_t previous_count;
 	bool baseline_valid;
 };
@@ -398,8 +399,10 @@ static void clear_stats_ring(struct daemon_stats_ring *ring)
 	ring->latest_sequence = 0;
 	ring->previous_sequence = 0;
 	ring->previous_count = 0;
+	ring->previous_capacity = 0;
 	ring->baseline_valid = false;
-	memset(ring->previous, 0, sizeof(ring->previous));
+	free(ring->previous);
+	ring->previous = NULL;
 }
 
 static void initialize_session_id(int fd, struct daemon_stats_ring *ring)
@@ -435,18 +438,32 @@ static uint64_t stats_delta(uint64_t current, uint64_t previous)
 	return current >= previous ? current - previous : current;
 }
 
-static int read_kernel_stats(int fd, struct vpnhide_uid_stats *entries,
+static int read_kernel_stats(int fd, struct vpnhide_uid_stats **entries,
 				     uint32_t *count, uint64_t *sequence)
 {
 	struct vpnhide_stats_snapshot request;
-	memset(&request, 0, sizeof(request));
-	request.capacity = MAX_TARGET_UIDS;
-	request.entries_ptr = (uint64_t)(uintptr_t)entries;
-	if (ioctl(fd, VH_GET_STATS, &request) < 0)
-		return -1;
-	*count = request.count;
-	*sequence = request.sequence;
-	return 0;
+	struct vpnhide_uid_stats *buffer = NULL;
+	uint32_t capacity = 0;
+	for (;;) {
+		memset(&request, 0, sizeof(request));
+		request.capacity = capacity;
+		request.entries_ptr = (uint64_t)(uintptr_t)buffer;
+		if (ioctl(fd, VH_GET_STATS, &request) == 0) {
+			*entries = buffer;
+			*count = request.count;
+			*sequence = request.sequence;
+			return 0;
+		}
+		if (errno != ENOSPC || request.count <= capacity) {
+			free(buffer);
+			return -1;
+		}
+		capacity = request.count;
+		free(buffer);
+		buffer = calloc(capacity, sizeof(*buffer));
+		if (!buffer)
+			return -1;
+	}
 }
 
 static void append_stats_point(struct daemon_stats_ring *ring,
@@ -457,6 +474,15 @@ static void append_stats_point(struct daemon_stats_ring *ring,
 	struct daemon_stats_point point;
 	bool gap = !ring->baseline_valid;
 	uint32_t delta_count = 0;
+	struct vpnhide_uid_stats *grown;
+
+	if (current_count > ring->previous_capacity) {
+		grown = realloc(ring->previous, current_count * sizeof(*grown));
+		if (!grown)
+			return;
+		ring->previous = grown;
+		ring->previous_capacity = current_count;
+	}
 
 	if (ring->baseline_valid && sequence <= ring->previous_sequence)
 		gap = true;
@@ -530,11 +556,12 @@ static void append_stats_point(struct daemon_stats_ring *ring,
 
 static void sample_stats(int fd, struct daemon_stats_ring *ring)
 {
-	struct vpnhide_uid_stats current[MAX_TARGET_UIDS];
+	struct vpnhide_uid_stats *current = NULL;
 	uint32_t count;
 	uint64_t sequence;
-	if (read_kernel_stats(fd, current, &count, &sequence) == 0)
+	if (read_kernel_stats(fd, &current, &count, &sequence) == 0)
 		append_stats_point(ring, current, count, sequence, get_wall_time_ms());
+	free(current);
 }
 
 static void write_stats_json(FILE *out, const struct daemon_stats_ring *ring)
