@@ -68,25 +68,10 @@ void print_usage(const char *prog)
 	fprintf(stderr, "  version format: [ctl|kmod] (default: print both ctl and running kmod version)\n");
 }
 
-static int add_uid_distinct(uid_t *arr, int *count, uid_t uid)
+static void sort_uids(uid_t *arr, size_t count)
 {
-	if (uid == 0)
-		return 0;
-	for (int i = 0; i < *count; i++) {
-		if (arr[i] == uid)
-			return 0;
-	}
-	if (*count < MAX_TARGET_UIDS) {
-		arr[(*count)++] = uid;
-		return 1;
-	}
-	return 0;
-}
-
-static void sort_uids(uid_t *arr, int count)
-{
-	for (int i = 0; i < count - 1; i++) {
-		for (int j = 0; j < count - i - 1; j++) {
+	for (size_t i = 0; i + 1 < count; i++) {
+		for (size_t j = 0; j + 1 < count - i; j++) {
 			if (arr[j] > arr[j + 1]) {
 				uid_t temp = arr[j];
 				arr[j] = arr[j + 1];
@@ -135,8 +120,8 @@ int main(int argc, char **argv)
 	    strcmp(argv[1], "preview") == 0) {
 		JSON_Value *root_value;
 		JSON_Object *root;
-		struct vpnhide_ioctl_data targets, lsposed;
-		struct vpnhide_port_ioctl_data ports;
+		struct vpnhide_uid_vector targets = {0}, lsposed = {0};
+		struct vpnhide_port_policy ports = {0};
 		struct vpnhide_policy_summary summary;
 		char error[256];
 		uid_t self_uid = 0;
@@ -156,9 +141,6 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		root = json_value_get_object(root_value);
-		memset(&targets, 0, sizeof(targets));
-		memset(&lsposed, 0, sizeof(lsposed));
-		memset(&ports, 0, sizeof(ports));
 		memset(error, 0, sizeof(error));
 		ret = vpnhide_resolve_targets(root, self_uid, &targets, &lsposed,
 						      &summary, error, sizeof(error));
@@ -167,6 +149,8 @@ int main(int argc, char **argv)
 				vpnhide_list_mode_name(summary.mode),
 				error[0] ? error : "unknown error");
 			json_value_free(root_value);
+			vpnhide_uid_vector_free(&targets);
+			vpnhide_uid_vector_free(&lsposed);
 			return 1;
 		}
 		ret = vpnhide_resolve_port_rules(root, self_uid, &ports, &summary,
@@ -175,6 +159,9 @@ int main(int argc, char **argv)
 			fprintf(stderr, "Port policy rejected: %s\n",
 				error[0] ? error : "unknown error");
 			json_value_free(root_value);
+			vpnhide_uid_vector_free(&targets);
+			vpnhide_uid_vector_free(&lsposed);
+			vpnhide_port_policy_free(&ports);
 			return 1;
 		}
 		printf("mode=%s\n", vpnhide_list_mode_name(summary.mode));
@@ -187,15 +174,15 @@ int main(int argc, char **argv)
 		printf("lsposed_targets=%d\n", summary.lsposed_targets);
 		printf("port_targets=%d\n", summary.port_targets);
 		if (strcmp(argv[1], "preview") == 0) {
-			for (int i = 0; i < ports.count; i++) {
-				printf("port_target[%d].uid=%u\n", i,
+			for (size_t i = 0; i < ports.count; i++) {
+				printf("port_target[%zu].uid=%u\n", i,
 				       (unsigned int)ports.targets[i].uid);
-				printf("port_target[%d].mode=%u\n", i,
+				printf("port_target[%zu].mode=%u\n", i,
 				       (unsigned int)ports.targets[i].mode);
-				for (int j = 0; j < ports.targets[i].rule_count; j++) {
+				for (size_t j = 0; j < ports.targets[i].rule_count; j++) {
 					const struct vpnhide_port_rule *rule =
 						&ports.targets[i].rules[j];
-					printf("port_target[%d].rule[%d]=%u-%u/%u\n",
+					printf("port_target[%zu].rule[%zu]=%u-%u/%u\n",
 					       i, j, (unsigned int)rule->start_port,
 					       (unsigned int)rule->end_port,
 					       (unsigned int)rule->protocol);
@@ -203,6 +190,9 @@ int main(int argc, char **argv)
 			}
 		}
 		json_value_free(root_value);
+		vpnhide_uid_vector_free(&targets);
+		vpnhide_uid_vector_free(&lsposed);
+		vpnhide_port_policy_free(&ports);
 		return 0;
 	}
 
@@ -259,9 +249,10 @@ int main(int argc, char **argv)
 
 		// 2. Resolve declarative targets into effective UID snapshots.
 		JSON_Array *apps = json_object_get_array(root, "apps");
-		struct vpnhide_ioctl_data targets;
-		struct vpnhide_ioctl_data lsposed;
+		struct vpnhide_uid_vector targets = {0};
+		struct vpnhide_uid_vector lsposed = {0};
 		struct vpnhide_target_bundle target_bundle;
+		struct vpnhide_port_policy port_policy = {0};
 		struct vpnhide_port_ioctl_data pdata;
 		struct vpnhide_app_hook_ioctl_data app_hook_masks;
 		struct vpnhide_iface_ioctl_data idata;
@@ -270,8 +261,6 @@ int main(int argc, char **argv)
 		struct vpnhide_policy_summary policy_summary;
 		char policy_error[256];
 		int policy_ret;
-		memset(&targets, 0, sizeof(targets));
-		memset(&lsposed, 0, sizeof(lsposed));
 		memset(&target_bundle, 0, sizeof(target_bundle));
 		memset(&pdata, 0, sizeof(pdata));
 		memset(&app_hook_masks, 0, sizeof(app_hook_masks));
@@ -289,12 +278,8 @@ int main(int argc, char **argv)
 				int kmod = json_object_get_boolean(app, "kmod");
 				int lsp = json_object_get_boolean(app, "lsposed");
 
-				if (kmod && uid != 0) {
-					add_uid_distinct(targets.uids, &targets.count, uid);
-				}
-				if (lsp && uid != 0) {
-					add_uid_distinct(lsposed.uids, &lsposed.count, uid);
-				}
+				(void)kmod;
+				(void)lsp;
 
 				if (uid != 0 &&
 				    app_hook_masks.count < MAX_TARGET_UIDS) {
@@ -338,7 +323,7 @@ int main(int argc, char **argv)
 			close(fd);
 			return 1;
 		}
-		policy_ret = vpnhide_resolve_port_rules(root, self_uid, &pdata,
+		policy_ret = vpnhide_resolve_port_rules(root, self_uid, &port_policy,
 								&policy_summary, policy_error,
 								sizeof(policy_error));
 		if (policy_ret) {
@@ -354,14 +339,45 @@ int main(int argc, char **argv)
 			policy_summary.kmod_targets, policy_summary.lsposed_targets,
 			policy_summary.protected_packages);
 
-		sort_uids(targets.uids, targets.count);
-		sort_uids(lsposed.uids, lsposed.count);
+		if (targets.count > MAX_TARGET_UIDS ||
+		    lsposed.count > MAX_TARGET_UIDS ||
+		    port_policy.count > MAX_TARGET_UIDS) {
+			fprintf(stderr, "Policy requires variable-length ABI: kmod=%zu lsposed=%zu ports=%zu\n",
+				targets.count, lsposed.count, port_policy.count);
+			vpnhide_uid_vector_free(&targets);
+			vpnhide_uid_vector_free(&lsposed);
+			vpnhide_port_policy_free(&port_policy);
+			json_value_free(root_value);
+			close(fd);
+			return 1;
+		}
+		for (size_t i = 0; i < port_policy.count; i++) {
+			if (port_policy.targets[i].rule_count > MAX_PORT_RULES_PER_UID) {
+				fprintf(stderr, "Policy requires variable-length ABI: uid %u has %zu port rules\n",
+					(unsigned int)port_policy.targets[i].uid,
+					port_policy.targets[i].rule_count);
+				vpnhide_uid_vector_free(&targets);
+				vpnhide_uid_vector_free(&lsposed);
+				vpnhide_port_policy_free(&port_policy);
+				json_value_free(root_value);
+				close(fd);
+				return 1;
+			}
+			pdata.targets[i].uid = port_policy.targets[i].uid;
+			pdata.targets[i].mode = port_policy.targets[i].mode;
+			pdata.targets[i].rule_count = (int)port_policy.targets[i].rule_count;
+			memcpy(pdata.targets[i].rules, port_policy.targets[i].rules,
+			       port_policy.targets[i].rule_count * sizeof(pdata.targets[i].rules[0]));
+		}
+		pdata.count = (int)port_policy.count;
+		sort_uids(targets.items, targets.count);
+		sort_uids(lsposed.items, lsposed.count);
 		target_bundle.kmod_count = targets.count;
 		target_bundle.lsposed_count = lsposed.count;
-		memcpy(target_bundle.kmod_uids, targets.uids,
-		       targets.count * sizeof(targets.uids[0]));
-		memcpy(target_bundle.lsposed_uids, lsposed.uids,
-		       lsposed.count * sizeof(lsposed.uids[0]));
+		memcpy(target_bundle.kmod_uids, targets.items,
+		       targets.count * sizeof(targets.items[0]));
+		memcpy(target_bundle.lsposed_uids, lsposed.items,
+		       lsposed.count * sizeof(lsposed.items[0]));
 
 		// 3. Interface prefixes
 		JSON_Array *prefixes = json_object_get_array(root, "ifacePrefixes");
@@ -400,6 +416,9 @@ int main(int argc, char **argv)
 			apply_failed = 1;
 		}
 		free(payload);
+		vpnhide_uid_vector_free(&targets);
+		vpnhide_uid_vector_free(&lsposed);
+		vpnhide_port_policy_free(&port_policy);
 
 		json_value_free(root_value);
 		close(fd);

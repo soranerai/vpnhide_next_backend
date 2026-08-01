@@ -5,7 +5,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 OUT="/tmp/vpnhide-policy-test-$$"
 ABI_OUT="${OUT}.abi"
-trap 'rm -f "$OUT" "$ABI_OUT"' EXIT
+DYNAMIC_JSON="${OUT}.dynamic.json"
+DYNAMIC_PM="${OUT}.pm.sh"
+trap 'rm -f "$OUT" "$ABI_OUT" "$DYNAMIC_JSON" "$DYNAMIC_PM"' EXIT
 
 PM_COMMAND="printf 'package:/system/priv-app/Settings/Settings.apk=com.android.settings uid:1000\\npackage:/data/app/manager/base.apk=dev.soranerai.vpnhidenext uid:10003\\npackage:/data/app/~~abc==/com.example.keep-def==/base.apk=com.example.keep uid:10001,110001\\npackage:/data/app/hide/base.apk=com.example.hide uid:10002\\npackage:/data/app/target/base.apk=com.example.target uid:10002\\n'"
 
@@ -92,5 +94,32 @@ grep -q '^port_target\[2\]\.rule\[0\]=0-65535/2$' <<<"$OUTPUT"
 grep -q '^port_target\[3\]\.uid=10002$' <<<"$OUTPUT"
 grep -q '^port_target\[3\]\.mode=2$' <<<"$OUTPUT"
 grep -q '^port_target\[3\]\.rule\[0\]=0-65535/2$' <<<"$OUTPUT"
+
+# Per-UID rule storage is dynamic as well.
+{
+	printf '{"globalConfig":{"listMode":"BLACKLIST"},"apps":[{"packageName":"com.example.target","userId":0,"uid":10002,"portHiding":true}],"portRules":['
+	for i in $(seq 1 17); do
+		if [ "$i" -gt 1 ]; then printf ','; fi
+		printf '{"packageName":"com.example.target","userId":0,"uid":10002,"startPort":%d,"endPort":%d,"protocol":"TCP","enabled":true}' "$i" "$i"
+	done
+	printf ']}\n'
+} >"$DYNAMIC_JSON"
+OUTPUT="$("$OUT" preview "$DYNAMIC_JSON" 10003)"
+grep -q '^port_target\[0\]\.rule\[16\]=17-17/0$' <<<"$OUTPUT"
+
+# Exercise a policy beyond the former 512 UID ceiling without involving the
+# kernel ABI serializer.
+{
+	echo '#!/usr/bin/env bash'
+	for i in $(seq 10000 10512); do
+		echo "echo 'package:/data/app/app${i}/base.apk=com.example.app${i} uid:${i}'"
+	done
+} >"$DYNAMIC_PM"
+chmod +x "$DYNAMIC_PM"
+printf '{"globalConfig":{"listMode":"ALLOWLIST"},"apps":[]}\n' >"$DYNAMIC_JSON"
+OUTPUT="$(VPNHIDE_PM_COMMAND="$DYNAMIC_PM" "$OUT" validate "$DYNAMIC_JSON")"
+grep -q '^kmod_targets=513$' <<<"$OUTPUT"
+grep -q '^lsposed_targets=513$' <<<"$OUTPUT"
+grep -q '^port_targets=513$' <<<"$OUTPUT"
 
 echo "policy list modes: PASS"

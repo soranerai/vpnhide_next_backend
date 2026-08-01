@@ -24,17 +24,40 @@ struct vpnhide_policy_summary {
 	int ignored_selected_system_packages;
 };
 
+struct vpnhide_uid_vector {
+	size_t count;
+	size_t capacity;
+	uid_t *items;
+};
+
+struct vpnhide_port_target {
+	uid_t uid;
+	unsigned char mode;
+	size_t rule_count;
+	size_t rule_capacity;
+	struct vpnhide_port_rule *rules;
+};
+
+struct vpnhide_port_policy {
+	size_t count;
+	size_t capacity;
+	struct vpnhide_port_target *targets;
+};
+
+void vpnhide_uid_vector_free(struct vpnhide_uid_vector *vector);
+void vpnhide_port_policy_free(struct vpnhide_port_policy *policy);
+
 /* Resolve the declarative JSON policy into the two UID snapshots consumed by
  * the kernel. In allowlist mode, system packages are never made targets. */
 int vpnhide_resolve_targets(const JSON_Object *root, uid_t self_uid,
-				    struct vpnhide_ioctl_data *kmod,
-				    struct vpnhide_ioctl_data *lsposed,
+				    struct vpnhide_uid_vector *kmod,
+				    struct vpnhide_uid_vector *lsposed,
 				    struct vpnhide_policy_summary *summary,
 				    char *error, size_t error_len);
 
 /* Resolve port hiding using the same list mode and protected-package rules. */
 int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
-				       struct vpnhide_port_ioctl_data *result,
+				       struct vpnhide_port_policy *result,
 				       struct vpnhide_policy_summary *summary,
 				       char *error, size_t error_len);
 
