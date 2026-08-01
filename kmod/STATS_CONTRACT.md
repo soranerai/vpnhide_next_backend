@@ -114,15 +114,15 @@ statistics to arbitrary applications. The daemon accepts a connection only
 when `SO_PEERCRED.uid` equals the manager application's UID passed by the
 module service at startup.
 
-The application sends one UTF-8 command followed by `\n` and reads one UTF-8
-JSON response until EOF:
+The root-side `vpnhide-ctl` sends one UTF-8 command followed by `\n` and reads
+one UTF-8 JSON response until EOF:
 
 - `GET_STATS` returns the complete current response;
 - `CLEAR_HISTORY` clears only the daemon ring and userspace baseline, then
   returns the now-empty response. It never calls `VH_CLEAR_STATS`.
 
-On Android the socket is addressed with
-`LocalSocketAddress("vpnhide.stats.v1", Namespace.ABSTRACT)`. The reference
-client is `KmodStatsClient` in the application source. A connection failure
-means that the daemon is unavailable; the frontend should show statistics as
-temporarily unavailable rather than treating it as an empty history.
+The Android frontend does not connect to the abstract socket directly. It
+invokes `su -c '<module>/vpnhide-ctl stats_history'` (or `... stats_history
+clear`) and parses stdout as JSON. Root is accepted as a trusted peer by the
+daemon; the manager UID remains accepted for diagnostics and compatibility.
+No `untrusted_app -> su` SELinux socket rule is required.

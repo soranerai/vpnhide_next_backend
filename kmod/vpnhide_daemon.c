@@ -596,7 +596,7 @@ static void serve_stats_client(int listen_fd, uid_t allowed_uid,
 	if (client < 0)
 		return;
 	if (getsockopt(client, SOL_SOCKET, SO_PEERCRED, &peer, &peer_len) < 0 ||
-		peer.uid != allowed_uid) {
+		(peer.uid != allowed_uid && peer.uid != 0)) {
 		close(client);
 		return;
 	}

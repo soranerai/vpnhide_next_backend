@@ -4,7 +4,7 @@
 MODDIR="$(cd "$(dirname "$0")" && pwd)"
 CTL="$MODDIR/vpnhide-ctl"
 DEV_NODE="/dev/vpnhide_ctrl"
-APP_PACKAGE="com.notcvnt.rknhardering"
+APP_PACKAGE="dev.soranerai.vpnhidenext"
 
 LOG_FILE="/data/adb/vpnhide_kmod/service.log"
 mkdir -p "/data/adb/vpnhide_kmod"

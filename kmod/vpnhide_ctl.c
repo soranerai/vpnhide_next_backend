@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <arpa/inet.h>
 #include <linux/types.h>
 
@@ -16,11 +17,48 @@
 /* CONNECT and BIND are mandatory because port policy is enforced by those
  * hooks. They are not user-configurable hook switches. */
 #define VPNHIDE_PORT_HOOK_MASK ((1u << 13) | (1u << 16))
+#define VPNHIDE_STATS_SOCKET "vpnhide.stats.v1"
+
+static int print_stats_history(int clear)
+{
+	struct sockaddr_un address;
+	char buffer[4096];
+	int fd, length;
+	const char *command = clear ? "CLEAR_HISTORY\n" : "GET_STATS\n";
+	memset(&address, 0, sizeof(address));
+	address.sun_family = AF_UNIX;
+	address.sun_path[0] = '\0';
+	strncpy(address.sun_path + 1, VPNHIDE_STATS_SOCKET,
+			sizeof(address.sun_path) - 2);
+	length = (int)(offsetof(struct sockaddr_un, sun_path) + 1 +
+			strlen(VPNHIDE_STATS_SOCKET));
+	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (fd < 0 || connect(fd, (struct sockaddr *)&address, length) < 0) {
+		if (fd >= 0) close(fd);
+		perror("stats_history socket");
+		return 1;
+	}
+	if (write(fd, command, strlen(command)) != (ssize_t)strlen(command)) {
+		perror("stats_history write");
+		close(fd);
+		return 1;
+	}
+	shutdown(fd, SHUT_WR);
+	while ((length = (int)read(fd, buffer, sizeof(buffer))) > 0) {
+		if (write(STDOUT_FILENO, buffer, (size_t)length) != length) {
+			perror("stats_history output");
+			close(fd);
+			return 1;
+		}
+	}
+	close(fd);
+	return length < 0 ? 1 : 0;
+}
 
 void print_usage(const char *prog)
 {
 	fprintf(stderr,
-		"Usage: %s <load|validate|preview|set_spoof_ip|active_hooks|java_hooks|stats|version> [args...]\n",
+		"Usage: %s <load|validate|preview|set_spoof_ip|active_hooks|java_hooks|stats|stats_history|version> [args...]\n",
 		prog);
 	fprintf(stderr, "  load format: <json_path> [self_uid]\n");
 	fprintf(stderr, "  validate/preview format: <json_path> [self_uid]\n");
@@ -65,6 +103,8 @@ int main(int argc, char **argv)
 		print_usage(argv[0]);
 		return 1;
 	}
+	if (strcmp(argv[1], "stats_history") == 0)
+		return print_stats_history(argc > 2 && strcmp(argv[2], "clear") == 0);
 
 	if (strcmp(argv[1], "version") == 0) {
 		int kversion = -1;
