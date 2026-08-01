@@ -1,18 +1,26 @@
 {
   "globalConfig": {
-    "listMode": "ALLOWLIST"
+    "listMode": "BLACKLIST"
   },
   "apps": [
     {
-      "packageName": "com.example.keep",
+      "packageName": "com.example.target",
       "userId": 0,
-      "uid": 10001,
+      "uid": 10002,
       "kmod": true,
       "lsposed": true,
       "portHiding": true
     }
   ],
-  "portRules": [],
+  "portRules": [
+    {
+      "enabled": true,
+      "uid": 10002,
+      "startPort": 8080,
+      "endPort": 8080,
+      "protocol": "TCP"
+    }
+  ],
   "massPortRules": [
     {
       "enabled": true,

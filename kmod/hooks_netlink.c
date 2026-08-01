@@ -129,6 +129,8 @@ struct kretprobe inet_ioctl_krp = {
 
 struct sock_ioctl_data {
   void __user *argp;
+  struct ifreq __user *user_ifc_req;
+  int ifc_capacity;
 };
 
 enum filter_ifconf_result {
@@ -161,11 +163,29 @@ static enum filter_ifconf_result filter_ifconf_buf(struct ifreq __user *usr_ifr,
   return FILTER_IFCONF_CHANGED;
 }
 
+/* SIOCGIFCONF writes only the returned entries.  Anything beyond ifc_len is
+ * caller-owned memory and may still contain entries from a previous query.
+ * RKNHardering deliberately inspects that tail, so compacting the visible
+ * entries alone is not sufficient. */
+static bool clear_ifconf_tail(struct ifreq __user *usr_ifr,
+                              int start_len, int capacity_len) {
+  unsigned long tail_len;
+
+  if (!usr_ifr || start_len < 0 || capacity_len <= start_len)
+    return true;
+
+  tail_len = (unsigned long)(capacity_len - start_len);
+  if (clear_user((char __user *)usr_ifr + start_len, tail_len) != 0)
+    return false;
+  return true;
+}
+
 static int sock_ioctl_ret(struct kretprobe_instance *ri, struct pt_regs *regs) {
   struct sock_ioctl_data *data = (void *)ri->data;
   struct ifconf __user *uifc;
   struct ifconf ifc;
   int orig_len;
+  int filtered_len;
   enum filter_ifconf_result res;
 
   vpnhide_dbg("sock_ioctl_ret: retval=%ld argp=%px\n", regs_return_value(regs),
@@ -177,8 +197,15 @@ static int sock_ioctl_ret(struct kretprobe_instance *ri, struct pt_regs *regs) {
   uifc = data->argp;
   if (copy_from_user(&ifc, uifc, sizeof(ifc)))
     return 0;
-  if (!ifc.ifc_req || ifc.ifc_len <= 0)
+  if (!ifc.ifc_req || ifc.ifc_len < 0)
     return 0;
+
+  /* Use the pointer captured before the ioctl returns.  This also prevents a
+   * concurrent userspace mutation of ifc_req from changing the range we
+   * compact or clear. */
+  ifc.ifc_req = data->user_ifc_req;
+  if (ifc.ifc_len > data->ifc_capacity)
+    ifc.ifc_len = data->ifc_capacity;
 
   orig_len = ifc.ifc_len;
   res = filter_ifconf_buf(ifc.ifc_req, ifc.ifc_len / (int)sizeof(struct ifreq),
@@ -186,6 +213,13 @@ static int sock_ioctl_ret(struct kretprobe_instance *ri, struct pt_regs *regs) {
 
   if (res == FILTER_IFCONF_COPY_FAULT) {
     vpnhide_dbg("ifconf: copy fault during filter; ifc_len untouched\n");
+    return 0;
+  }
+
+  filtered_len = ifc.ifc_len;
+  if (!clear_ifconf_tail(ifc.ifc_req, filtered_len, data->ifc_capacity)) {
+    vpnhide_dbg("ifconf: failed to clear tail start=%d capacity=%d\n",
+                filtered_len, data->ifc_capacity);
     return 0;
   }
 
@@ -205,6 +239,7 @@ static int sock_ioctl_ret(struct kretprobe_instance *ri, struct pt_regs *regs) {
 static int sock_ioctl_entry(struct kretprobe_instance *ri,
                             struct pt_regs *regs) {
   struct sock_ioctl_data *data;
+  struct ifconf ifc;
   unsigned int cmd = (unsigned int)regs->regs[1];
   unsigned long arg = (unsigned long)regs->regs[2];
 
@@ -217,8 +252,14 @@ static int sock_ioctl_entry(struct kretprobe_instance *ri,
   if (!is_target_uid())
     return 1;
 
+  if (copy_from_user(&ifc, (void __user *)arg, sizeof(ifc)) ||
+      !ifc.ifc_req || ifc.ifc_len <= 0)
+    return 1;
+
   data = (void *)ri->data;
   data->argp = (void __user *)arg;
+  data->user_ifc_req = ifc.ifc_req;
+  data->ifc_capacity = ifc.ifc_len;
   vpnhide_dbg("sock_ioctl_entry: uid=%u SIOCGIFCONF argp=%px\n",
               from_kuid(&init_user_ns, current_uid()), data->argp);
   return 0;

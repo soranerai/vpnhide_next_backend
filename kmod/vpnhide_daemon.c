@@ -22,6 +22,8 @@
 #include <sys/wait.h>
 #include <limits.h>
 #include <stdint.h>
+#include <sys/un.h>
+#include <sys/types.h>
 
 #include "include/vpnhide.h"
 #include "generated/iface_lists.h"
@@ -348,6 +350,271 @@ static unsigned long long get_time_ms(void)
 	return (unsigned long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+static unsigned long long get_wall_time_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	return (unsigned long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+#define STATS_RESOLUTION_SEC 60
+#define STATS_RETENTION_SEC (24 * 60 * 60)
+#define STATS_RING_POINTS (STATS_RETENTION_SEC / STATS_RESOLUTION_SEC)
+#define STATS_SOCKET_NAME "vpnhide.stats.v1"
+
+struct daemon_stats_point {
+	unsigned long long timestamp_ms;
+	bool gap;
+	uint32_t count;
+	struct vpnhide_uid_stats *entries;
+};
+
+struct daemon_stats_ring {
+	struct daemon_stats_point points[STATS_RING_POINTS];
+	unsigned int head;
+	unsigned int count;
+	unsigned long long dropped_intervals;
+	uint64_t latest_sequence;
+	uint64_t previous_sequence;
+	char session_id[128];
+	struct vpnhide_uid_stats previous[MAX_TARGET_UIDS];
+	uint32_t previous_count;
+	bool baseline_valid;
+};
+
+static void free_stats_point(struct daemon_stats_point *point)
+{
+	free(point->entries);
+	memset(point, 0, sizeof(*point));
+}
+
+static void clear_stats_ring(struct daemon_stats_ring *ring)
+{
+	for (unsigned int i = 0; i < STATS_RING_POINTS; i++)
+		free_stats_point(&ring->points[i]);
+	ring->head = 0;
+	ring->count = 0;
+	ring->dropped_intervals = 0;
+	ring->latest_sequence = 0;
+	ring->previous_sequence = 0;
+	ring->previous_count = 0;
+	ring->baseline_valid = false;
+	memset(ring->previous, 0, sizeof(ring->previous));
+}
+
+static void initialize_session_id(int fd, struct daemon_stats_ring *ring)
+{
+	char boot_id[80] = "unknown";
+	uint64_t kernel_session = 0;
+	FILE *boot = fopen("/proc/sys/kernel/random/boot_id", "r");
+	if (boot) {
+		if (fgets(boot_id, sizeof(boot_id), boot))
+			boot_id[strcspn(boot_id, "\r\n")] = '\0';
+		fclose(boot);
+	}
+	if (ioctl(fd, VH_GET_STATS_SESSION, &kernel_session) == 0)
+		snprintf(ring->session_id, sizeof(ring->session_id), "%s-%016llx",
+			boot_id, (unsigned long long)kernel_session);
+	else
+		snprintf(ring->session_id, sizeof(ring->session_id), "%s", boot_id);
+}
+
+static const struct vpnhide_uid_stats *find_uid_stats(
+	const struct vpnhide_uid_stats *entries, uint32_t count, uid_t uid)
+{
+	for (uint32_t i = 0; i < count; i++)
+		if (entries[i].uid == uid)
+			return &entries[i];
+	return NULL;
+}
+
+static uint64_t stats_delta(uint64_t current, uint64_t previous)
+{
+	/* A kernel clear or session change must not turn a reset into an enormous
+	 * interval. The caller detects the sequence reset and marks a gap. */
+	return current >= previous ? current - previous : current;
+}
+
+static int read_kernel_stats(int fd, struct vpnhide_uid_stats *entries,
+				     uint32_t *count, uint64_t *sequence)
+{
+	struct vpnhide_stats_snapshot request;
+	memset(&request, 0, sizeof(request));
+	request.capacity = MAX_TARGET_UIDS;
+	request.entries_ptr = (uint64_t)(uintptr_t)entries;
+	if (ioctl(fd, VH_GET_STATS, &request) < 0)
+		return -1;
+	*count = request.count;
+	*sequence = request.sequence;
+	return 0;
+}
+
+static void append_stats_point(struct daemon_stats_ring *ring,
+				       const struct vpnhide_uid_stats *current,
+				       uint32_t current_count, uint64_t sequence,
+				       unsigned long long timestamp_ms)
+{
+	struct daemon_stats_point point;
+	bool gap = !ring->baseline_valid;
+	uint32_t delta_count = 0;
+
+	if (ring->baseline_valid && sequence <= ring->previous_sequence)
+		gap = true;
+
+	if (!gap) {
+		for (uint32_t i = 0; i < current_count; i++) {
+			const struct vpnhide_uid_stats *old = find_uid_stats(
+				ring->previous, ring->previous_count, current[i].uid);
+			if (!old ||
+				stats_delta(current[i].ioctl_count, old->ioctl_count) ||
+				stats_delta(current[i].netlink_count, old->netlink_count) ||
+				stats_delta(current[i].proc_count, old->proc_count) ||
+				stats_delta(current[i].sockopt_count, old->sockopt_count) ||
+				stats_delta(current[i].connect_count, old->connect_count) ||
+				stats_delta(current[i].getname_count, old->getname_count) ||
+				stats_delta(current[i].port_count, old->port_count))
+				delta_count++;
+		}
+	}
+
+	memset(&point, 0, sizeof(point));
+	point.timestamp_ms = timestamp_ms;
+	point.gap = gap;
+	if (delta_count) {
+		point.entries = calloc(delta_count, sizeof(*point.entries));
+		if (!point.entries)
+			return;
+	}
+	if (!gap) {
+		for (uint32_t i = 0, out = 0; i < current_count; i++) {
+			const struct vpnhide_uid_stats *old = find_uid_stats(
+				ring->previous, ring->previous_count, current[i].uid);
+			__u64 *dst;
+			if (old &&
+				(!stats_delta(current[i].ioctl_count, old->ioctl_count) &&
+				 !stats_delta(current[i].netlink_count, old->netlink_count) &&
+				 !stats_delta(current[i].proc_count, old->proc_count) &&
+				 !stats_delta(current[i].sockopt_count, old->sockopt_count) &&
+				 !stats_delta(current[i].connect_count, old->connect_count) &&
+				 !stats_delta(current[i].getname_count, old->getname_count) &&
+				 !stats_delta(current[i].port_count, old->port_count)))
+				continue;
+			point.entries[out].uid = current[i].uid;
+			dst = &point.entries[out].ioctl_count;
+			dst[0] = stats_delta(current[i].ioctl_count, old ? old->ioctl_count : 0);
+			dst[1] = stats_delta(current[i].netlink_count, old ? old->netlink_count : 0);
+			dst[2] = stats_delta(current[i].proc_count, old ? old->proc_count : 0);
+			dst[3] = stats_delta(current[i].sockopt_count, old ? old->sockopt_count : 0);
+			dst[4] = stats_delta(current[i].connect_count, old ? old->connect_count : 0);
+			dst[5] = stats_delta(current[i].getname_count, old ? old->getname_count : 0);
+			dst[6] = stats_delta(current[i].port_count, old ? old->port_count : 0);
+			out++;
+		}
+		point.count = delta_count;
+	}
+
+	if (ring->count == STATS_RING_POINTS) {
+		free_stats_point(&ring->points[ring->head]);
+		ring->head = (ring->head + 1) % STATS_RING_POINTS;
+		ring->dropped_intervals++;
+	} else {
+		ring->count++;
+	}
+	ring->points[(ring->head + ring->count - 1) % STATS_RING_POINTS] = point;
+	memcpy(ring->previous, current, current_count * sizeof(*current));
+	ring->previous_count = current_count;
+	ring->previous_sequence = sequence;
+	ring->latest_sequence = sequence;
+	ring->baseline_valid = true;
+}
+
+static void sample_stats(int fd, struct daemon_stats_ring *ring)
+{
+	struct vpnhide_uid_stats current[MAX_TARGET_UIDS];
+	uint32_t count;
+	uint64_t sequence;
+	if (read_kernel_stats(fd, current, &count, &sequence) == 0)
+		append_stats_point(ring, current, count, sequence, get_wall_time_ms());
+}
+
+static void write_stats_json(FILE *out, const struct daemon_stats_ring *ring)
+{
+	unsigned long long oldest = 0, newest = 0;
+	if (ring->count) {
+		oldest = ring->points[ring->head].timestamp_ms;
+		newest = ring->points[(ring->head + ring->count - 1) % STATS_RING_POINTS].timestamp_ms;
+	}
+	fprintf(out, "{\"sessionId\":\"%s\"", ring->session_id[0] ? ring->session_id : "unknown");
+	fprintf(out, ",\"sequence\":%llu,\"resolutionSec\":%d,\"retentionSec\":%d,\"dropped\":%s,\"droppedIntervals\":%llu,\"oldestTimestampMs\":%llu,\"newestTimestampMs\":%llu,\"points\":[",
+		(unsigned long long)ring->latest_sequence, STATS_RESOLUTION_SEC, STATS_RETENTION_SEC,
+		ring->dropped_intervals ? "true" : "false",
+		ring->dropped_intervals, oldest, newest);
+	for (unsigned int n = 0; n < ring->count; n++) {
+		const struct daemon_stats_point *point = &ring->points[(ring->head + n) % STATS_RING_POINTS];
+		if (n) fputc(',', out);
+		fprintf(out, "{\"timestampMs\":%llu,\"gap\":%s,\"uids\":[",
+			point->timestamp_ms, point->gap ? "true" : "false");
+		for (uint32_t i = 0; i < point->count; i++) {
+			const struct vpnhide_uid_stats *s = &point->entries[i];
+			if (i) fputc(',', out);
+			fprintf(out, "{\"uid\":%u,\"ioctl\":%llu,\"netlink\":%llu,\"proc\":%llu,\"sockopt\":%llu,\"connect\":%llu,\"getname\":%llu,\"port\":%llu}",
+				s->uid, (unsigned long long)s->ioctl_count, (unsigned long long)s->netlink_count,
+				(unsigned long long)s->proc_count, (unsigned long long)s->sockopt_count,
+				(unsigned long long)s->connect_count, (unsigned long long)s->getname_count,
+				(unsigned long long)s->port_count);
+		}
+		fputs("]}", out);
+	}
+	fputs("]}\n", out);
+}
+
+static int open_stats_socket(uid_t allowed_uid)
+{
+	struct sockaddr_un address;
+	int fd, length;
+	memset(&address, 0, sizeof(address));
+	address.sun_family = AF_UNIX;
+	address.sun_path[0] = '\0';
+	strncpy(address.sun_path + 1, STATS_SOCKET_NAME, sizeof(address.sun_path) - 2);
+	length = (int)(offsetof(struct sockaddr_un, sun_path) + 1 + strlen(STATS_SOCKET_NAME));
+	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (fd < 0 || bind(fd, (struct sockaddr *)&address, length) < 0 || listen(fd, 4) < 0) {
+		if (fd >= 0) close(fd);
+		return -1;
+	}
+	(void)allowed_uid;
+	return fd;
+}
+
+static void serve_stats_client(int listen_fd, uid_t allowed_uid,
+				       struct daemon_stats_ring *ring)
+{
+	struct ucred peer;
+	socklen_t peer_len = sizeof(peer);
+	char command[64];
+	int client = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
+	if (client < 0)
+		return;
+	if (getsockopt(client, SOL_SOCKET, SO_PEERCRED, &peer, &peer_len) < 0 ||
+		(peer.uid != allowed_uid && peer.uid != 0)) {
+		close(client);
+		return;
+	}
+	ssize_t length = read(client, command, sizeof(command) - 1);
+	if (length > 0) {
+		command[length] = '\0';
+		FILE *out = fdopen(client, "w");
+		if (out) {
+			if (!strncmp(command, "CLEAR_HISTORY", 13))
+				clear_stats_ring(ring);
+			write_stats_json(out, ring);
+			fclose(out);
+			return;
+		}
+	}
+	close(client);
+}
+
 static void reload_policy(const char *ctl, const char *config, const char *self_uid)
 {
 	pid_t pid;
@@ -426,10 +693,11 @@ static int package_fingerprint(unsigned long long *out)
 
 int main(int argc, char **argv)
 {
-	int fd, nl_fd, config_fd = -1;
+	int fd, nl_fd, config_fd = -1, stats_fd = -1;
 	const char *ctl = argc > 1 ? argv[1] : NULL;
 	const char *config = argc > 2 ? argv[2] : NULL;
 	const char *self_uid = argc > 3 ? argv[3] : NULL;
+	uid_t stats_allowed_uid = (uid_t)-1;
 	char config_dir[PATH_MAX];
 	struct sockaddr_nl sa;
 	char last_ipv4[64];
@@ -482,15 +750,31 @@ int main(int argc, char **argv)
 					strerror(errno));
 		}
 	}
+	if (self_uid && self_uid[0]) {
+		char *end = NULL;
+		unsigned long parsed = strtoul(self_uid, &end, 10);
+		if (end && *end == '\0' && parsed <= UINT_MAX) {
+			stats_allowed_uid = (uid_t)parsed;
+			stats_fd = open_stats_socket(stats_allowed_uid);
+		}
+	}
+	if (stats_fd < 0 && stats_allowed_uid != (uid_t)-1)
+		fprintf(stderr, "vpnhide-daemon: statistics socket unavailable: %s\n",
+			strerror(errno));
 
 	// Initial update
 	update_spoof_ip(fd, last_ipv4, last_ipv6);
+	struct daemon_stats_ring stats_ring;
+	memset(&stats_ring, 0, sizeof(stats_ring));
+	initialize_session_id(fd, &stats_ring);
+	sample_stats(fd, &stats_ring);
 
 	unsigned long long next_update_time = 0;
 	bool update_pending = false;
 	int retry_count = 0;
 	unsigned long long pm_reload_due = 0;
 	unsigned long long next_pm_poll = get_time_ms();
+	unsigned long long next_stats_sample = get_time_ms() + STATS_RESOLUTION_SEC * 1000ULL;
 	unsigned long long pm_fingerprint = 0;
 	bool pm_fingerprint_valid = false;
 
@@ -518,14 +802,26 @@ int main(int argc, char **argv)
 			if (poll_timeout < 0 || pm_timeout < poll_timeout)
 				poll_timeout = pm_timeout;
 		}
+		{
+			unsigned long long now = get_time_ms();
+			int stats_timeout = now >= next_stats_sample ? 0 :
+				(int)(next_stats_sample - now);
+			if (poll_timeout < 0 || stats_timeout < poll_timeout)
+				poll_timeout = stats_timeout;
+		}
 
-		struct pollfd pfds[2];
+		struct pollfd pfds[3];
 		int nfds = 1;
 		memset(pfds, 0, sizeof(pfds));
 		pfds[0].fd = nl_fd;
 		pfds[0].events = POLLIN;
 		if (config_fd >= 0) {
 			pfds[nfds].fd = config_fd;
+			pfds[nfds].events = POLLIN;
+			nfds++;
+		}
+		if (stats_fd >= 0) {
+			pfds[nfds].fd = stats_fd;
 			pfds[nfds].events = POLLIN;
 			nfds++;
 		}
@@ -552,6 +848,17 @@ int main(int argc, char **argv)
 		}
 		if (config_fd >= 0 && ret > 0 && (pfds[1].revents & POLLIN)) {
 			drain_config_events(config_fd, config, ctl, self_uid);
+		}
+		if (stats_fd >= 0) {
+			int stats_index = config_fd >= 0 ? 2 : 1;
+			if (ret > 0 && (pfds[stats_index].revents & POLLIN))
+				serve_stats_client(stats_fd, stats_allowed_uid, &stats_ring);
+		}
+		if (get_time_ms() >= next_stats_sample) {
+			do {
+				next_stats_sample += STATS_RESOLUTION_SEC * 1000ULL;
+			} while (next_stats_sample <= get_time_ms());
+			sample_stats(fd, &stats_ring);
 		}
 		if (config && ctl && get_time_ms() >= next_pm_poll) {
 			unsigned long long current_fingerprint;
@@ -594,6 +901,9 @@ int main(int argc, char **argv)
 	close(nl_fd);
 	if (config_fd >= 0)
 		close(config_fd);
+	if (stats_fd >= 0)
+		close(stats_fd);
+	clear_stats_ring(&stats_ring);
 	close(fd);
 	return 0;
 }

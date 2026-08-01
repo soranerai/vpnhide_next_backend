@@ -649,6 +649,10 @@ static struct socket *resolve_sock_addr(struct pt_regs *regs, bool uses_wrapper,
 static bool should_block_port(const struct vpnhide_uid_port_rules *urules,
                               unsigned short port, unsigned char proto) {
   int i;
+  if (urules->mode == VH_PORT_POLICY_UNRESTRICTED)
+    return false;
+  if (urules->mode == VH_PORT_POLICY_DENY_ALL)
+    return true;
   for (i = 0; i < urules->rule_count; i++) {
     const struct vpnhide_port_rule *r = &urules->rules[i];
     if (port >= r->start_port && port <= r->end_port) {

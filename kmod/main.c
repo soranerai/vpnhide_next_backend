@@ -19,7 +19,6 @@ struct vh_vpn_name_cache __rcu *g_vpn_name_cache = NULL;
 DEFINE_SPINLOCK(g_vpn_name_cache_lock);
 
 atomic_t global_cover_ifindex = ATOMIC_INIT(0);
-atomic_t stats_bucket_secs = ATOMIC_INIT(60);
 
 /* Hook wrapper flags */
 bool sys_setsockopt_uses_wrapper = false;
@@ -275,30 +274,28 @@ bool is_target_uid(void) {
   return is_target_uid_val(from_kuid(&init_user_ns, current_uid()));
 }
 
-/* --- Kmod intercept statistics --- */
+/* --- Current-session cumulative intercept statistics --- */
 
-struct kmod_uid_rolling_stats {
+struct kmod_uid_stats_total {
   uid_t uid;
-  u32 ioctl_counts[BUCKETS_COUNT];   /* type 0 */
-  u32 netlink_counts[BUCKETS_COUNT]; /* type 1 */
-  u32 proc_counts[BUCKETS_COUNT];    /* type 2 */
-  u32 sockopt_counts[BUCKETS_COUNT]; /* type 3 */
-  u32 connect_counts[BUCKETS_COUNT]; /* type 4 */
-  u32 getname_counts[BUCKETS_COUNT]; /* type 5 */
-  u32 port_counts[BUCKETS_COUNT];    /* type 6 */
-  u64 bucket_times[BUCKETS_COUNT];
+  u64 ioctl_count;
+  u64 netlink_count;
+  u64 proc_count;
+  u64 sockopt_count;
+  u64 connect_count;
+  u64 getname_count;
+  u64 port_count;
 };
 
-static struct kmod_uid_rolling_stats kmod_stats[MAX_TARGET_UIDS];
+static struct kmod_uid_stats_total kmod_stats[MAX_TARGET_UIDS];
 static int kmod_stats_count = 0;
 DEFINE_SPINLOCK(kmod_stats_lock);
+static atomic64_t kmod_stats_sequence = ATOMIC64_INIT(0);
+static u64 kmod_stats_session_id;
 
 void record_kmod_intercept(uid_t uid, int type) {
   int i;
   unsigned long flags;
-  u32 duration = atomic_read(&stats_bucket_secs);
-  u64 now_secs = ktime_get_real_seconds();
-  int idx = (int)((now_secs / duration) % BUCKETS_COUNT);
 
   if (uid == 0 || uid == 1000)
     return;
@@ -306,30 +303,20 @@ void record_kmod_intercept(uid_t uid, int type) {
   spin_lock_irqsave(&kmod_stats_lock, flags);
   for (i = 0; i < kmod_stats_count; i++) {
     if (kmod_stats[i].uid == uid) {
-      if (kmod_stats[i].bucket_times[idx] / duration != now_secs / duration) {
-        kmod_stats[i].ioctl_counts[idx] = 0;
-        kmod_stats[i].netlink_counts[idx] = 0;
-        kmod_stats[i].proc_counts[idx] = 0;
-        kmod_stats[i].sockopt_counts[idx] = 0;
-        kmod_stats[i].connect_counts[idx] = 0;
-        kmod_stats[i].getname_counts[idx] = 0;
-        kmod_stats[i].port_counts[idx] = 0;
-        kmod_stats[i].bucket_times[idx] = now_secs;
-      }
       if (type == 0)
-        kmod_stats[i].ioctl_counts[idx]++;
+        kmod_stats[i].ioctl_count++;
       else if (type == 1)
-        kmod_stats[i].netlink_counts[idx]++;
+        kmod_stats[i].netlink_count++;
       else if (type == 2)
-        kmod_stats[i].proc_counts[idx]++;
+        kmod_stats[i].proc_count++;
       else if (type == 3)
-        kmod_stats[i].sockopt_counts[idx]++;
+        kmod_stats[i].sockopt_count++;
       else if (type == 4)
-        kmod_stats[i].connect_counts[idx]++;
+        kmod_stats[i].connect_count++;
       else if (type == 5)
-        kmod_stats[i].getname_counts[idx]++;
+        kmod_stats[i].getname_count++;
       else if (type == 6)
-        kmod_stats[i].port_counts[idx]++;
+        kmod_stats[i].port_count++;
       spin_unlock_irqrestore(&kmod_stats_lock, flags);
       return;
     }
@@ -339,21 +326,43 @@ void record_kmod_intercept(uid_t uid, int type) {
     i = kmod_stats_count++;
     memset(&kmod_stats[i], 0, sizeof(kmod_stats[i]));
     kmod_stats[i].uid = uid;
-    kmod_stats[i].bucket_times[idx] = now_secs;
     if (type == 0)
-      kmod_stats[i].ioctl_counts[idx]++;
+      kmod_stats[i].ioctl_count++;
     else if (type == 1)
-      kmod_stats[i].netlink_counts[idx]++;
+      kmod_stats[i].netlink_count++;
     else if (type == 2)
-      kmod_stats[i].proc_counts[idx]++;
+      kmod_stats[i].proc_count++;
     else if (type == 3)
-      kmod_stats[i].sockopt_counts[idx]++;
+      kmod_stats[i].sockopt_count++;
     else if (type == 4)
-      kmod_stats[i].connect_counts[idx]++;
+      kmod_stats[i].connect_count++;
     else if (type == 5)
-      kmod_stats[i].getname_counts[idx]++;
+      kmod_stats[i].getname_count++;
     else if (type == 6)
-      kmod_stats[i].port_counts[idx]++;
+      kmod_stats[i].port_count++;
+  }
+  spin_unlock_irqrestore(&kmod_stats_lock, flags);
+}
+
+static void kmod_stats_prune(const struct vpnhide_policy_payload *payload) {
+  unsigned long flags;
+  int i, j;
+
+  spin_lock_irqsave(&kmod_stats_lock, flags);
+  for (i = 0; i < kmod_stats_count;) {
+    bool keep = false;
+    for (j = 0; j < payload->targets.kmod_count; j++) {
+      if (payload->targets.kmod_uids[j] == kmod_stats[i].uid) {
+        keep = true;
+        break;
+      }
+    }
+    if (keep) {
+      i++;
+      continue;
+    }
+    kmod_stats[i] = kmod_stats[--kmod_stats_count];
+    memset(&kmod_stats[kmod_stats_count], 0, sizeof(kmod_stats[0]));
   }
   spin_unlock_irqrestore(&kmod_stats_lock, flags);
 }
@@ -410,6 +419,16 @@ int vpnhide_apply_policy(const struct vpnhide_policy_payload *payload,
   if (!snapshot)
     return -ENOMEM;
   snapshot->payload = *payload;
+  /* Port policy is authoritative and must not be disabled by a global or
+   * per-app hook mask. CONNECT/BIND are required for port enforcement. */
+  snapshot->payload.active_hooks_mask |=
+      BIT(HOOK_CONNECT) | BIT(HOOK_BIND);
+  for (i = 0; i < snapshot->payload.app_hook_masks.count; i++) {
+    if (snapshot->payload.app_hook_masks.masks[i].has_kernel_override)
+      snapshot->payload.app_hook_masks.masks[i].kernel_mask |=
+          BIT(HOOK_CONNECT) | BIT(HOOK_BIND);
+  }
+  kmod_stats_prune(&snapshot->payload);
   sort(snapshot->payload.targets.kmod_uids,
        snapshot->payload.targets.kmod_count, sizeof(uid_t),
        policy_uid_cmp, NULL);
@@ -511,7 +530,7 @@ static ssize_t vpnhide_dev_read(struct file *file, char __user *buf,
 
       offset +=
           scnprintf(reader->buf + offset, 65536 - offset,
-                    "stats_bucket_secs: %d\n", atomic_read(&stats_bucket_secs));
+                    "stats_mode: cumulative_session\n");
 
       offset += scnprintf(reader->buf + offset, 65536 - offset,
                           "debug_enabled: %d\n", vpnhide_debug_is_enabled());
@@ -828,53 +847,64 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
   }
 
   case VH_GET_STATS: {
-    struct vpnhide_kmod_stats_data *sdata;
+    struct vpnhide_stats_snapshot request;
+    struct vpnhide_uid_stats *out;
     unsigned long flags;
-    u32 duration = atomic_read(&stats_bucket_secs);
-    u64 now_secs = ktime_get_real_seconds();
-    u64 window_secs = (u64)BUCKETS_COUNT * duration;
-    int i, b, active_count = 0;
+    u32 count;
+    int i;
 
-    sdata = kvzalloc(sizeof(*sdata), GFP_KERNEL);
-    if (!sdata)
+    if (copy_from_user(&request, (void __user *)arg, sizeof(request)))
+      return -EFAULT;
+    if (request.capacity > MAX_TARGET_UIDS)
+      return -EINVAL;
+    if (request.capacity && !request.entries_ptr)
+      return -EINVAL;
+
+    out = request.capacity ? kvmalloc_array(request.capacity, sizeof(*out), GFP_KERNEL) : NULL;
+    if (request.capacity && !out)
       return -ENOMEM;
 
     spin_lock_irqsave(&kmod_stats_lock, flags);
-    for (i = 0; i < kmod_stats_count && active_count < MAX_STATS_UIDS; i++) {
-      u32 ioctl_sum = 0, netlink_sum = 0, proc_sum = 0, sockopt_sum = 0,
-          connect_sum = 0, getname_sum = 0, port_sum = 0;
-      for (b = 0; b < BUCKETS_COUNT; b++) {
-        if (now_secs - kmod_stats[i].bucket_times[b] < window_secs) {
-          ioctl_sum += kmod_stats[i].ioctl_counts[b];
-          netlink_sum += kmod_stats[i].netlink_counts[b];
-          proc_sum += kmod_stats[i].proc_counts[b];
-          sockopt_sum += kmod_stats[i].sockopt_counts[b];
-          connect_sum += kmod_stats[i].connect_counts[b];
-          getname_sum += kmod_stats[i].getname_counts[b];
-          port_sum += kmod_stats[i].port_counts[b];
-        }
-      }
-      if (ioctl_sum > 0 || netlink_sum > 0 || proc_sum > 0 || sockopt_sum > 0 ||
-          connect_sum > 0 || getname_sum > 0 || port_sum > 0) {
-        sdata->stats[active_count].uid = kmod_stats[i].uid;
-        sdata->stats[active_count].ioctl_count = ioctl_sum;
-        sdata->stats[active_count].netlink_count = netlink_sum;
-        sdata->stats[active_count].proc_count = proc_sum;
-        sdata->stats[active_count].sockopt_count = sockopt_sum;
-        sdata->stats[active_count].connect_count = connect_sum;
-        sdata->stats[active_count].getname_count = getname_sum;
-        sdata->stats[active_count].port_count = port_sum;
-        active_count++;
+    count = kmod_stats_count;
+    request.sequence = atomic64_inc_return(&kmod_stats_sequence);
+    request.monotonic_ns = ktime_get_ns();
+    request.count = count;
+    if (out && request.capacity >= count) {
+      for (i = 0; i < count; i++) {
+        out[i].uid = kmod_stats[i].uid;
+        out[i].ioctl_count = kmod_stats[i].ioctl_count;
+        out[i].netlink_count = kmod_stats[i].netlink_count;
+        out[i].proc_count = kmod_stats[i].proc_count;
+        out[i].sockopt_count = kmod_stats[i].sockopt_count;
+        out[i].connect_count = kmod_stats[i].connect_count;
+        out[i].getname_count = kmod_stats[i].getname_count;
+        out[i].port_count = kmod_stats[i].port_count;
       }
     }
-    sdata->count = active_count;
     spin_unlock_irqrestore(&kmod_stats_lock, flags);
 
-    if (copy_to_user((void __user *)arg, sdata, sizeof(*sdata))) {
-      kvfree(sdata);
+    if (request.capacity < count) {
+      if (out)
+        kvfree(out);
+      if (copy_to_user((void __user *)arg, &request, sizeof(request)))
+        return -EFAULT;
+      return -ENOSPC;
+    }
+    if (out && copy_to_user((void __user *)(unsigned long)request.entries_ptr,
+                            out, count * sizeof(*out))) {
+      kvfree(out);
       return -EFAULT;
     }
-    kvfree(sdata);
+    kvfree(out);
+    if (copy_to_user((void __user *)arg, &request, sizeof(request)))
+      return -EFAULT;
+    ret = 0;
+    break;
+  }
+  case VH_GET_STATS_SESSION: {
+    if (copy_to_user((void __user *)arg, &kmod_stats_session_id,
+                     sizeof(kmod_stats_session_id)))
+      return -EFAULT;
     ret = 0;
     break;
   }
@@ -883,26 +913,11 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
     spin_lock_irqsave(&kmod_stats_lock, flags);
     kmod_stats_count = 0;
     memset(kmod_stats, 0, sizeof(kmod_stats));
+    atomic64_set(&kmod_stats_sequence, 0);
     spin_unlock_irqrestore(&kmod_stats_lock, flags);
     ret = 0;
     break;
   }
-  case VH_SET_STATS_WINDOW: {
-    unsigned int secs;
-
-    if (copy_from_user(&secs, (void __user *)arg, sizeof(secs)))
-      return -EFAULT;
-    if (secs == 0)
-      return -EINVAL;
-
-    if (atomic_xchg(&stats_bucket_secs, secs) != secs) {
-      atomic_inc(&vpnhide_config_generation);
-      wake_up_interruptible(&vpnhide_config_wait);
-    }
-    ret = 0;
-    break;
-  }
-
   case VH_GET_JAVA_STATS: {
     mutex_lock(&java_stats_lock);
     if (copy_to_user((void __user *)arg, java_stats_buf,
@@ -1019,6 +1034,10 @@ static struct kretprobe_reg probes[] = {
 
 static int __init vpnhide_init(void) {
   int i, ret, ok = 0;
+
+  kmod_stats_session_id = get_random_u64();
+  if (!kmod_stats_session_id)
+    kmod_stats_session_id = 1;
 
   if (sys_setsockopt_krp.kp.symbol_name &&
       strcmp(sys_setsockopt_krp.kp.symbol_name, "__arm64_sys_setsockopt") ==

@@ -18,6 +18,7 @@
 #include <linux/netdevice.h>
 #include <linux/proc_fs.h>
 #include <linux/rtnetlink.h>
+#include <linux/random.h>
 #include <linux/seq_file.h>
 #include <linux/sort.h>
 #include <linux/skbuff.h>
@@ -25,6 +26,7 @@
 #include <linux/socket.h>
 #include <linux/string.h>
 #include <linux/tcp.h>
+#include <linux/timekeeping.h>
 #include <linux/uaccess.h>
 #include <linux/uidgid.h>
 #include <linux/version.h>
@@ -42,8 +44,6 @@
 #define MODNAME "vpnhide"
 
 #define VPNHIDE_KRETPROBE_MAXACTIVE 64
-#define BUCKETS_COUNT 30
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 #define vh_fd_file(f) fd_file(f)
 #else
@@ -192,7 +192,6 @@ extern spinlock_t g_vpn_name_cache_lock;
 
 extern atomic_t global_cover_ifindex;
 extern bool g_stats_pkts_first;
-extern atomic_t stats_bucket_secs;
 
 /* Hook uses wrapper flags */
 extern bool sys_setsockopt_uses_wrapper;

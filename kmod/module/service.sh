@@ -4,6 +4,7 @@
 MODDIR="$(cd "$(dirname "$0")" && pwd)"
 CTL="$MODDIR/vpnhide-ctl"
 DEV_NODE="/dev/vpnhide_ctrl"
+APP_PACKAGE="dev.soranerai.vpnhidenext"
 
 LOG_FILE="/data/adb/vpnhide_kmod/service.log"
 mkdir -p "/data/adb/vpnhide_kmod"
@@ -31,7 +32,7 @@ fi
 
 # Wait until PackageManager has actually indexed user-installed apps.
 for i in $(seq 1 60); do
-    if pm list packages -U 2>/dev/null | grep -q "^package:dev.soranerai.vpnhidenext "; then
+    if pm list packages -U 2>/dev/null | grep -q "^package:$APP_PACKAGE "; then
         break
     fi
     sleep 1
@@ -57,10 +58,10 @@ fi
 # Check for fallback migrated database and move it if the app is installed
 TEMP_DB="/data/adb/vpnhide_kmod/vpnhide_database"
 if [ -f "$TEMP_DB" ]; then
-    self_uid="$(pm list packages -U --user all 2>/dev/null | grep "^package:dev.soranerai.vpnhidenext " | awk '{print $2}' | sed 's/uid://' | tr ',' '\n' | head -n 1)"
+    self_uid="$(pm list packages -U --user all 2>/dev/null | grep "^package:$APP_PACKAGE " | awk '{print $2}' | sed 's/uid://' | tr ',' '\n' | head -n 1)"
     if [ -n "$self_uid" ]; then
         log_msg "manager app detected (UID $self_uid), promoting fallback database..."
-        find /data/user /data/user_de /data/data -maxdepth 4 -name "dev.soranerai.vpnhidenext" 2>/dev/null | while read -r p; do
+        find /data/user /data/user_de /data/data -maxdepth 4 -name "$APP_PACKAGE" 2>/dev/null | while read -r p; do
             db_dir="$p/databases"
             mkdir -p "$db_dir"
             app_db="$db_dir/vpnhide_database"
@@ -83,14 +84,14 @@ if [ -f "$TEMP_DB" ]; then
 fi
 
 # Detect JSON config file in Device Protected Storage files directory
-JSON_CONF="/data/user_de/0/dev.soranerai.vpnhidenext/files/vpnhide_config.json"
+JSON_CONF="/data/user_de/0/$APP_PACKAGE/files/vpnhide_config.json"
 
 apply_all_rules_from_json() {
     if [ -f "$JSON_CONF" ]; then
         log_msg "applying rules from JSON..."
-        # Resolve the app itself (dev.soranerai.vpnhidenext) UID and pass it to load
+        # Resolve the app itself UID and pass it to load
         local self_uid
-        self_uid="$(pm list packages -U --user all 2>/dev/null | grep "^package:dev.soranerai.vpnhidenext " | awk '{print $2}' | sed 's/uid://' | tr ',' '\n' | head -n 1)"
+        self_uid="$(pm list packages -U --user all 2>/dev/null | grep "^package:$APP_PACKAGE " | awk '{print $2}' | sed 's/uid://' | tr ',' '\n' | head -n 1)"
         if [ -n "$self_uid" ]; then
             log_msg "applying JSON config with self UID $self_uid"
             "$CTL" load "$JSON_CONF" "$self_uid"
@@ -114,7 +115,7 @@ fi
 DAEMON="$MODDIR/vpnhide-daemon"
 chmod +x "$DAEMON"
 
-DAEMON_SELF_UID="$(pm list packages -U --user all 2>/dev/null | grep "^package:dev.soranerai.vpnhidenext " | awk '{print $2}' | sed 's/uid://' | tr ',' '\n' | head -n 1)"
+DAEMON_SELF_UID="$(pm list packages -U --user all 2>/dev/null | grep "^package:$APP_PACKAGE " | awk '{print $2}' | sed 's/uid://' | tr ',' '\n' | head -n 1)"
 
 # Start the event-driven C daemon in the background
 "$DAEMON" "$CTL" "$JSON_CONF" "$DAEMON_SELF_UID" >/data/adb/vpnhide_kmod/daemon.log 2>&1 &
