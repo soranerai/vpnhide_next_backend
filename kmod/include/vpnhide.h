@@ -154,7 +154,7 @@ struct vpnhide_app_hook_ioctl_data {
 /* Versioned, self-contained policy payload.  The payload is passed through
  * an explicit userspace pointer rather than being encoded in the ioctl
  * command size; it is larger than the 14-bit size field on some kernels. */
-#define VPNHIDE_POLICY_ABI_VERSION 1
+#define VPNHIDE_POLICY_ABI_VERSION 2
 struct vpnhide_policy_payload {
 	struct vpnhide_target_bundle targets;
 	struct vpnhide_port_ioctl_data ports;

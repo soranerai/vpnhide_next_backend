@@ -95,6 +95,7 @@ struct vpnhide_stats_snapshot {
 
 #define VH_GET_STATS _IOWR(VH_IOCTL_MAGIC, 0x0B, struct vpnhide_stats_snapshot)
 #define VH_CLEAR_STATS _IO(VH_IOCTL_MAGIC, 0x0C)
+#define VH_GET_STATS_SESSION _IOR(VH_IOCTL_MAGIC, 0x22, __u64)
 #define VH_GET_TARGETS _IOR(VH_IOCTL_MAGIC, 0x0D, struct vpnhide_ioctl_data)
 #define VH_SET_BPF_MAP_FOPS _IOW(VH_IOCTL_MAGIC, 0x0E, unsigned long)
 #define VH_SET_STATS_MAP_A _IOW(VH_IOCTL_MAGIC, 0x0F, int)
@@ -147,7 +148,10 @@ struct vpnhide_app_hook_ioctl_data {
 	struct vpnhide_app_hook_mask masks[MAX_TARGET_UIDS];
 };
 
-#define VPNHIDE_POLICY_ABI_VERSION 1
+/* Incremented when the in-memory payload layout changes.  kmod and kpatch
+ * must be rebuilt and released together; the ctl rejects an older kernel
+ * through the payload-size/ABI check instead of silently applying garbage. */
+#define VPNHIDE_POLICY_ABI_VERSION 2
 struct vpnhide_policy_payload {
 	struct vpnhide_target_bundle targets;
 	struct vpnhide_port_ioctl_data ports;
