@@ -81,6 +81,123 @@ static void sort_uids(uid_t *arr, size_t count)
 	}
 }
 
+struct app_hook_mask_vector {
+	size_t count;
+	size_t capacity;
+	struct vpnhide_app_hook_mask_v3 *items;
+};
+
+static int append_app_hook_mask(struct app_hook_mask_vector *vector,
+				const struct vpnhide_app_hook_mask_v3 *mask)
+{
+	if (vector->count == vector->capacity) {
+		size_t capacity = vector->capacity ? vector->capacity * 2 : 16;
+		void *grown;
+		if (capacity < vector->capacity ||
+		    capacity > SIZE_MAX / sizeof(*vector->items))
+			return -1;
+		grown = realloc(vector->items, capacity * sizeof(*vector->items));
+		if (!grown)
+			return -1;
+		vector->items = grown;
+		vector->capacity = capacity;
+	}
+	vector->items[vector->count++] = *mask;
+	return 0;
+}
+
+static int policy_add_size(size_t *total, size_t count, size_t element_size)
+{
+	size_t bytes;
+	if (count && element_size > SIZE_MAX / count)
+		return -1;
+	bytes = count * element_size;
+	if (*total > SIZE_MAX - bytes)
+		return -1;
+	*total += bytes;
+	return 0;
+}
+
+static int pack_policy_v3(const struct vpnhide_uid_vector *targets,
+			  const struct vpnhide_uid_vector *lsposed,
+			  const struct vpnhide_port_policy *ports,
+			  const struct app_hook_mask_vector *masks,
+			  const struct vpnhide_iface_ioctl_data *ifaces,
+			  unsigned int active_mask, unsigned int java_mask,
+			  int debug_enabled, void **out, uint32_t *out_size)
+{
+	struct vpnhide_policy_payload_v3 *payload;
+	struct vpnhide_port_target_v3 *port_targets;
+	struct vpnhide_port_rule_v3 *port_rules;
+	size_t total = sizeof(*payload), total_rules = 0, cursor;
+	size_t i, j;
+
+	for (i = 0; i < ports->count; i++) {
+		if (total_rules > SIZE_MAX - ports->targets[i].rule_count)
+			return -1;
+		total_rules += ports->targets[i].rule_count;
+	}
+	if (targets->count > UINT32_MAX || lsposed->count > UINT32_MAX ||
+	    ports->count > UINT32_MAX || total_rules > UINT32_MAX ||
+	    masks->count > UINT32_MAX)
+		return -1;
+	if (policy_add_size(&total, targets->count, sizeof(__u32)) ||
+	    policy_add_size(&total, lsposed->count, sizeof(__u32)) ||
+	    policy_add_size(&total, ports->count, sizeof(*port_targets)) ||
+	    policy_add_size(&total, total_rules, sizeof(*port_rules)) ||
+	    policy_add_size(&total, masks->count, sizeof(*masks->items)) ||
+	    total > UINT32_MAX || total > VPNHIDE_POLICY_MAX_BYTES)
+		return -1;
+
+	payload = calloc(1, total);
+	if (!payload)
+		return -1;
+	payload->total_size = (uint32_t)total;
+	payload->active_hooks_mask = active_mask;
+	payload->java_hooks_mask = java_mask;
+	payload->debug_enabled = !!debug_enabled;
+	payload->iface_count = (uint32_t)ifaces->count;
+	memcpy(payload->iface_prefixes, ifaces->prefixes,
+	       sizeof(payload->iface_prefixes));
+
+	cursor = sizeof(*payload);
+#define PACK_SECTION(section, source, count_value, element_size) do { \
+	payload->section.offset = (uint32_t)cursor; \
+	payload->section.count = (uint32_t)(count_value); \
+	if ((count_value) != 0) \
+		memcpy((unsigned char *)payload + cursor, (source), \
+		       (count_value) * (element_size)); \
+	cursor += (count_value) * (element_size); \
+} while (0)
+	PACK_SECTION(kmod_uids, targets->items, targets->count, sizeof(__u32));
+	PACK_SECTION(lsposed_uids, lsposed->items, lsposed->count, sizeof(__u32));
+	payload->port_targets.offset = (uint32_t)cursor;
+	payload->port_targets.count = (uint32_t)ports->count;
+	port_targets = (void *)((unsigned char *)payload + cursor);
+	cursor += ports->count * sizeof(*port_targets);
+	payload->port_rules.offset = (uint32_t)cursor;
+	payload->port_rules.count = (uint32_t)total_rules;
+	port_rules = (void *)((unsigned char *)payload + cursor);
+	cursor += total_rules * sizeof(*port_rules);
+	for (i = 0, j = 0; i < ports->count; i++) {
+		port_targets[i].uid = ports->targets[i].uid;
+		port_targets[i].first_rule = (uint32_t)j;
+		port_targets[i].rule_count = (uint32_t)ports->targets[i].rule_count;
+		port_targets[i].mode = ports->targets[i].mode;
+		for (size_t r = 0; r < ports->targets[i].rule_count; r++, j++) {
+			port_rules[j].start_port = ports->targets[i].rules[r].start_port;
+			port_rules[j].end_port = ports->targets[i].rules[r].end_port;
+			port_rules[j].protocol = ports->targets[i].rules[r].protocol;
+		}
+	}
+	PACK_SECTION(app_hook_masks, masks->items, masks->count,
+		     sizeof(*masks->items));
+#undef PACK_SECTION
+	*out = payload;
+	*out_size = (uint32_t)total;
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	int fd;
@@ -251,19 +368,15 @@ int main(int argc, char **argv)
 		JSON_Array *apps = json_object_get_array(root, "apps");
 		struct vpnhide_uid_vector targets = {0};
 		struct vpnhide_uid_vector lsposed = {0};
-		struct vpnhide_target_bundle target_bundle;
 		struct vpnhide_port_policy port_policy = {0};
-		struct vpnhide_port_ioctl_data pdata;
-		struct vpnhide_app_hook_ioctl_data app_hook_masks;
+		struct app_hook_mask_vector app_hook_masks = {0};
 		struct vpnhide_iface_ioctl_data idata;
-		struct vpnhide_policy_payload *payload;
+		void *payload = NULL;
+		uint32_t payload_size = 0;
 		struct vpnhide_policy_ioctl policy_request;
 		struct vpnhide_policy_summary policy_summary;
 		char policy_error[256];
 		int policy_ret;
-		memset(&target_bundle, 0, sizeof(target_bundle));
-		memset(&pdata, 0, sizeof(pdata));
-		memset(&app_hook_masks, 0, sizeof(app_hook_masks));
 		memset(&idata, 0, sizeof(idata));
 		memset(policy_error, 0, sizeof(policy_error));
 
@@ -275,20 +388,14 @@ int main(int argc, char **argv)
 					continue;
 
 				uid_t uid = (uid_t)json_object_get_number(app, "uid");
-				int kmod = json_object_get_boolean(app, "kmod");
-				int lsp = json_object_get_boolean(app, "lsposed");
-
-				(void)kmod;
-				(void)lsp;
-
-				if (uid != 0 &&
-				    app_hook_masks.count < MAX_TARGET_UIDS) {
+				if (uid != 0) {
 					int has_kernel = json_object_has_value(app, "kernelHookMask");
 					int has_java = json_object_has_value(app, "javaHookMask");
 
 					if (has_kernel || has_java) {
-						struct vpnhide_app_hook_mask *m =
-							&app_hook_masks.masks[app_hook_masks.count];
+						struct vpnhide_app_hook_mask_v3 mask;
+						struct vpnhide_app_hook_mask_v3 *m = &mask;
+						memset(&mask, 0, sizeof(mask));
 						unsigned int raw_kernel_mask = has_kernel ?
 							(unsigned int)json_object_get_number(app, "kernelHookMask") : 0;
 						unsigned int raw_java_mask = has_java ?
@@ -306,7 +413,13 @@ int main(int argc, char **argv)
 						m->java_mask = allowlist_mode ?
 							(have_global_config ? java_mask : 0xFFFFFFFFu) &
 							~raw_java_mask : raw_java_mask;
-						app_hook_masks.count++;
+						if (append_app_hook_mask(&app_hook_masks, &mask)) {
+							fprintf(stderr, "Out of memory while building app hook masks\n");
+							free(app_hook_masks.items);
+							json_value_free(root_value);
+							close(fd);
+							return 1;
+						}
 					}
 				}
 			}
@@ -339,45 +452,8 @@ int main(int argc, char **argv)
 			policy_summary.kmod_targets, policy_summary.lsposed_targets,
 			policy_summary.protected_packages);
 
-		if (targets.count > MAX_TARGET_UIDS ||
-		    lsposed.count > MAX_TARGET_UIDS ||
-		    port_policy.count > MAX_TARGET_UIDS) {
-			fprintf(stderr, "Policy requires variable-length ABI: kmod=%zu lsposed=%zu ports=%zu\n",
-				targets.count, lsposed.count, port_policy.count);
-			vpnhide_uid_vector_free(&targets);
-			vpnhide_uid_vector_free(&lsposed);
-			vpnhide_port_policy_free(&port_policy);
-			json_value_free(root_value);
-			close(fd);
-			return 1;
-		}
-		for (size_t i = 0; i < port_policy.count; i++) {
-			if (port_policy.targets[i].rule_count > MAX_PORT_RULES_PER_UID) {
-				fprintf(stderr, "Policy requires variable-length ABI: uid %u has %zu port rules\n",
-					(unsigned int)port_policy.targets[i].uid,
-					port_policy.targets[i].rule_count);
-				vpnhide_uid_vector_free(&targets);
-				vpnhide_uid_vector_free(&lsposed);
-				vpnhide_port_policy_free(&port_policy);
-				json_value_free(root_value);
-				close(fd);
-				return 1;
-			}
-			pdata.targets[i].uid = port_policy.targets[i].uid;
-			pdata.targets[i].mode = port_policy.targets[i].mode;
-			pdata.targets[i].rule_count = (int)port_policy.targets[i].rule_count;
-			memcpy(pdata.targets[i].rules, port_policy.targets[i].rules,
-			       port_policy.targets[i].rule_count * sizeof(pdata.targets[i].rules[0]));
-		}
-		pdata.count = (int)port_policy.count;
 		sort_uids(targets.items, targets.count);
 		sort_uids(lsposed.items, lsposed.count);
-		target_bundle.kmod_count = targets.count;
-		target_bundle.lsposed_count = lsposed.count;
-		memcpy(target_bundle.kmod_uids, targets.items,
-		       targets.count * sizeof(targets.items[0]));
-		memcpy(target_bundle.lsposed_uids, lsposed.items,
-		       lsposed.count * sizeof(lsposed.items[0]));
 
 		// 3. Interface prefixes
 		JSON_Array *prefixes = json_object_get_array(root, "ifacePrefixes");
@@ -392,30 +468,32 @@ int main(int argc, char **argv)
 				}
 			}
 		}
-		payload = calloc(1, sizeof(*payload));
-		if (!payload) {
-			perror("calloc policy payload");
+		if (pack_policy_v3(&targets, &lsposed, &port_policy,
+				   &app_hook_masks, &idata,
+				   have_global_config ? kernel_mask : 0xFFFFFFFFu,
+				   have_global_config ? java_mask : 0xFFFFFFFFu,
+				   have_global_config ? !!debug_logging : 0,
+				   &payload, &payload_size)) {
+			fprintf(stderr, "Cannot serialize variable-length policy\n");
+			free(app_hook_masks.items);
+			vpnhide_uid_vector_free(&targets);
+			vpnhide_uid_vector_free(&lsposed);
+			vpnhide_port_policy_free(&port_policy);
 			json_value_free(root_value);
 			close(fd);
 			return 1;
 		}
-		payload->targets = target_bundle;
-		payload->ports = pdata;
-		payload->iface_prefixes = idata;
-		payload->app_hook_masks = app_hook_masks;
-		payload->active_hooks_mask = have_global_config ? kernel_mask : 0xFFFFFFFFu;
-		payload->java_hooks_mask = have_global_config ? java_mask : 0xFFFFFFFFu;
-		payload->debug_enabled = have_global_config ? !!debug_logging : 0;
 
 		memset(&policy_request, 0, sizeof(policy_request));
-		policy_request.abi_version = VPNHIDE_POLICY_ABI_VERSION;
-		policy_request.payload_size = sizeof(*payload);
+		policy_request.abi_version = VPNHIDE_POLICY_ABI_VERSION_V3;
+		policy_request.payload_size = payload_size;
 		policy_request.payload_ptr = (uintptr_t)payload;
 		if (ioctl(fd, VH_SET_POLICY, &policy_request) < 0) {
 			perror("VH_SET_POLICY");
 			apply_failed = 1;
 		}
 		free(payload);
+		free(app_hook_masks.items);
 		vpnhide_uid_vector_free(&targets);
 		vpnhide_uid_vector_free(&lsposed);
 		vpnhide_port_policy_free(&port_policy);

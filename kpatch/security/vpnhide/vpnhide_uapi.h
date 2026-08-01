@@ -151,7 +151,10 @@ struct vpnhide_app_hook_ioctl_data {
 /* Incremented when the in-memory payload layout changes.  kmod and kpatch
  * must be rebuilt and released together; the ctl rejects an older kernel
  * through the payload-size/ABI check instead of silently applying garbage. */
-#define VPNHIDE_POLICY_ABI_VERSION 2
+#define VPNHIDE_POLICY_ABI_VERSION_V2 2
+#define VPNHIDE_POLICY_ABI_VERSION_V3 3
+#define VPNHIDE_POLICY_ABI_VERSION VPNHIDE_POLICY_ABI_VERSION_V2
+#define VPNHIDE_POLICY_MAX_BYTES (16U * 1024U * 1024U)
 struct vpnhide_policy_payload {
 	struct vpnhide_target_bundle targets;
 	struct vpnhide_port_ioctl_data ports;
@@ -161,6 +164,50 @@ struct vpnhide_policy_payload {
 	__u32 java_hooks_mask;
 	__u32 debug_enabled;
 	__u32 flags;
+};
+
+struct vpnhide_policy_section_v3 {
+	__u32 offset;
+	__u32 count;
+};
+
+struct vpnhide_port_rule_v3 {
+	__u16 start_port;
+	__u16 end_port;
+	__u8 protocol;
+	__u8 reserved[3];
+};
+
+struct vpnhide_port_target_v3 {
+	__u32 uid;
+	__u32 first_rule;
+	__u32 rule_count;
+	__u8 mode;
+	__u8 reserved[3];
+};
+
+struct vpnhide_app_hook_mask_v3 {
+	__u32 uid;
+	__u32 kernel_mask;
+	__u32 java_mask;
+	__u8 has_kernel_override;
+	__u8 has_java_override;
+	__u8 reserved[2];
+};
+
+struct vpnhide_policy_payload_v3 {
+	__u32 total_size;
+	__u32 flags;
+	__u32 active_hooks_mask;
+	__u32 java_hooks_mask;
+	__u32 debug_enabled;
+	__u32 iface_count;
+	char iface_prefixes[MAX_IFACE_PREFIXES][MAX_IFACE_LEN];
+	struct vpnhide_policy_section_v3 kmod_uids;
+	struct vpnhide_policy_section_v3 lsposed_uids;
+	struct vpnhide_policy_section_v3 port_targets;
+	struct vpnhide_policy_section_v3 port_rules;
+	struct vpnhide_policy_section_v3 app_hook_masks;
 };
 
 struct vpnhide_policy_ioctl {
