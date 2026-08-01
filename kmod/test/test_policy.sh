@@ -20,11 +20,17 @@ ${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror \
 
 ${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror \
   -I"$REPO" "$HERE/test_policy_abi.c" -o "$ABI_OUT"
-"$ABI_OUT" >/dev/null
+KMOD_ABI="$($ABI_OUT)"
 
 ${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror \
   -I"$REPO/.." "$REPO/../kpatch/test/test_policy_abi.c" -o "$KPATCH_ABI_OUT"
-"$KPATCH_ABI_OUT"
+KPATCH_ABI="$($KPATCH_ABI_OUT)"
+if [ "$KMOD_ABI" != "$KPATCH_ABI" ]; then
+	echo "kmod/kpatch ABI fingerprint mismatch" >&2
+	echo "kmod:   $KMOD_ABI" >&2
+	echo "kpatch: $KPATCH_ABI" >&2
+	exit 1
+fi
 
 ${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror \
   -I"$REPO" "$HERE/test_policy_pack.c" "$REPO/vpnhide_policy.c" \
