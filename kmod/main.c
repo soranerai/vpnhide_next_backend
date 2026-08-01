@@ -291,6 +291,7 @@ static struct kmod_uid_stats_total kmod_stats[MAX_TARGET_UIDS];
 static int kmod_stats_count = 0;
 DEFINE_SPINLOCK(kmod_stats_lock);
 static atomic64_t kmod_stats_sequence = ATOMIC64_INIT(0);
+static u64 kmod_stats_session_id;
 
 void record_kmod_intercept(uid_t uid, int type) {
   int i;
@@ -900,6 +901,13 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
     ret = 0;
     break;
   }
+  case VH_GET_STATS_SESSION: {
+    if (copy_to_user((void __user *)arg, &kmod_stats_session_id,
+                     sizeof(kmod_stats_session_id)))
+      return -EFAULT;
+    ret = 0;
+    break;
+  }
   case VH_CLEAR_STATS: {
     unsigned long flags;
     spin_lock_irqsave(&kmod_stats_lock, flags);
@@ -1026,6 +1034,10 @@ static struct kretprobe_reg probes[] = {
 
 static int __init vpnhide_init(void) {
   int i, ret, ok = 0;
+
+  kmod_stats_session_id = get_random_u64();
+  if (!kmod_stats_session_id)
+    kmod_stats_session_id = 1;
 
   if (sys_setsockopt_krp.kp.symbol_name &&
       strcmp(sys_setsockopt_krp.kp.symbol_name, "__arm64_sys_setsockopt") ==

@@ -18,6 +18,7 @@
 #include <linux/netdevice.h>
 #include <linux/proc_fs.h>
 #include <linux/rtnetlink.h>
+#include <linux/random.h>
 #include <linux/seq_file.h>
 #include <linux/sort.h>
 #include <linux/skbuff.h>

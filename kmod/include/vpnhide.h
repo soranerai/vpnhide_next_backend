@@ -98,6 +98,7 @@ struct vpnhide_stats_snapshot {
 
 #define VH_GET_STATS _IOWR(VH_IOCTL_MAGIC, 0x0B, struct vpnhide_stats_snapshot)
 #define VH_CLEAR_STATS _IO(VH_IOCTL_MAGIC, 0x0C)
+#define VH_GET_STATS_SESSION _IOR(VH_IOCTL_MAGIC, 0x22, __u64)
 #define VH_GET_TARGETS _IOR(VH_IOCTL_MAGIC, 0x0D, struct vpnhide_ioctl_data)
 #define VH_SET_BPF_MAP_FOPS _IOW(VH_IOCTL_MAGIC, 0x0E, unsigned long)
 #define VH_SET_STATS_MAP_A _IOW(VH_IOCTL_MAGIC, 0x0F, int)

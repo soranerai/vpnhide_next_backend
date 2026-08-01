@@ -22,6 +22,10 @@ small, the ioctl returns `-ENOSPC` and returns the required `count`.
 It is an explicit destructive operation; reading statistics never clears
 anything.
 
+Each kernel-module load creates a new opaque session token, available through
+`VH_GET_STATS_SESSION`. The daemon combines this token with Android's boot ID
+as `sessionId` (for example, `boot-id-0123456789abcdef`).
+
 The kernel retains only counters for UIDs in the current kmod target policy.
 When the policy changes, removed UIDs are pruned so new target UIDs cannot be
 blocked by stale table entries.
@@ -39,6 +43,16 @@ The history is an in-memory ring of interval points. Recommended defaults are
 60-second points and a 24-hour retention (`1440` points). No point is written
 to disk.
 
+The bundled daemon implements this ring with the following defaults. It takes
+one baseline snapshot when it starts, then samples every 60 seconds. The first
+point is always marked `gap: true` and contains no deltas, because counters may
+include activity from before the daemon started. Later points contain only
+non-zero per-UID deltas. A kernel sequence reset (for example after
+`VH_CLEAR_STATS`) also produces a gap point and establishes a new baseline.
+
+The daemon keeps the ring in memory only. Restarting the daemon loses the ring,
+but does not clear kernel counters.
+
 Each frontend response must include:
 
 ```json
@@ -55,6 +69,32 @@ Each frontend response must include:
 }
 ```
 
+`sequence` is the kernel snapshot sequence of the newest point (or `0` when
+there is no point). `oldestTimestampMs` and `newestTimestampMs` are Unix epoch
+milliseconds. Each point has this shape:
+
+```json
+{
+  "timestampMs": 1710000000000,
+  "gap": false,
+  "uids": [
+    {
+      "uid": 12345,
+      "ioctl": 1,
+      "netlink": 2,
+      "proc": 0,
+      "sockopt": 3,
+      "connect": 0,
+      "getname": 0,
+      "port": 0
+    }
+  ]
+}
+```
+
+`uids` contains interval deltas, not cumulative kernel counters. A missing UID
+means that all seven deltas for that UID are zero for the interval.
+
 When the ring evicts old points, `dropped` is `true` and
 `droppedIntervals` is incremented. This describes history loss only; kernel
 counters remain cumulative and are not affected. A frontend clear operation
@@ -64,3 +104,25 @@ must clear its ring and reset its userspace baseline; it should not call
 If the daemon restarts, it starts a new userspace sampling segment and marks
 the first point as a gap. If the kernel session also changed, `sessionId`
 changes and the frontend must discard the previous in-memory ring.
+
+## Daemon frontend API
+
+The daemon exposes the frontend API through an abstract Unix domain stream
+socket named `vpnhide.stats.v1`. It is deliberately not a TCP/UDP port: the
+socket is local-only, does not create a network listener, and avoids exposing
+statistics to arbitrary applications. The daemon accepts a connection only
+when `SO_PEERCRED.uid` equals the manager application's UID passed by the
+module service at startup.
+
+The application sends one UTF-8 command followed by `\n` and reads one UTF-8
+JSON response until EOF:
+
+- `GET_STATS` returns the complete current response;
+- `CLEAR_HISTORY` clears only the daemon ring and userspace baseline, then
+  returns the now-empty response. It never calls `VH_CLEAR_STATS`.
+
+On Android the socket is addressed with
+`LocalSocketAddress("vpnhide.stats.v1", Namespace.ABSTRACT)`. The reference
+client is `KmodStatsClient` in the application source. A connection failure
+means that the daemon is unavailable; the frontend should show statistics as
+temporarily unavailable rather than treating it as an empty history.
