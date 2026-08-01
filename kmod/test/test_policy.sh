@@ -5,9 +5,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 OUT="/tmp/vpnhide-policy-test-$$"
 ABI_OUT="${OUT}.abi"
+KPATCH_ABI_OUT="${OUT}.kpatch-abi"
 DYNAMIC_JSON="${OUT}.dynamic.json"
 DYNAMIC_PM="${OUT}.pm.sh"
-trap 'rm -f "$OUT" "$ABI_OUT" "$DYNAMIC_JSON" "$DYNAMIC_PM"' EXIT
+trap 'rm -f "$OUT" "$ABI_OUT" "$KPATCH_ABI_OUT" "$DYNAMIC_JSON" "$DYNAMIC_PM"' EXIT
 
 PM_COMMAND="printf 'package:/system/priv-app/Settings/Settings.apk=com.android.settings uid:1000\\npackage:/data/app/manager/base.apk=dev.soranerai.vpnhidenext uid:10003\\npackage:/data/app/~~abc==/com.example.keep-def==/base.apk=com.example.keep uid:10001,110001\\npackage:/data/app/hide/base.apk=com.example.hide uid:10002\\npackage:/data/app/target/base.apk=com.example.target uid:10002\\n'"
 
@@ -19,6 +20,10 @@ ${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror \
 ${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror \
   -I"$REPO" "$HERE/test_policy_abi.c" -o "$ABI_OUT"
 "$ABI_OUT" >/dev/null
+
+${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror \
+  -I"$REPO/.." "$REPO/../kpatch/test/test_policy_abi.c" -o "$KPATCH_ABI_OUT"
+"$KPATCH_ABI_OUT"
 
 OUTPUT="$($OUT validate "$HERE/policy_allowlist.json" 10003)"
 grep -q '^mode=ALLOWLIST$' <<<"$OUTPUT"

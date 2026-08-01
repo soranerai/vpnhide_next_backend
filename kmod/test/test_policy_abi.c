@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stddef.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
 
@@ -22,6 +23,8 @@ _Static_assert(sizeof(struct vpnhide_app_hook_mask_v3) == 16,
 	       "v3 app mask must be fixed-width");
 _Static_assert(sizeof(struct vpnhide_policy_payload_v3) == 576,
 	       "v3 policy header must be fixed-width");
+_Static_assert(offsetof(struct vpnhide_policy_payload_v3, kmod_uids) == 536,
+	       "v3 section directory offset must remain stable");
 
 int main(void)
 {

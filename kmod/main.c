@@ -74,7 +74,6 @@ unsigned int vpnhide_java_hooks_mask(void)
 bool lookup_app_kernel_mask(uid_t uid, unsigned int *out) {
   struct vpnhide_policy_snapshot *snapshot;
   bool found = false;
-  int i;
 
   rcu_read_lock();
   snapshot = rcu_dereference(global_policy_snapshot);
@@ -491,6 +490,7 @@ policy_snapshot_from_v3(const struct vpnhide_policy_payload_v3 *payload,
   for (i = 0; i < snapshot->port_target_count; i++) {
     struct vpnhide_port_target_v3 *target = &snapshot->port_targets[i];
     if (target->uid == 0 || target->mode > VH_PORT_POLICY_DENY_ALL ||
+        target->reserved[0] || target->reserved[1] || target->reserved[2] ||
         target->first_rule != next_rule ||
         target->rule_count > snapshot->port_rule_count - next_rule) {
       kvfree(snapshot);
@@ -504,7 +504,8 @@ policy_snapshot_from_v3(const struct vpnhide_policy_payload_v3 *payload,
   }
   for (i = 0; i < snapshot->port_rule_count; i++) {
     const struct vpnhide_port_rule_v3 *rule = &snapshot->port_rules[i];
-    if (rule->start_port > rule->end_port || rule->protocol > VH_PROTO_BOTH) {
+    if (rule->start_port > rule->end_port || rule->protocol > VH_PROTO_BOTH ||
+        rule->reserved[0] || rule->reserved[1] || rule->reserved[2]) {
       kvfree(snapshot);
       return ERR_PTR(-EINVAL);
     }
@@ -512,7 +513,8 @@ policy_snapshot_from_v3(const struct vpnhide_policy_payload_v3 *payload,
   for (i = 0; i < snapshot->app_hook_mask_count; i++) {
     struct vpnhide_app_hook_mask_v3 *mask = &snapshot->app_hook_masks[i];
     if (!mask->uid || mask->has_kernel_override > 1 ||
-        mask->has_java_override > 1) {
+        mask->has_java_override > 1 || mask->reserved[0] ||
+        mask->reserved[1]) {
       kvfree(snapshot);
       return ERR_PTR(-EINVAL);
     }
@@ -528,6 +530,9 @@ policy_snapshot_from_v3(const struct vpnhide_policy_payload_v3 *payload,
        sizeof(*snapshot->port_targets), policy_port_target_cmp, NULL);
   sort(snapshot->app_hook_masks, snapshot->app_hook_mask_count,
        sizeof(*snapshot->app_hook_masks), policy_app_mask_cmp, NULL);
+  if ((snapshot->kmod_count && !snapshot->kmod_uids[0]) ||
+      (snapshot->lsposed_count && !snapshot->lsposed_uids[0]))
+    goto duplicate;
   for (i = 1; i < snapshot->kmod_count; i++)
     if (snapshot->kmod_uids[i - 1] == snapshot->kmod_uids[i])
       goto duplicate;
@@ -626,19 +631,21 @@ int vpnhide_apply_policy(const struct vpnhide_policy_payload *payload,
   int i, j, ret;
 
   if (!payload || payload->targets.kmod_count < 0 ||
-      payload->targets.kmod_count > MAX_TARGET_UIDS ||
+      payload->targets.kmod_count > VPNHIDE_LEGACY_TARGET_UIDS ||
       payload->targets.lsposed_count < 0 ||
-      payload->targets.lsposed_count > MAX_TARGET_UIDS ||
-      payload->ports.count < 0 || payload->ports.count > MAX_TARGET_UIDS ||
+      payload->targets.lsposed_count > VPNHIDE_LEGACY_TARGET_UIDS ||
+      payload->ports.count < 0 ||
+      payload->ports.count > VPNHIDE_LEGACY_TARGET_UIDS ||
       payload->iface_prefixes.count < 0 ||
       payload->iface_prefixes.count > MAX_IFACE_PREFIXES ||
       payload->app_hook_masks.count < 0 ||
-      payload->app_hook_masks.count > MAX_TARGET_UIDS)
+      payload->app_hook_masks.count > VPNHIDE_LEGACY_TARGET_UIDS)
     return -EINVAL;
 
   for (i = 0; i < payload->ports.count; i++) {
     const struct vpnhide_uid_port_rules *target = &payload->ports.targets[i];
-    if (target->rule_count < 0 || target->rule_count > MAX_PORT_RULES_PER_UID)
+    if (target->rule_count < 0 ||
+        target->rule_count > VPNHIDE_LEGACY_PORT_RULES_PER_UID)
       return -EINVAL;
     for (j = 0; j < target->rule_count; j++) {
       const struct vpnhide_port_rule *rule = &target->rules[j];
@@ -985,7 +992,7 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
     snapshot = rcu_dereference(global_policy_snapshot);
     if (snapshot) {
       if (cmd == VH_GET_TARGETS) {
-        if (snapshot->kmod_count > MAX_TARGET_UIDS) {
+        if (snapshot->kmod_count > VPNHIDE_LEGACY_TARGET_UIDS) {
           rcu_read_unlock();
           kfree(kdata);
           return -ENOSPC;
@@ -994,7 +1001,7 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
         memcpy(kdata->uids, snapshot->kmod_uids,
                kdata->count * sizeof(kdata->uids[0]));
       } else {
-        if (snapshot->lsposed_count > MAX_TARGET_UIDS) {
+        if (snapshot->lsposed_count > VPNHIDE_LEGACY_TARGET_UIDS) {
           rcu_read_unlock();
           kfree(kdata);
           return -ENOSPC;
@@ -1133,7 +1140,7 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
     rcu_read_lock();
     snapshot = rcu_dereference(global_policy_snapshot);
     if (snapshot) {
-      if (snapshot->app_hook_mask_count > MAX_TARGET_UIDS) {
+      if (snapshot->app_hook_mask_count > VPNHIDE_LEGACY_TARGET_UIDS) {
         rcu_read_unlock();
         kvfree(adata);
         return -ENOSPC;

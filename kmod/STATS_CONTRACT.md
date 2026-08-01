@@ -14,9 +14,11 @@ does not contain kernel-side time buckets.
 - `monotonic_ns` is the snapshot timestamp from `ktime_get_ns()`.
 
 The entry array contains one `struct vpnhide_uid_stats` per UID. All seven
-counters are cumulative `u64` values for the current kernel session. A
-snapshot must be taken with capacity `MAX_TARGET_UIDS`. If the capacity is too
-small, the ioctl returns `-ENOSPC` and returns the required `count`.
+counters are cumulative `u64` values for the current kernel session. There is
+no fixed UID capacity. Userspace first calls the ioctl with capacity zero,
+allocates the returned `count`, and retries. If the target set grows between
+calls, the ioctl returns `-ENOSPC` with the new required count and the caller
+retries again.
 
 `VH_CLEAR_STATS` clears all kernel counters and resets the snapshot sequence.
 It is an explicit destructive operation; reading statistics never clears

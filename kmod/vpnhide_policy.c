@@ -696,6 +696,10 @@ int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
 				continue;
 			if (configured_package_is_protected(app, packages, package_count))
 				continue;
+			for (size_t existing = 0; existing < result->count; existing++) {
+				if (result->targets[existing].uid == uid)
+					goto next_blacklist_package;
+			}
 			ret = grow_array((void **)&result->targets, &result->capacity,
 					 result->count, sizeof(*result->targets));
 			if (ret) {
@@ -719,6 +723,8 @@ int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
 				return ret;
 			target->mode = VH_PORT_POLICY_RULES;
 			result->count++;
+	next_blacklist_package:
+			;
 		}
 		free(packages);
 		summary->port_targets = result->count;

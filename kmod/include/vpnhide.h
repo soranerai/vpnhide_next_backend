@@ -6,8 +6,8 @@
 #define VPNHIDE_VERSION_CODE 20202
 
 
-#define MAX_TARGET_UIDS 512
-#define MAX_PORT_RULES_PER_UID 16
+#define VPNHIDE_LEGACY_TARGET_UIDS 512
+#define VPNHIDE_LEGACY_PORT_RULES_PER_UID 16
 
 /* Protocol types for port hiding */
 #define VH_PROTO_TCP 0
@@ -30,26 +30,26 @@ struct vpnhide_uid_port_rules {
 	uid_t uid;
 	int rule_count;
 	unsigned char mode; /* VH_PORT_POLICY_* */
-	struct vpnhide_port_rule rules[MAX_PORT_RULES_PER_UID];
+	struct vpnhide_port_rule rules[VPNHIDE_LEGACY_PORT_RULES_PER_UID];
 };
 
 struct vpnhide_port_ioctl_data {
 	int count; /* Number of UIDs in targets array */
-	struct vpnhide_uid_port_rules targets[MAX_TARGET_UIDS];
+	struct vpnhide_uid_port_rules targets[VPNHIDE_LEGACY_TARGET_UIDS];
 };
 
 struct vpnhide_ioctl_data {
 	int count;
-	uid_t uids[MAX_TARGET_UIDS];
+	uid_t uids[VPNHIDE_LEGACY_TARGET_UIDS];
 };
 
 /* Replace the two interface-hiding UID snapshots through one control call;
  * the kernel allocates both new snapshots before publishing them. */
 struct vpnhide_target_bundle {
 	int kmod_count;
-	uid_t kmod_uids[MAX_TARGET_UIDS];
+	uid_t kmod_uids[VPNHIDE_LEGACY_TARGET_UIDS];
 	int lsposed_count;
-	uid_t lsposed_uids[MAX_TARGET_UIDS];
+	uid_t lsposed_uids[VPNHIDE_LEGACY_TARGET_UIDS];
 };
 
 #define VH_IOCTL_MAGIC 0x56
@@ -148,7 +148,7 @@ struct vpnhide_app_hook_mask {
 
 struct vpnhide_app_hook_ioctl_data {
 	int count;
-	struct vpnhide_app_hook_mask masks[MAX_TARGET_UIDS];
+	struct vpnhide_app_hook_mask masks[VPNHIDE_LEGACY_TARGET_UIDS];
 };
 
 /* Versioned, self-contained policy payload.  The payload is passed through

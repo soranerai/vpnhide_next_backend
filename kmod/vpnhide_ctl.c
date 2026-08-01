@@ -91,6 +91,10 @@ struct app_hook_mask_vector {
 static int append_app_hook_mask(struct app_hook_mask_vector *vector,
 				const struct vpnhide_app_hook_mask_v3 *mask)
 {
+	for (size_t i = 0; i < vector->count; i++) {
+		if (vector->items[i].uid == mask->uid)
+			return 0;
+	}
 	if (vector->count == vector->capacity) {
 		size_t capacity = vector->capacity ? vector->capacity * 2 : 16;
 		void *grown;
