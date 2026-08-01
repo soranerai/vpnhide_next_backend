@@ -545,7 +545,7 @@ static void write_stats_json(FILE *out, const struct daemon_stats_ring *ring)
 		newest = ring->points[(ring->head + ring->count - 1) % STATS_RING_POINTS].timestamp_ms;
 	}
 	fprintf(out, "{\"sessionId\":\"%s\"", ring->session_id[0] ? ring->session_id : "unknown");
-	fprintf(out, "\",\"sequence\":%llu,\"resolutionSec\":%d,\"retentionSec\":%d,\"dropped\":%s,\"droppedIntervals\":%llu,\"oldestTimestampMs\":%llu,\"newestTimestampMs\":%llu,\"points\":[",
+	fprintf(out, ",\"sequence\":%llu,\"resolutionSec\":%d,\"retentionSec\":%d,\"dropped\":%s,\"droppedIntervals\":%llu,\"oldestTimestampMs\":%llu,\"newestTimestampMs\":%llu,\"points\":[",
 		(unsigned long long)ring->latest_sequence, STATS_RESOLUTION_SEC, STATS_RETENTION_SEC,
 		ring->dropped_intervals ? "true" : "false",
 		ring->dropped_intervals, oldest, newest);
