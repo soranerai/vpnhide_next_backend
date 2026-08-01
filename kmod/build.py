@@ -47,7 +47,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from build_lib import (  # type: ignore[import-not-found]
-    get_build_version,
     make_zip,
     version_sort_key,
 )
@@ -281,9 +280,7 @@ def build_bridge(repo_root: Path, kmod_dir: Path) -> None:
     daemon_src = kmod_dir / "vpnhide-daemon-host"
 
     if not source.is_dir():
-        raise RuntimeError(
-            f"bridge source directory not found: {source}"
-        )
+        raise RuntimeError(f"bridge source directory not found: {source}")
     for binary in (ctl_src, daemon_src):
         if not binary.is_file():
             raise RuntimeError(f"bridge binary not found: {binary}")
@@ -301,7 +298,8 @@ def build_bridge(repo_root: Path, kmod_dir: Path) -> None:
         kmod_prop = kmod_dir / "module" / "module.prop"
         bridge_prop = staging / "module.prop"
         version_match = re.search(
-            r"^version=v?([^\n]+)", kmod_prop.read_text(encoding="utf-8"),
+            r"^version=v?([^\n]+)",
+            kmod_prop.read_text(encoding="utf-8"),
             flags=re.MULTILINE,
         )
         if version_match:

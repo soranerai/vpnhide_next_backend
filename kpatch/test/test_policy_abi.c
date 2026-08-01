@@ -1,8 +1,8 @@
 #include <sys/ioctl.h>
 #include <sys/types.h>
 
-#include "../include/vpnhide.h"
-#include "policy_abi_fingerprint.h"
+#include "../security/vpnhide/vpnhide_uapi.h"
+#include "../../kmod/test/policy_abi_fingerprint.h"
 
 int main(void)
 {

@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
@@ -68,25 +69,10 @@ void print_usage(const char *prog)
 	fprintf(stderr, "  version format: [ctl|kmod] (default: print both ctl and running kmod version)\n");
 }
 
-static int add_uid_distinct(uid_t *arr, int *count, uid_t uid)
+static void sort_uids(uid_t *arr, size_t count)
 {
-	if (uid == 0)
-		return 0;
-	for (int i = 0; i < *count; i++) {
-		if (arr[i] == uid)
-			return 0;
-	}
-	if (*count < MAX_TARGET_UIDS) {
-		arr[(*count)++] = uid;
-		return 1;
-	}
-	return 0;
-}
-
-static void sort_uids(uid_t *arr, int count)
-{
-	for (int i = 0; i < count - 1; i++) {
-		for (int j = 0; j < count - i - 1; j++) {
+	for (size_t i = 0; i + 1 < count; i++) {
+		for (size_t j = 0; j + 1 < count - i; j++) {
 			if (arr[j] > arr[j + 1]) {
 				uid_t temp = arr[j];
 				arr[j] = arr[j + 1];
@@ -94,6 +80,127 @@ static void sort_uids(uid_t *arr, int count)
 			}
 		}
 	}
+}
+
+struct app_hook_mask_vector {
+	size_t count;
+	size_t capacity;
+	struct vpnhide_app_hook_mask_v3 *items;
+};
+
+static int append_app_hook_mask(struct app_hook_mask_vector *vector,
+				const struct vpnhide_app_hook_mask_v3 *mask)
+{
+	for (size_t i = 0; i < vector->count; i++) {
+		if (vector->items[i].uid == mask->uid)
+			return 0;
+	}
+	if (vector->count == vector->capacity) {
+		size_t capacity = vector->capacity ? vector->capacity * 2 : 16;
+		void *grown;
+		if (capacity < vector->capacity ||
+		    capacity > SIZE_MAX / sizeof(*vector->items))
+			return -1;
+		grown = realloc(vector->items, capacity * sizeof(*vector->items));
+		if (!grown)
+			return -1;
+		vector->items = grown;
+		vector->capacity = capacity;
+	}
+	vector->items[vector->count++] = *mask;
+	return 0;
+}
+
+static int policy_add_size(size_t *total, size_t count, size_t element_size)
+{
+	size_t bytes;
+	if (count && element_size > SIZE_MAX / count)
+		return -1;
+	bytes = count * element_size;
+	if (*total > SIZE_MAX - bytes)
+		return -1;
+	*total += bytes;
+	return 0;
+}
+
+static int pack_policy_v3(const struct vpnhide_uid_vector *targets,
+			  const struct vpnhide_uid_vector *lsposed,
+			  const struct vpnhide_port_policy *ports,
+			  const struct app_hook_mask_vector *masks,
+			  const struct vpnhide_iface_ioctl_data *ifaces,
+			  unsigned int active_mask, unsigned int java_mask,
+			  int debug_enabled, void **out, uint32_t *out_size)
+{
+	struct vpnhide_policy_payload_v3 *payload;
+	struct vpnhide_port_target_v3 *port_targets;
+	struct vpnhide_port_rule_v3 *port_rules;
+	size_t total = sizeof(*payload), total_rules = 0, cursor;
+	size_t i, j;
+
+	for (i = 0; i < ports->count; i++) {
+		if (total_rules > SIZE_MAX - ports->targets[i].rule_count)
+			return -1;
+		total_rules += ports->targets[i].rule_count;
+	}
+	if (targets->count > UINT32_MAX || lsposed->count > UINT32_MAX ||
+	    ports->count > UINT32_MAX || total_rules > UINT32_MAX ||
+	    masks->count > UINT32_MAX)
+		return -1;
+	if (policy_add_size(&total, targets->count, sizeof(__u32)) ||
+	    policy_add_size(&total, lsposed->count, sizeof(__u32)) ||
+	    policy_add_size(&total, ports->count, sizeof(*port_targets)) ||
+	    policy_add_size(&total, total_rules, sizeof(*port_rules)) ||
+	    policy_add_size(&total, masks->count, sizeof(*masks->items)) ||
+	    total > UINT32_MAX || total > VPNHIDE_POLICY_MAX_BYTES)
+		return -1;
+
+	payload = calloc(1, total);
+	if (!payload)
+		return -1;
+	payload->total_size = (uint32_t)total;
+	payload->active_hooks_mask = active_mask;
+	payload->java_hooks_mask = java_mask;
+	payload->debug_enabled = !!debug_enabled;
+	payload->iface_count = (uint32_t)ifaces->count;
+	memcpy(payload->iface_prefixes, ifaces->prefixes,
+	       sizeof(payload->iface_prefixes));
+
+	cursor = sizeof(*payload);
+#define PACK_SECTION(section, source, count_value, element_size) do { \
+	payload->section.offset = (uint32_t)cursor; \
+	payload->section.count = (uint32_t)(count_value); \
+	if ((count_value) != 0) \
+		memcpy((unsigned char *)payload + cursor, (source), \
+		       (count_value) * (element_size)); \
+	cursor += (count_value) * (element_size); \
+} while (0)
+	PACK_SECTION(kmod_uids, targets->items, targets->count, sizeof(__u32));
+	PACK_SECTION(lsposed_uids, lsposed->items, lsposed->count, sizeof(__u32));
+	payload->port_targets.offset = (uint32_t)cursor;
+	payload->port_targets.count = (uint32_t)ports->count;
+	port_targets = (void *)((unsigned char *)payload + cursor);
+	cursor += ports->count * sizeof(*port_targets);
+	payload->port_rules.offset = (uint32_t)cursor;
+	payload->port_rules.count = (uint32_t)total_rules;
+	port_rules = (void *)((unsigned char *)payload + cursor);
+	cursor += total_rules * sizeof(*port_rules);
+	for (i = 0, j = 0; i < ports->count; i++) {
+		port_targets[i].uid = ports->targets[i].uid;
+		port_targets[i].first_rule = (uint32_t)j;
+		port_targets[i].rule_count = (uint32_t)ports->targets[i].rule_count;
+		port_targets[i].mode = ports->targets[i].mode;
+		for (size_t r = 0; r < ports->targets[i].rule_count; r++, j++) {
+			port_rules[j].start_port = ports->targets[i].rules[r].start_port;
+			port_rules[j].end_port = ports->targets[i].rules[r].end_port;
+			port_rules[j].protocol = ports->targets[i].rules[r].protocol;
+		}
+	}
+	PACK_SECTION(app_hook_masks, masks->items, masks->count,
+		     sizeof(*masks->items));
+#undef PACK_SECTION
+	*out = payload;
+	*out_size = (uint32_t)total;
+	return 0;
 }
 
 int main(int argc, char **argv)
@@ -135,8 +242,8 @@ int main(int argc, char **argv)
 	    strcmp(argv[1], "preview") == 0) {
 		JSON_Value *root_value;
 		JSON_Object *root;
-		struct vpnhide_ioctl_data targets, lsposed;
-		struct vpnhide_port_ioctl_data ports;
+		struct vpnhide_uid_vector targets = {0}, lsposed = {0};
+		struct vpnhide_port_policy ports = {0};
 		struct vpnhide_policy_summary summary;
 		char error[256];
 		uid_t self_uid = 0;
@@ -156,9 +263,6 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		root = json_value_get_object(root_value);
-		memset(&targets, 0, sizeof(targets));
-		memset(&lsposed, 0, sizeof(lsposed));
-		memset(&ports, 0, sizeof(ports));
 		memset(error, 0, sizeof(error));
 		ret = vpnhide_resolve_targets(root, self_uid, &targets, &lsposed,
 						      &summary, error, sizeof(error));
@@ -167,6 +271,8 @@ int main(int argc, char **argv)
 				vpnhide_list_mode_name(summary.mode),
 				error[0] ? error : "unknown error");
 			json_value_free(root_value);
+			vpnhide_uid_vector_free(&targets);
+			vpnhide_uid_vector_free(&lsposed);
 			return 1;
 		}
 		ret = vpnhide_resolve_port_rules(root, self_uid, &ports, &summary,
@@ -175,6 +281,9 @@ int main(int argc, char **argv)
 			fprintf(stderr, "Port policy rejected: %s\n",
 				error[0] ? error : "unknown error");
 			json_value_free(root_value);
+			vpnhide_uid_vector_free(&targets);
+			vpnhide_uid_vector_free(&lsposed);
+			vpnhide_port_policy_free(&ports);
 			return 1;
 		}
 		printf("mode=%s\n", vpnhide_list_mode_name(summary.mode));
@@ -187,15 +296,15 @@ int main(int argc, char **argv)
 		printf("lsposed_targets=%d\n", summary.lsposed_targets);
 		printf("port_targets=%d\n", summary.port_targets);
 		if (strcmp(argv[1], "preview") == 0) {
-			for (int i = 0; i < ports.count; i++) {
-				printf("port_target[%d].uid=%u\n", i,
+			for (size_t i = 0; i < ports.count; i++) {
+				printf("port_target[%zu].uid=%u\n", i,
 				       (unsigned int)ports.targets[i].uid);
-				printf("port_target[%d].mode=%u\n", i,
+				printf("port_target[%zu].mode=%u\n", i,
 				       (unsigned int)ports.targets[i].mode);
-				for (int j = 0; j < ports.targets[i].rule_count; j++) {
+				for (size_t j = 0; j < ports.targets[i].rule_count; j++) {
 					const struct vpnhide_port_rule *rule =
 						&ports.targets[i].rules[j];
-					printf("port_target[%d].rule[%d]=%u-%u/%u\n",
+					printf("port_target[%zu].rule[%zu]=%u-%u/%u\n",
 					       i, j, (unsigned int)rule->start_port,
 					       (unsigned int)rule->end_port,
 					       (unsigned int)rule->protocol);
@@ -203,6 +312,9 @@ int main(int argc, char **argv)
 			}
 		}
 		json_value_free(root_value);
+		vpnhide_uid_vector_free(&targets);
+		vpnhide_uid_vector_free(&lsposed);
+		vpnhide_port_policy_free(&ports);
 		return 0;
 	}
 
@@ -259,22 +371,17 @@ int main(int argc, char **argv)
 
 		// 2. Resolve declarative targets into effective UID snapshots.
 		JSON_Array *apps = json_object_get_array(root, "apps");
-		struct vpnhide_ioctl_data targets;
-		struct vpnhide_ioctl_data lsposed;
-		struct vpnhide_target_bundle target_bundle;
-		struct vpnhide_port_ioctl_data pdata;
-		struct vpnhide_app_hook_ioctl_data app_hook_masks;
+		struct vpnhide_uid_vector targets = {0};
+		struct vpnhide_uid_vector lsposed = {0};
+		struct vpnhide_port_policy port_policy = {0};
+		struct app_hook_mask_vector app_hook_masks = {0};
 		struct vpnhide_iface_ioctl_data idata;
-		struct vpnhide_policy_payload *payload;
+		void *payload = NULL;
+		uint32_t payload_size = 0;
 		struct vpnhide_policy_ioctl policy_request;
 		struct vpnhide_policy_summary policy_summary;
 		char policy_error[256];
 		int policy_ret;
-		memset(&targets, 0, sizeof(targets));
-		memset(&lsposed, 0, sizeof(lsposed));
-		memset(&target_bundle, 0, sizeof(target_bundle));
-		memset(&pdata, 0, sizeof(pdata));
-		memset(&app_hook_masks, 0, sizeof(app_hook_masks));
 		memset(&idata, 0, sizeof(idata));
 		memset(policy_error, 0, sizeof(policy_error));
 
@@ -286,24 +393,14 @@ int main(int argc, char **argv)
 					continue;
 
 				uid_t uid = (uid_t)json_object_get_number(app, "uid");
-				int kmod = json_object_get_boolean(app, "kmod");
-				int lsp = json_object_get_boolean(app, "lsposed");
-
-				if (kmod && uid != 0) {
-					add_uid_distinct(targets.uids, &targets.count, uid);
-				}
-				if (lsp && uid != 0) {
-					add_uid_distinct(lsposed.uids, &lsposed.count, uid);
-				}
-
-				if (uid != 0 &&
-				    app_hook_masks.count < MAX_TARGET_UIDS) {
+				if (uid != 0) {
 					int has_kernel = json_object_has_value(app, "kernelHookMask");
 					int has_java = json_object_has_value(app, "javaHookMask");
 
 					if (has_kernel || has_java) {
-						struct vpnhide_app_hook_mask *m =
-							&app_hook_masks.masks[app_hook_masks.count];
+						struct vpnhide_app_hook_mask_v3 mask;
+						struct vpnhide_app_hook_mask_v3 *m = &mask;
+						memset(&mask, 0, sizeof(mask));
 						unsigned int raw_kernel_mask = has_kernel ?
 							(unsigned int)json_object_get_number(app, "kernelHookMask") : 0;
 						unsigned int raw_java_mask = has_java ?
@@ -321,7 +418,13 @@ int main(int argc, char **argv)
 						m->java_mask = allowlist_mode ?
 							(have_global_config ? java_mask : 0xFFFFFFFFu) &
 							~raw_java_mask : raw_java_mask;
-						app_hook_masks.count++;
+						if (append_app_hook_mask(&app_hook_masks, &mask)) {
+							fprintf(stderr, "Out of memory while building app hook masks\n");
+							free(app_hook_masks.items);
+							json_value_free(root_value);
+							close(fd);
+							return 1;
+						}
 					}
 				}
 			}
@@ -338,7 +441,7 @@ int main(int argc, char **argv)
 			close(fd);
 			return 1;
 		}
-		policy_ret = vpnhide_resolve_port_rules(root, self_uid, &pdata,
+		policy_ret = vpnhide_resolve_port_rules(root, self_uid, &port_policy,
 								&policy_summary, policy_error,
 								sizeof(policy_error));
 		if (policy_ret) {
@@ -354,14 +457,8 @@ int main(int argc, char **argv)
 			policy_summary.kmod_targets, policy_summary.lsposed_targets,
 			policy_summary.protected_packages);
 
-		sort_uids(targets.uids, targets.count);
-		sort_uids(lsposed.uids, lsposed.count);
-		target_bundle.kmod_count = targets.count;
-		target_bundle.lsposed_count = lsposed.count;
-		memcpy(target_bundle.kmod_uids, targets.uids,
-		       targets.count * sizeof(targets.uids[0]));
-		memcpy(target_bundle.lsposed_uids, lsposed.uids,
-		       lsposed.count * sizeof(lsposed.uids[0]));
+		sort_uids(targets.items, targets.count);
+		sort_uids(lsposed.items, lsposed.count);
 
 		// 3. Interface prefixes
 		JSON_Array *prefixes = json_object_get_array(root, "ifacePrefixes");
@@ -376,30 +473,35 @@ int main(int argc, char **argv)
 				}
 			}
 		}
-		payload = calloc(1, sizeof(*payload));
-		if (!payload) {
-			perror("calloc policy payload");
+		if (pack_policy_v3(&targets, &lsposed, &port_policy,
+				   &app_hook_masks, &idata,
+				   have_global_config ? kernel_mask : 0xFFFFFFFFu,
+				   have_global_config ? java_mask : 0xFFFFFFFFu,
+				   have_global_config ? !!debug_logging : 0,
+				   &payload, &payload_size)) {
+			fprintf(stderr, "Cannot serialize variable-length policy\n");
+			free(app_hook_masks.items);
+			vpnhide_uid_vector_free(&targets);
+			vpnhide_uid_vector_free(&lsposed);
+			vpnhide_port_policy_free(&port_policy);
 			json_value_free(root_value);
 			close(fd);
 			return 1;
 		}
-		payload->targets = target_bundle;
-		payload->ports = pdata;
-		payload->iface_prefixes = idata;
-		payload->app_hook_masks = app_hook_masks;
-		payload->active_hooks_mask = have_global_config ? kernel_mask : 0xFFFFFFFFu;
-		payload->java_hooks_mask = have_global_config ? java_mask : 0xFFFFFFFFu;
-		payload->debug_enabled = have_global_config ? !!debug_logging : 0;
 
 		memset(&policy_request, 0, sizeof(policy_request));
-		policy_request.abi_version = VPNHIDE_POLICY_ABI_VERSION;
-		policy_request.payload_size = sizeof(*payload);
+		policy_request.abi_version = VPNHIDE_POLICY_ABI_VERSION_V3;
+		policy_request.payload_size = payload_size;
 		policy_request.payload_ptr = (uintptr_t)payload;
 		if (ioctl(fd, VH_SET_POLICY, &policy_request) < 0) {
 			perror("VH_SET_POLICY");
 			apply_failed = 1;
 		}
 		free(payload);
+		free(app_hook_masks.items);
+		vpnhide_uid_vector_free(&targets);
+		vpnhide_uid_vector_free(&lsposed);
+		vpnhide_port_policy_free(&port_policy);
 
 		json_value_free(root_value);
 		close(fd);
@@ -516,22 +618,29 @@ int main(int argc, char **argv)
 			}
 		} else {
 			struct vpnhide_stats_snapshot request;
-			struct vpnhide_uid_stats *stats;
+			struct vpnhide_uid_stats *stats = NULL;
+			uint32_t capacity = 0;
 
-			stats = calloc(MAX_TARGET_UIDS, sizeof(*stats));
-			if (!stats) {
-				perror("calloc stats");
-				close(fd);
-				return 1;
-			}
-			memset(&request, 0, sizeof(request));
-			request.capacity = MAX_TARGET_UIDS;
-			request.entries_ptr = (uint64_t)(uintptr_t)stats;
-			if (ioctl(fd, VH_GET_STATS, &request) < 0) {
-				perror("VH_GET_STATS");
+			for (;;) {
+				memset(&request, 0, sizeof(request));
+				request.capacity = capacity;
+				request.entries_ptr = (uint64_t)(uintptr_t)stats;
+				if (ioctl(fd, VH_GET_STATS, &request) == 0)
+					break;
+				if (errno != ENOSPC || request.count <= capacity) {
+					perror("VH_GET_STATS");
+					free(stats);
+					close(fd);
+					return 1;
+				}
+				capacity = request.count;
 				free(stats);
-				close(fd);
-				return 1;
+				stats = calloc(capacity, sizeof(*stats));
+				if (!stats) {
+					perror("calloc stats");
+					close(fd);
+					return 1;
+				}
 			}
 			for (uint32_t i = 0; i < request.count; i++) {
 				printf("%u;%llu;%llu;%llu;%llu;%llu;%llu;%llu\n",

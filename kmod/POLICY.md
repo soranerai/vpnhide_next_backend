@@ -41,18 +41,20 @@ vpnhide-ctl validate /path/to/vpnhide_config.json <manager_uid>
 vpnhide-ctl preview /path/to/vpnhide_config.json <manager_uid>
 ```
 
-The current kernel ABI still limits each effective UID snapshot to
-`MAX_TARGET_UIDS` (512). Allowlist resolution fails rather than truncating a
-larger result. Removing this limit requires a staged/committed kernel UAPI and
-must be implemented consistently in kmod and kpatch.
+Policy ABI v3 stores UID sets, port targets, flattened port rules, and per-app
+hook masks in variable-length sections. There is no per-section UID limit and
+no per-UID port-rule limit. The complete transaction is bounded by
+`VPNHIDE_POLICY_MAX_BYTES` to prevent an administrative writer from consuming
+unbounded kernel memory. ABI v2 remains accepted for one compatibility window;
+its old 512 UID / 16 rule layout is treated as a legacy input format only.
 
 The `load` path resolves and validates the complete policy, builds a versioned
-`struct vpnhide_policy_payload`, and commits it with one `VH_SET_POLICY`
+variable-length policy blob, and commits it with one `VH_SET_POLICY`
 ioctl. The ioctl carries an explicit pointer and length because the complete
 payload is larger than the size field available in the encoded ioctl command.
 The kernel copies the payload, validates all counts/ranges, sorts target UIDs,
-and publishes one immutable RCU snapshot. Readers therefore observe either
-the previous generation or the complete new generation. `expected_generation`
+and publishes one exactly-sized immutable RCU snapshot. Readers therefore
+observe either the previous generation or the complete new generation. `expected_generation`
 may be used by a future controller to reject a stale commit with `-EAGAIN`.
 
 Policy writes use only `VH_SET_POLICY`, which replaces the complete immutable

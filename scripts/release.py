@@ -66,7 +66,10 @@ def update_version_header(path: Path, version_code: int) -> None:
     patch_file(
         path,
         [
-            (re.compile(r"^#define VPNHIDE_VERSION_CODE \d+$", re.M), f"#define VPNHIDE_VERSION_CODE {version_code}"),
+            (
+                re.compile(r"^#define VPNHIDE_VERSION_CODE \d+$", re.M),
+                f"#define VPNHIDE_VERSION_CODE {version_code}",
+            ),
         ],
     )
 
@@ -82,7 +85,9 @@ def module_version(path: Path) -> str:
 def main() -> int:
     console = Console()
     if len(sys.argv) not in (2, 4, 6):
-        console.print("[red]usage:[/red] release.py X.Y.Z [--kmod-version X.Y.Z] [--built-in-version X.Y.Z]")
+        console.print(
+            "[red]usage:[/red] release.py X.Y.Z [--kmod-version X.Y.Z] [--built-in-version X.Y.Z]"
+        )
         return 2
 
     version, _ = parse_version(sys.argv[1])
@@ -91,9 +96,7 @@ def main() -> int:
     if set(options) - allowed_options:
         console.print("[red]error:[/red] unknown option")
         return 2
-    console.print(
-        f"[bold]Updating native component versions for v{version}[/bold]"
-    )
+    console.print(f"[bold]Updating native component versions for v{version}[/bold]")
 
     module_prop_kmod = REPO_ROOT / "kmod/module/module.prop"
     module_prop_kpatch = REPO_ROOT / "kpatch/module/module.prop"
@@ -111,7 +114,9 @@ def main() -> int:
         kmod_version = built_in_version = version
     else:
         kmod_version = options.get("--kmod-version", module_version(module_prop_kmod))
-        built_in_version = options.get("--built-in-version", module_version(module_prop_kpatch))
+        built_in_version = options.get(
+            "--built-in-version", module_version(module_prop_kpatch)
+        )
     _, kmod_code = parse_version(kmod_version)
     _, built_in_code = parse_version(built_in_version)
 
@@ -125,7 +130,9 @@ def main() -> int:
     console.print("  [green]✓[/green] kmod/include/vpnhide.h updated successfully")
 
     update_version_header(header_kpatch, built_in_code)
-    console.print("  [green]✓[/green] kpatch/security/vpnhide/vpnhide_uapi.h updated successfully")
+    console.print(
+        "  [green]✓[/green] kpatch/security/vpnhide/vpnhide_uapi.h updated successfully"
+    )
 
     return 0
 

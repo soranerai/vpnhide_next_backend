@@ -929,57 +929,94 @@ struct udp_uid_rate {
   uid_t uid;
   u64 last_time_ns;
   u32 tokens;
+  struct hlist_node node;
 };
 
-static struct udp_uid_rate udp_rates[MAX_TARGET_UIDS];
+static DEFINE_HASHTABLE(udp_rates, 8);
 static DEFINE_SPINLOCK(udp_rates_lock);
 
 bool udp_rate_limit_exceeded(uid_t uid) {
   u64 now = ktime_get_ns();
-  int i;
+  struct udp_uid_rate *rate;
   bool limit_exceeded = false;
+  bool found = false;
   unsigned long flags;
 
   spin_lock_irqsave(&udp_rates_lock, flags);
-  for (i = 0; i < MAX_TARGET_UIDS; i++) {
-    if (udp_rates[i].uid == uid) {
-      if (now > udp_rates[i].last_time_ns) {
-        u64 elapsed = now - udp_rates[i].last_time_ns;
+  hash_for_each_possible(udp_rates, rate, node, uid) {
+    if (rate->uid == uid) {
+      if (now > rate->last_time_ns) {
+        u64 elapsed = now - rate->last_time_ns;
         u64 reg_tokens = (elapsed * 1000ULL) / TOKEN_REGEN_NS;
         if (reg_tokens > 0) {
-          udp_rates[i].tokens += (u32)reg_tokens;
-          if (udp_rates[i].tokens >= BUCKET_CAPACITY * 1000) {
-            udp_rates[i].tokens = BUCKET_CAPACITY * 1000;
-            udp_rates[i].last_time_ns = now;
+          rate->tokens += (u32)reg_tokens;
+          if (rate->tokens >= BUCKET_CAPACITY * 1000) {
+            rate->tokens = BUCKET_CAPACITY * 1000;
+            rate->last_time_ns = now;
           } else {
-            udp_rates[i].last_time_ns +=
+            rate->last_time_ns +=
                 (reg_tokens * TOKEN_REGEN_NS) / 1000ULL;
           }
         }
       }
 
-      if (udp_rates[i].tokens >= 1000) {
-        udp_rates[i].tokens -= 1000;
+      if (rate->tokens >= 1000) {
+        rate->tokens -= 1000;
         limit_exceeded = false;
       } else {
         limit_exceeded = true;
       }
+	  found = true;
       break;
     }
   }
-  if (i == MAX_TARGET_UIDS) {
-    for (i = 0; i < MAX_TARGET_UIDS; i++) {
-      if (udp_rates[i].uid == 0) {
-        udp_rates[i].uid = uid;
-        udp_rates[i].last_time_ns = now;
-        udp_rates[i].tokens = (BUCKET_CAPACITY - 1) * 1000;
-        limit_exceeded = false;
-        break;
-      }
-    }
+  if (found) {
+    spin_unlock_irqrestore(&udp_rates_lock, flags);
+    return limit_exceeded;
+  }
+  rate = kmalloc(sizeof(*rate), GFP_ATOMIC);
+  if (rate) {
+    rate->uid = uid;
+    rate->last_time_ns = now;
+    rate->tokens = (BUCKET_CAPACITY - 1) * 1000;
+    hash_add(udp_rates, &rate->node, uid);
+    limit_exceeded = false;
   }
   spin_unlock_irqrestore(&udp_rates_lock, flags);
   return limit_exceeded;
+}
+
+void vpnhide_udp_rates_prune(const struct vpnhide_policy_snapshot *snapshot) {
+  struct udp_uid_rate *rate;
+  struct hlist_node *tmp;
+  unsigned int bucket;
+  unsigned long flags;
+
+  spin_lock_irqsave(&udp_rates_lock, flags);
+  hash_for_each_safe(udp_rates, bucket, tmp, rate, node) {
+    int lo = 0, hi = snapshot ? (int)snapshot->kmod_count - 1 : -1;
+    bool keep = false;
+    while (lo <= hi) {
+      int mid = lo + ((hi - lo) >> 1);
+      if (snapshot->kmod_uids[mid] == rate->uid) {
+        keep = true;
+        break;
+      }
+      if (snapshot->kmod_uids[mid] < rate->uid)
+        lo = mid + 1;
+      else
+        hi = mid - 1;
+    }
+    if (!keep) {
+      hash_del(&rate->node);
+      kfree(rate);
+    }
+  }
+  spin_unlock_irqrestore(&udp_rates_lock, flags);
+}
+
+void vpnhide_udp_rates_destroy(void) {
+  vpnhide_udp_rates_prune(NULL);
 }
 
 /*

@@ -274,37 +274,30 @@ EXPORT_SYMBOL_GPL(vpnhide_getsockopt_post);
 static bool should_block_port(uid_t uid, __be16 port_be,
 			      unsigned char protocol)
 {
-	struct vpnhide_port_ioctl_data *pt;
 	struct vpnhide_policy_snapshot *snapshot;
+	const struct vpnhide_port_target_v3 *target;
 	u16 port = ntohs(port_be);
 	bool block = false;
-	int i, j;
+	u32 j;
 
 	rcu_read_lock();
 	snapshot = rcu_dereference(global_policy_snapshot);
-	pt = snapshot ? &snapshot->payload.ports : NULL;
-	if (!pt)
+	target = vpnhide_find_port_target(snapshot, uid);
+	if (!target)
 		goto out;
-
-	for (i = 0; i < pt->count; i++) {
-		if (pt->targets[i].uid != uid)
-			continue;
-		if (pt->targets[i].mode == VH_PORT_POLICY_UNRESTRICTED)
-			goto out;
-		if (pt->targets[i].mode == VH_PORT_POLICY_DENY_ALL) {
+	if (target->mode == VH_PORT_POLICY_UNRESTRICTED)
+		goto out;
+	if (target->mode == VH_PORT_POLICY_DENY_ALL) {
+		block = true;
+		goto out;
+	}
+	for (j = 0; j < target->rule_count; j++) {
+		const struct vpnhide_port_rule_v3 *rule =
+			&snapshot->port_rules[target->first_rule + j];
+		if (port >= rule->start_port && port <= rule->end_port &&
+		    (rule->protocol == VH_PROTO_BOTH || rule->protocol == protocol)) {
 			block = true;
 			goto out;
-		}
-		for (j = 0; j < pt->targets[i].rule_count; j++) {
-			u16 lo = pt->targets[i].rules[j].start_port;
-			u16 hi = pt->targets[i].rules[j].end_port;
-
-			if (port >= lo && port <= hi &&
-			    (pt->targets[i].rules[j].protocol == VH_PROTO_BOTH ||
-			     pt->targets[i].rules[j].protocol == protocol)) {
-				block = true;
-				goto out;
-			}
 		}
 	}
 out:
@@ -618,28 +611,56 @@ static bool vpnhide_udp_dst_is_vpn(struct sock *sk, struct msghdr *msg)
 /* UDP rate limiter — token bucket per UID                             */
 /* ------------------------------------------------------------------ */
 
-#define VH_RL_MAX_UIDS 16
-
-static struct vh_udp_uid_rate rl_table[VH_RL_MAX_UIDS];
+static DEFINE_HASHTABLE(rl_table, 8);
 static DEFINE_SPINLOCK(rl_lock);
 
 static struct vh_udp_uid_rate *rl_find_or_alloc(uid_t uid)
 {
-	int i, empty = -1;
+	struct vh_udp_uid_rate *rate;
+	hash_for_each_possible(rl_table, rate, node, uid)
+		if (rate->uid == uid)
+			return rate;
+	rate = kmalloc(sizeof(*rate), GFP_ATOMIC);
+	if (!rate)
+		return NULL;
+	rate->uid = uid;
+	rate->tokens = VH_UDP_BUCKET_MAX;
+	rate->last_regen = ktime_get();
+	hash_add(rl_table, &rate->node, uid);
+	return rate;
+}
 
-	for (i = 0; i < VH_RL_MAX_UIDS; i++) {
-		if (rl_table[i].uid == uid)
-			return &rl_table[i];
-		if (rl_table[i].uid == 0 && empty < 0)
-			empty = i;
+void vpnhide_udp_rates_prune(const struct vpnhide_policy_snapshot *snapshot)
+{
+	struct vh_udp_uid_rate *rate;
+	struct hlist_node *tmp;
+	unsigned int bucket;
+	spin_lock(&rl_lock);
+	hash_for_each_safe(rl_table, bucket, tmp, rate, node) {
+		int lo = 0, hi = snapshot ? snapshot->kmod_count - 1 : -1;
+		bool keep = false;
+		while (lo <= hi) {
+			int mid = lo + ((hi - lo) >> 1);
+			if (snapshot->kmod_uids[mid] == rate->uid) {
+				keep = true;
+				break;
+			}
+			if (snapshot->kmod_uids[mid] < rate->uid)
+				lo = mid + 1;
+			else
+				hi = mid - 1;
+		}
+		if (!keep) {
+			hash_del(&rate->node);
+			kfree(rate);
+		}
 	}
-	if (empty >= 0) {
-		rl_table[empty].uid    = uid;
-		rl_table[empty].tokens = VH_UDP_BUCKET_MAX;
-		rl_table[empty].last_regen = ktime_get();
-		return &rl_table[empty];
-	}
-	return NULL;
+	spin_unlock(&rl_lock);
+}
+
+void vpnhide_udp_rates_destroy(void)
+{
+	vpnhide_udp_rates_prune(NULL);
 }
 
 bool vpnhide_udp_sendmsg(struct sock *sk)

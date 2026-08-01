@@ -11,6 +11,7 @@
 #include <linux/in6.h>
 #include <linux/bpf.h>
 #include <linux/fs.h>
+#include <linux/hashtable.h>
 #include <linux/tcp.h>
 #include <linux/version.h>
 #include <linux/miscdevice.h>
@@ -99,8 +100,23 @@ enum vpnhide_hook_idx {
 };
 
 struct vpnhide_policy_snapshot {
-	struct vpnhide_policy_payload payload;
+	u32 active_hooks_mask;
+	u32 java_hooks_mask;
+	u32 debug_enabled;
+	u32 flags;
+	struct vpnhide_iface_ioctl_data iface_prefixes;
+	u32 kmod_count;
+	u32 lsposed_count;
+	u32 port_target_count;
+	u32 port_rule_count;
+	u32 app_hook_mask_count;
+	uid_t *kmod_uids;
+	uid_t *lsposed_uids;
+	struct vpnhide_port_target_v3 *port_targets;
+	struct vpnhide_port_rule_v3 *port_rules;
+	struct vpnhide_app_hook_mask_v3 *app_hook_masks;
 	struct rcu_head rcu;
+	u8 data[];
 };
 
 struct vpnhide_spoof_ip_rcu {
@@ -143,6 +159,7 @@ struct vh_udp_uid_rate {
 	uid_t    uid;
 	int      tokens;
 	ktime_t  last_regen;
+	struct hlist_node node;
 };
 
 /* ------------------------------------------------------------------ */
@@ -184,12 +201,19 @@ bool is_target_uid_val(uid_t uid);
 bool is_target_uid(void);
 int vpnhide_apply_policy(const struct vpnhide_policy_payload *payload,
 			 u64 expected_generation);
+int vpnhide_apply_policy_v3(const void *payload, size_t payload_size,
+			    u64 expected_generation);
+const struct vpnhide_port_target_v3 *
+vpnhide_find_port_target(const struct vpnhide_policy_snapshot *snapshot,
+			 uid_t uid);
 void record_kmod_intercept(uid_t uid, int type);
 void get_spoof_ip(struct vpnhide_spoof_ip *dst);
 int  update_spoof_ip(const struct vpnhide_spoof_ip *sip);
 u32  fnv1a_name(const char *s, int maxlen);
 void vh_rebuild_name_cache(const struct vpnhide_vpn_ifindexes *idata);
 bool vh_is_vpn_name_cached(const char *name, size_t len);
+void vpnhide_udp_rates_prune(const struct vpnhide_policy_snapshot *snapshot);
+void vpnhide_udp_rates_destroy(void);
 
 /* ------------------------------------------------------------------ */
 /* Stats helpers (inline)                                              */
