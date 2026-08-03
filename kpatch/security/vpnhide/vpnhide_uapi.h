@@ -3,7 +3,7 @@
 
 #include <linux/types.h>
 
-#define VPNHIDE_VERSION_CODE 20202
+#define VPNHIDE_VERSION_CODE 20203
 
 #define VPNHIDE_LEGACY_TARGET_UIDS 512
 #define VPNHIDE_LEGACY_PORT_RULES_PER_UID 16
@@ -63,8 +63,13 @@ struct vpnhide_iface_ioctl_data {
 struct vpnhide_spoof_ip {
 	__be32 ipv4_addr; /* IPv4 address in network byte order */
 	__u8 ipv6_addr[16]; /* IPv6 address */
+	__u8 ipv6_linklocal_addr[16]; /* cover-interface link-local IPv6 */
 	__u8 has_ipv4;
 	__u8 has_ipv6;
+	__u8 has_ipv6_linklocal;
+	__u8 reserved;
+	__u32 ipv4_mtu; /* route MTU of the cover interface, 0 = unknown */
+	__u32 ipv6_mtu; /* route MTU of the cover interface, 0 = unknown */
 };
 
 #define VH_SET_POLICY \

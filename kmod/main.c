@@ -123,6 +123,23 @@ int update_spoof_ip(const struct vpnhide_spoof_ip *sip) {
     return -ENOMEM;
 
   new_rcu->sip = *sip;
+  new_rcu->sip.has_ipv4 = !!new_rcu->sip.has_ipv4;
+  new_rcu->sip.has_ipv6 = !!new_rcu->sip.has_ipv6;
+  new_rcu->sip.has_ipv6_linklocal = !!new_rcu->sip.has_ipv6_linklocal;
+  new_rcu->sip.reserved = 0;
+  if (!new_rcu->sip.has_ipv4 || new_rcu->sip.ipv4_mtu < 68 ||
+      new_rcu->sip.ipv4_mtu > 65535)
+    new_rcu->sip.ipv4_mtu = 0;
+  if (!new_rcu->sip.has_ipv6 || new_rcu->sip.ipv6_mtu < 1280 ||
+      new_rcu->sip.ipv6_mtu > 65535)
+    new_rcu->sip.ipv6_mtu = 0;
+  if (!new_rcu->sip.has_ipv6_linklocal ||
+      !(ipv6_addr_type((struct in6_addr *)new_rcu->sip.ipv6_linklocal_addr) &
+        IPV6_ADDR_LINKLOCAL)) {
+    new_rcu->sip.has_ipv6_linklocal = 0;
+    memset(new_rcu->sip.ipv6_linklocal_addr, 0,
+           sizeof(new_rcu->sip.ipv6_linklocal_addr));
+  }
 
   spin_lock(&spoof_ip_lock);
   old_rcu = rcu_dereference_protected(global_spoof_ip,
@@ -1035,8 +1052,9 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
       return -EFAULT;
     ret = update_spoof_ip(&sip);
     if (ret == 0) {
-      vpnhide_dbg("ioctl: updated spoof IP: IPv4=%pI4 (%d), IPv6=%pI6c (%d)\n",
-                  &sip.ipv4_addr, sip.has_ipv4, sip.ipv6_addr, sip.has_ipv6);
+      vpnhide_dbg("ioctl: updated cover data: IPv4=%pI4 (%d, mtu=%u), IPv6=%pI6c (%d, mtu=%u)\n",
+                  &sip.ipv4_addr, sip.has_ipv4, sip.ipv4_mtu,
+                  sip.ipv6_addr, sip.has_ipv6, sip.ipv6_mtu);
     }
     break;
   }
@@ -1336,14 +1354,17 @@ static struct kretprobe_reg probes[] = {
     {&sk_getsockopt_krp, "sk_getsockopt", NULL, false, 13},
     {&sock_getsockopt_krp, "sock_getsockopt", NULL, false, 13},
     {&sock_common_getsockopt_krp, "sock_common_getsockopt", NULL, false, 13},
+    {&ip_cmsg_recv_krp, "ip_cmsg_recv_offset", NULL, false, -1},
+    {&ip6_cmsg_recv_krp, "ip6_datagram_recv_common_ctl", NULL, false, -1},
+    {&ip6_cmsg_recv_fallback_krp, "ip6_datagram_recv_ctl", NULL, false, 17},
     {&socket_connect_krp, "__arm64_sys_connect", NULL, false, -1},
     {&socket_bind_krp, "__arm64_sys_bind", NULL, false, -1},
-    {&socket_connect_krp, "security_socket_connect", NULL, false, 17},
-    {&socket_bind_krp, "security_socket_bind", NULL, false, 18},
+    {&socket_connect_krp, "security_socket_connect", NULL, false, 19},
+    {&socket_bind_krp, "security_socket_bind", NULL, false, 20},
     {&inet6_bind_ll_krp, "inet6_bind", NULL, false, -1},
     {&sys_getsockname_krp, "__arm64_sys_getsockname", NULL, false, -1},
-    {&inet_getname_krp, "inet_getname", NULL, false, 22},
-    {&inet6_getname_krp, "inet6_getname", NULL, false, 22},
+    {&inet_getname_krp, "inet_getname", NULL, false, 25},
+    {&inet6_getname_krp, "inet6_getname", NULL, false, 25},
     {&sys_bpf_krp, "__arm64_sys_bpf", NULL, false, -1},
     {&sys_getdents64_krp, "__arm64_sys_getdents64", NULL, false, -1},
     {&dev_seq_krp, "dev_seq_show", NULL, false, -1},
@@ -1358,6 +1379,7 @@ static struct kretprobe_reg probes[] = {
     {&udpv6_sendmsg_ll_krp, "udpv6_sendmsg", NULL, false, -1},
     {&fib_trie_krp, "fib_trie_seq_show", NULL, false, -1},
     {&tc_fill_qdisc_krp, "tc_fill_qdisc", NULL, false, -1},
+    {&ipv6_route_krp, "ipv6_route_seq_show", NULL, false, -1},
 };
 
 static int __init vpnhide_init(void) {

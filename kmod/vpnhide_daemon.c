@@ -27,6 +27,7 @@
 
 #include "include/vpnhide.h"
 #include "generated/iface_lists.h"
+#include "daemon_iface.h"
 
 static bool is_interface_operstate_up(const char *ifname)
 {
@@ -57,9 +58,17 @@ static bool is_interface_operstate_up(const char *ifname)
 
 #include <time.h>
 
-static int test_interface_egress(const char *ifname, int af, char *out_ip, size_t max_len)
+static int test_interface_egress(const char *ifname, int af, char *out_ip,
+				 size_t max_len, unsigned int *out_mtu)
 {
 	int sock = socket(af, SOCK_DGRAM, 0);
+	int mtu = 0;
+	socklen_t mtu_len = sizeof(mtu);
+	int mtu_level = af == AF_INET ? IPPROTO_IP : IPPROTO_IPV6;
+	int mtu_opt = af == AF_INET ? IP_MTU : IPV6_MTU;
+
+	if (out_mtu)
+		*out_mtu = 0;
 	if (sock < 0)
 		return 0;
 
@@ -84,6 +93,9 @@ static int test_interface_egress(const char *ifname, int af, char *out_ip, size_
 		socklen_t namelen = sizeof(name);
 		if (getsockname(sock, (struct sockaddr *)&name, &namelen) == 0) {
 			inet_ntop(AF_INET, &name.sin_addr, out_ip, max_len);
+			if (out_mtu && getsockopt(sock, mtu_level, mtu_opt, &mtu,
+						   &mtu_len) == 0 && mtu > 0)
+				*out_mtu = (unsigned int)mtu;
 			close(sock);
 			return 1;
 		}
@@ -110,6 +122,9 @@ static int test_interface_egress(const char *ifname, int af, char *out_ip, size_
 				return 0;
 			}
 			inet_ntop(AF_INET6, &name.sin6_addr, out_ip, max_len);
+			if (out_mtu && getsockopt(sock, mtu_level, mtu_opt, &mtu,
+						   &mtu_len) == 0 && mtu > 0)
+				*out_mtu = (unsigned int)mtu;
 			close(sock);
 			return 1;
 		}
@@ -140,7 +155,10 @@ daemon_is_vpn_ifname(const char *name,
 	return false;
 }
 
-static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6)
+static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6,
+			    char *last_ipv6_linklocal,
+			    unsigned int *last_ipv4_mtu,
+			    unsigned int *last_ipv6_mtu)
 {
 	struct ifaddrs *ifaddr = NULL;
 	struct ifaddrs *ifa = NULL;
@@ -148,6 +166,9 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6)
 	int best_score = -1;
 	char new_ipv4[64];
 	char new_ipv6[64];
+	char new_ipv6_linklocal[64];
+	unsigned int new_ipv4_mtu = 0;
+	unsigned int new_ipv6_mtu = 0;
 	struct vpnhide_iface_ioctl_data prefixes;
 	struct vpnhide_vpn_ifindexes active_vpns;
 
@@ -158,6 +179,7 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6)
 	best_ifname[0] = '\0';
 	strcpy(new_ipv4, "none");
 	strcpy(new_ipv6, "none");
+	strcpy(new_ipv6_linklocal, "none");
 
 	if (getifaddrs(&ifaddr) == -1) {
 		return;
@@ -168,6 +190,9 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6)
 		char name[IFNAMSIZ];
 		char ipv4[64];
 		char ipv6[64];
+		char ipv6_linklocal[64];
+		unsigned int ipv4_mtu;
+		unsigned int ipv6_mtu;
 		bool has_ipv4;
 		bool has_ipv6;
 		int score;
@@ -215,6 +240,9 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6)
 			continue;
 		}
 
+		if (!vpnhide_daemon_is_cover_candidate(name))
+			continue;
+
 		if (!is_interface_operstate_up(name))
 			continue;
 
@@ -233,17 +261,30 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6)
 
 			// Test IPv4 egress route
 			char tmp_ipv4[64] = {0};
-			if (test_interface_egress(name, AF_INET, tmp_ipv4, sizeof(tmp_ipv4))) {
+			if (test_interface_egress(name, AF_INET, tmp_ipv4,
+						  sizeof(tmp_ipv4),
+						  &interfaces[idx].ipv4_mtu)) {
 				interfaces[idx].has_ipv4 = true;
 				strcpy(interfaces[idx].ipv4, tmp_ipv4);
 			}
 
 			// Test IPv6 egress route
 			char tmp_ipv6[64] = {0};
-			if (test_interface_egress(name, AF_INET6, tmp_ipv6, sizeof(tmp_ipv6))) {
+			if (test_interface_egress(name, AF_INET6, tmp_ipv6,
+						  sizeof(tmp_ipv6),
+						  &interfaces[idx].ipv6_mtu)) {
 				interfaces[idx].has_ipv6 = true;
 				strcpy(interfaces[idx].ipv6, tmp_ipv6);
 			}
+		}
+		if (idx >= 0 && ifa->ifa_addr->sa_family == AF_INET6) {
+			struct sockaddr_in6 *sin6 =
+				(struct sockaddr_in6 *)ifa->ifa_addr;
+
+			if (IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr))
+				inet_ntop(AF_INET6, &sin6->sin6_addr,
+					  interfaces[idx].ipv6_linklocal,
+					  sizeof(interfaces[idx].ipv6_linklocal));
 		}
 	}
 
@@ -283,19 +324,26 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6)
 			best_ifname[IFNAMSIZ - 1] = '\0';
 			if (info->has_ipv4) {
 				strcpy(new_ipv4, info->ipv4);
+				new_ipv4_mtu = info->ipv4_mtu;
 			} else {
 				strcpy(new_ipv4, "none");
 			}
 			if (info->has_ipv6) {
 				strcpy(new_ipv6, info->ipv6);
+				new_ipv6_mtu = info->ipv6_mtu;
 			} else {
 				strcpy(new_ipv6, "none");
 			}
+			if (info->ipv6_linklocal[0])
+				strcpy(new_ipv6_linklocal, info->ipv6_linklocal);
 		}
 	}
 
 	if (strcmp(new_ipv4, last_ipv4) != 0 ||
-	    strcmp(new_ipv6, last_ipv6) != 0) {
+	    strcmp(new_ipv6, last_ipv6) != 0 ||
+	    strcmp(new_ipv6_linklocal, last_ipv6_linklocal) != 0 ||
+	    new_ipv4_mtu != *last_ipv4_mtu ||
+	    new_ipv6_mtu != *last_ipv6_mtu) {
 		struct vpnhide_spoof_ip spoof;
 		memset(&spoof, 0, sizeof(spoof));
 
@@ -311,10 +359,19 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6)
 				spoof.has_ipv6 = 1;
 			}
 		}
+		if (strcmp(new_ipv6_linklocal, "none") != 0 &&
+		    inet_pton(AF_INET6, new_ipv6_linklocal,
+			      spoof.ipv6_linklocal_addr) == 1)
+			spoof.has_ipv6_linklocal = 1;
+		spoof.ipv4_mtu = new_ipv4_mtu;
+		spoof.ipv6_mtu = new_ipv6_mtu;
 
 		if (ioctl(fd, VH_SET_SPOOF_IP, &spoof) == 0) {
 			strcpy(last_ipv4, new_ipv4);
 			strcpy(last_ipv6, new_ipv6);
+			strcpy(last_ipv6_linklocal, new_ipv6_linklocal);
+			*last_ipv4_mtu = new_ipv4_mtu;
+			*last_ipv6_mtu = new_ipv6_mtu;
 		}
 	}
 
@@ -729,12 +786,16 @@ int main(int argc, char **argv)
 	struct sockaddr_nl sa;
 	char last_ipv4[64];
 	char last_ipv6[64];
+	char last_ipv6_linklocal[64];
+	unsigned int last_ipv4_mtu = UINT_MAX;
+	unsigned int last_ipv6_mtu = UINT_MAX;
 
 	setbuf(stdout, NULL);
 	setbuf(stderr, NULL);
 
 	strcpy(last_ipv4, "none");
 	strcpy(last_ipv6, "none");
+	strcpy(last_ipv6_linklocal, "none");
 
 	fd = open("/dev/vpnhide_ctrl", O_RDWR);
 	if (fd < 0) {
@@ -790,7 +851,8 @@ int main(int argc, char **argv)
 			strerror(errno));
 
 	// Initial update
-	update_spoof_ip(fd, last_ipv4, last_ipv6);
+	update_spoof_ip(fd, last_ipv4, last_ipv6, last_ipv6_linklocal,
+			&last_ipv4_mtu, &last_ipv6_mtu);
 	struct daemon_stats_ring stats_ring;
 	memset(&stats_ring, 0, sizeof(stats_ring));
 	initialize_session_id(fd, &stats_ring);
@@ -908,7 +970,9 @@ int main(int argc, char **argv)
 		}
 
 		if (trigger_update) {
-			update_spoof_ip(fd, last_ipv4, last_ipv6);
+			update_spoof_ip(fd, last_ipv4, last_ipv6,
+					last_ipv6_linklocal,
+					&last_ipv4_mtu, &last_ipv6_mtu);
 
 			if (netlink_event) {
 				// Netlink event occurred, schedule follow-ups

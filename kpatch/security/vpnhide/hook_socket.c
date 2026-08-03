@@ -163,6 +163,7 @@ void vpnhide_getsockopt_post(struct socket *sock, int level, int optname,
 			     char __user *optval, int __user *optlen)
 {
 	struct sock *sk;
+	struct vpnhide_spoof_ip sip;
 	uid_t uid;
 	int len = 0;
 
@@ -179,6 +180,7 @@ void vpnhide_getsockopt_post(struct socket *sock, int level, int optname,
 		return;
 
 	sk = sock->sk;
+	get_spoof_ip(&sip);
 
 	if (level == SOL_SOCKET) {
 		switch (optname) {
@@ -205,7 +207,7 @@ void vpnhide_getsockopt_post(struct socket *sock, int level, int optname,
 	} else if (level == SOL_IP) {
 		switch (optname) {
 		case IP_MTU: {
-			int mtu = 1500;
+			int mtu = sip.ipv4_mtu ? sip.ipv4_mtu : 1500;
 
 			if (len >= (int)sizeof(mtu)) {
 				if (!copy_to_user(optval, &mtu, sizeof(mtu)))
@@ -225,7 +227,7 @@ void vpnhide_getsockopt_post(struct socket *sock, int level, int optname,
 		}
 	} else if (level == SOL_IPV6) {
 		if (optname == IPV6_MTU) {
-			int mtu = 1500;
+			int mtu = sip.ipv6_mtu ? sip.ipv6_mtu : 1500;
 
 			if (len >= (int)sizeof(mtu)) {
 				if (!copy_to_user(optval, &mtu, sizeof(mtu)))
@@ -235,7 +237,11 @@ void vpnhide_getsockopt_post(struct socket *sock, int level, int optname,
 	} else if (level == SOL_TCP) {
 		switch (optname) {
 		case TCP_MAXSEG: {
-			int mss = 1460;
+			int mtu = sk->sk_family == AF_INET6
+					? (sip.ipv6_mtu ? sip.ipv6_mtu : 1500)
+					: (sip.ipv4_mtu ? sip.ipv4_mtu : 1500);
+			int header_len = sk->sk_family == AF_INET6 ? 60 : 40;
+			int mss = mtu > header_len ? mtu - header_len : 1460;
 
 			if (len >= (int)sizeof(mss)) {
 				if (!copy_to_user(optval, &mss, sizeof(mss)))
@@ -255,8 +261,16 @@ void vpnhide_getsockopt_post(struct socket *sock, int level, int optname,
 			if (copy_from_user(&info, optval,
 					   min_t(int, len, (int)sizeof(info))))
 				break;
-			info.tcpi_snd_mss = 1460;
-			info.tcpi_rcv_mss = 1460;
+			{
+				int mtu = sk->sk_family == AF_INET6
+						? (sip.ipv6_mtu ? sip.ipv6_mtu : 1500)
+						: (sip.ipv4_mtu ? sip.ipv4_mtu : 1500);
+				int header_len = sk->sk_family == AF_INET6 ? 60 : 40;
+				u32 mss = mtu > header_len ? mtu - header_len : 1460;
+
+				info.tcpi_snd_mss = mss;
+				info.tcpi_rcv_mss = mss;
+			}
 			if (!copy_to_user(optval, &info,
 					  min_t(int, len, (int)sizeof(info))))
 				record_kmod_intercept(uid, HOOK_GETSOCKOPT);
@@ -266,6 +280,59 @@ void vpnhide_getsockopt_post(struct socket *sock, int level, int optname,
 	}
 }
 EXPORT_SYMBOL_GPL(vpnhide_getsockopt_post);
+
+/* ------------------------------------------------------------------ */
+/* recvmsg ancillary packet info                                      */
+/* ------------------------------------------------------------------ */
+
+void vpnhide_pktinfo4_post(struct in_pktinfo *info)
+{
+	uid_t uid;
+	int cover_ifindex;
+
+	if (!info || !is_active_vpn_ifindex(info->ipi_ifindex))
+		return;
+	uid = from_kuid(&init_user_ns, current_uid());
+	if (!is_hook_active(HOOK_GETNAME_INET, uid) || !is_target_uid_val(uid))
+		return;
+	cover_ifindex = atomic_read(&global_cover_ifindex);
+	if (cover_ifindex <= 0)
+		return;
+	info->ipi_ifindex = cover_ifindex;
+	record_kmod_intercept(uid, HOOK_GETNAME_INET);
+}
+EXPORT_SYMBOL_GPL(vpnhide_pktinfo4_post);
+
+void vpnhide_pktinfo6_post(struct in6_pktinfo *info)
+{
+	struct vpnhide_spoof_ip sip;
+	uid_t uid;
+	int cover_ifindex;
+
+	if (!info || !is_active_vpn_ifindex(info->ipi6_ifindex))
+		return;
+	uid = from_kuid(&init_user_ns, current_uid());
+	if (!is_hook_active(HOOK_GETNAME_INET6, uid) || !is_target_uid_val(uid))
+		return;
+	cover_ifindex = atomic_read(&global_cover_ifindex);
+	if (cover_ifindex <= 0)
+		return;
+	info->ipi6_ifindex = cover_ifindex;
+	/* Global cover addresses are invalid for multicast/link-local packets. */
+	if (ipv6_addr_type(&info->ipi6_addr) & IPV6_ADDR_LINKLOCAL) {
+		get_spoof_ip(&sip);
+		if (sip.has_ipv6_linklocal)
+			memcpy(&info->ipi6_addr, sip.ipv6_linklocal_addr,
+			       sizeof(info->ipi6_addr));
+	} else if (!ipv6_addr_is_multicast(&info->ipi6_addr)) {
+		get_spoof_ip(&sip);
+		if (sip.has_ipv6)
+			memcpy(&info->ipi6_addr, sip.ipv6_addr,
+			       sizeof(info->ipi6_addr));
+	}
+	record_kmod_intercept(uid, HOOK_GETNAME_INET6);
+}
+EXPORT_SYMBOL_GPL(vpnhide_pktinfo6_post);
 
 /* ------------------------------------------------------------------ */
 /* connect — block connections to loopback ports matching rules        */

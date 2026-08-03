@@ -209,12 +209,13 @@ def test_setsockopt(vpn0_idx):
         print(f"FAIL: setsockopt SO_BINDTOIFINDEX non-target: {e}")
         return False
 
-    # 2. Target check (UID 115555)
+    # 2. Target check (UID 115555). Create the socket before fork so the
+    # parent can verify that a rejected bind left kernel socket state intact.
+    s_tgt = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     pid = safe_fork()
     if pid == 0:
         try:
             os.setuid(115555)
-            s_tgt = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
                 s_tgt.setsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE, b"vpn0")
                 print(
@@ -256,6 +257,14 @@ def test_setsockopt(vpn0_idx):
     else:
         wpid, status = os.waitpid(pid, 0)
         if status != 0:
+            return False
+        bound_ifindex = struct.unpack(
+            "i", s_tgt.getsockopt(socket.SOL_SOCKET, SO_BINDTOIFINDEX, 4)
+        )[0]
+        if bound_ifindex != 0:
+            print(
+                f"FAIL: rejected SO_BINDTOIFINDEX changed socket state to {bound_ifindex}"
+            )
             return False
     return True
 
@@ -369,6 +378,67 @@ def test_getsockname():
         if status != 0:
             return False
     return True
+
+
+def test_pktinfo(vpn0_idx):
+    """IP_PKTINFO must expose the cover ifindex and preserve multicast dst."""
+    print("\n--- IP_PKTINFO ancillary-data checks ---")
+    ip_pktinfo = getattr(socket, "IP_PKTINFO", 8)
+    group = "239.255.0.1"
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    receiver.settimeout(2)
+    try:
+        receiver.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        receiver.setsockopt(socket.IPPROTO_IP, ip_pktinfo, 1)
+        receiver.bind(("", 0))
+        membership = socket.inet_aton(group) + socket.inet_aton("10.9.0.1")
+        receiver.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
+        sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
+                          socket.inet_aton("10.9.0.1"))
+        sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+        destination = (group, receiver.getsockname()[1])
+
+        def receive_info(payload):
+            sender.sendto(payload, destination)
+            data, ancillary, _, _ = receiver.recvmsg(64, 256)
+            if data != payload:
+                raise RuntimeError("unexpected multicast payload")
+            for level, kind, value in ancillary:
+                if level == socket.IPPROTO_IP and kind == ip_pktinfo:
+                    ifindex, _, dst = struct.unpack("=I4s4s", value[:12])
+                    return ifindex, socket.inet_ntoa(dst)
+            raise RuntimeError("IP_PKTINFO CMSG missing")
+
+        root_ifindex, root_dst = receive_info(b"root")
+        if root_ifindex != vpn0_idx or root_dst != group:
+            print(f"FAIL: pktinfo non-target got ifindex={root_ifindex}, dst={root_dst}")
+            return False
+
+        pid = safe_fork()
+        if pid == 0:
+            try:
+                os.setuid(115555)
+                target_ifindex, target_dst = receive_info(b"target")
+                print(f"[pktinfo] Target ifindex={target_ifindex}, dst={target_dst}")
+                if target_ifindex == vpn0_idx or target_ifindex <= 0:
+                    print("FAIL: pktinfo target leaked VPN ifindex")
+                    sys.exit(1)
+                if target_dst != group:
+                    print("FAIL: pktinfo target changed multicast destination")
+                    sys.exit(1)
+                sys.exit(0)
+            except Exception as e:
+                print(f"FAIL: pktinfo target: {e}")
+                sys.exit(1)
+        _, status = os.waitpid(pid, 0)
+        return status == 0
+    except Exception as e:
+        print(f"FAIL: pktinfo setup/non-target: {e}")
+        return False
+    finally:
+        receiver.close()
+        sender.close()
 
 
 def test_connect_port_block():
@@ -819,6 +889,12 @@ def main():
         success = False
     else:
         print("RESULT getsockname=PASS")
+
+    if not test_pktinfo(vpn0_idx):
+        print("RESULT pktinfo=FAIL")
+        success = False
+    else:
+        print("RESULT pktinfo=PASS")
 
     # Run connect port block
     if not test_connect_port_block():

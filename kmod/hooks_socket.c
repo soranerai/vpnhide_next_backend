@@ -126,7 +126,7 @@ static int sys_setsockopt_entry(struct kretprobe_instance *ri,
         return 0;
 
       if (is_active_vpn_ifindex(ifindex)) {
-        int fake_ifindex = 999999;
+        int fake_ifindex = -1;
         vpnhide_dbg("sys_setsockopt: denying SO_BINDTOIFINDEX %d with ENODEV via userspace replace\n",
                     ifindex);
         sdata->optval_ptr = optval_ptr;
@@ -149,6 +149,11 @@ static int sys_setsockopt_entry(struct kretprobe_instance *ri,
           sdata->deny_errno = ENODEV;
         } else {
           vpnhide_dbg("sys_setsockopt: copy_to_user succeeded for SO_BINDTOIFINDEX (wrote %d)\n", fake_ifindex);
+          /* sock_bindtoindex_locked() rejects negative indexes before
+           * changing sk_bound_dev_if.  Report the externally consistent
+           * ENODEV after the real handler returns EINVAL. */
+          sdata->override_ret = true;
+          sdata->deny_errno = ENODEV;
         }
       }
     } else if (optname == SO_MARK) {
@@ -272,6 +277,7 @@ struct sock_getsockopt_data {
   void __user *optval;
   int __user *optlen;
   struct net *net;
+  sa_family_t family;
 };
 
 static int sock_getsockopt_entry(struct kretprobe_instance *ri,
@@ -310,6 +316,7 @@ static int sock_getsockopt_entry(struct kretprobe_instance *ri,
   data->net = sock && sock->sk
                   ? sock_net(sock->sk)
                   : (current->nsproxy ? current->nsproxy->net_ns : &init_net);
+  data->family = sock && sock->sk ? sock->sk->sk_family : AF_UNSPEC;
 
   return 0;
 }
@@ -317,22 +324,25 @@ static int sock_getsockopt_entry(struct kretprobe_instance *ri,
 static int sock_getsockopt_ret(struct kretprobe_instance *ri,
                                struct pt_regs *regs) {
   struct sock_getsockopt_data *data = (void *)ri->data;
+  struct vpnhide_spoof_ip sip;
   int ret = regs_return_value(regs);
 
   if (ret != 0)
     return 0;
 
   record_kmod_intercept(from_kuid(&init_user_ns, current_uid()), 3);
+  get_spoof_ip(&sip);
 
   if (data->level == IPPROTO_IP && data->optname == IP_MTU) {
     int mtu = 0;
     int len = 0;
     if (get_user(len, data->optlen) == 0 && len >= sizeof(int)) {
       if (get_user(mtu, (int __user *)data->optval) == 0) {
-        if (mtu > 0 && mtu < 1500) {
-          if (put_user(1500, (int __user *)data->optval) == 0) {
-            vpnhide_dbg("sock_getsockopt_ret: spoofed IP_MTU from %d to 1500\n",
-                        mtu);
+        int cover_mtu = sip.ipv4_mtu ? sip.ipv4_mtu : 1500;
+        if (mtu > 0 && mtu != cover_mtu) {
+          if (put_user(cover_mtu, (int __user *)data->optval) == 0) {
+            vpnhide_dbg("sock_getsockopt_ret: spoofed IP_MTU from %d to %d\n",
+                        mtu, cover_mtu);
           }
         }
       }
@@ -345,9 +355,11 @@ static int sock_getsockopt_ret(struct kretprobe_instance *ri,
     int len = 0;
     if (get_user(len, data->optlen) == 0 && len >= sizeof(int)) {
       if (get_user(mtu, (int __user *)data->optval) == 0) {
-        if (mtu > 0 && mtu < 1500) {
-          if (put_user(1500, (int __user *)data->optval) == 0) {
-            vpnhide_dbg("sock_getsockopt_ret: spoofed IPV6_MTU from %d to 1500\n", mtu);
+        int cover_mtu = sip.ipv6_mtu ? sip.ipv6_mtu : 1500;
+        if (mtu > 0 && mtu != cover_mtu) {
+          if (put_user(cover_mtu, (int __user *)data->optval) == 0) {
+            vpnhide_dbg("sock_getsockopt_ret: spoofed IPV6_MTU from %d to %d\n",
+                        mtu, cover_mtu);
           }
         }
       }
@@ -390,10 +402,15 @@ static int sock_getsockopt_ret(struct kretprobe_instance *ri,
     int len = 0;
     if (get_user(len, data->optlen) == 0 && len >= sizeof(int)) {
       if (get_user(mss, (int __user *)data->optval) == 0) {
-        if (mss > 0 && mss < 1460) {
-          if (put_user(1460, (int __user *)data->optval) == 0) {
-            vpnhide_dbg("sock_getsockopt_ret: spoofed TCP_MAXSEG from %d to 1460\n",
-                        mss);
+        int mtu = data->family == AF_INET6
+                      ? (sip.ipv6_mtu ? sip.ipv6_mtu : 1500)
+                      : (sip.ipv4_mtu ? sip.ipv4_mtu : 1500);
+        int header_len = data->family == AF_INET6 ? 60 : 40;
+        int cover_mss = mtu > header_len ? mtu - header_len : 1460;
+        if (mss > 0 && mss != cover_mss) {
+          if (put_user(cover_mss, (int __user *)data->optval) == 0) {
+            vpnhide_dbg("sock_getsockopt_ret: spoofed TCP_MAXSEG from %d to %d\n",
+                        mss, cover_mss);
           }
         }
       }
@@ -417,13 +434,21 @@ static int sock_getsockopt_ret(struct kretprobe_instance *ri,
     if (copy_from_user(&ti, data->optval, sizeof(ti)))
       return 0;
 
-    if (ti.snd_mss > 0 && ti.snd_mss < 1440) {
-      ti.snd_mss = 1460;
-      changed = true;
-    }
-    if (ti.rcv_mss > 0 && ti.rcv_mss < 1440) {
-      ti.rcv_mss = 1460;
-      changed = true;
+    {
+      int mtu = data->family == AF_INET6
+                    ? (sip.ipv6_mtu ? sip.ipv6_mtu : 1500)
+                    : (sip.ipv4_mtu ? sip.ipv4_mtu : 1500);
+      int header_len = data->family == AF_INET6 ? 60 : 40;
+      u32 cover_mss = mtu > header_len ? mtu - header_len : 1460;
+
+      if (ti.snd_mss > 0 && ti.snd_mss != cover_mss) {
+        ti.snd_mss = cover_mss;
+        changed = true;
+      }
+      if (ti.rcv_mss > 0 && ti.rcv_mss != cover_mss) {
+        ti.rcv_mss = cover_mss;
+        changed = true;
+      }
     }
     if (changed) {
       if (copy_to_user(data->optval, &ti, sizeof(ti)) == 0)
@@ -493,6 +518,8 @@ struct kretprobe sock_getsockopt_krp = {
 static int sys_getsockopt_entry(struct kretprobe_instance *ri,
                                 struct pt_regs *regs) {
   struct sock_getsockopt_data *data;
+  struct socket *sock;
+  int fd, err;
   int level, optname;
   void __user *optval;
   int __user *optlen;
@@ -504,11 +531,13 @@ static int sys_getsockopt_entry(struct kretprobe_instance *ri,
     struct pt_regs *user_regs = (struct pt_regs *)regs->regs[0];
     if (!user_regs || (unsigned long)user_regs < 0xFFFF000000000000ULL)
       return 1;
+    fd = (int)user_regs->regs[0];
     level = (int)user_regs->regs[1];
     optname = (int)user_regs->regs[2];
     optval = (void __user *)user_regs->regs[3];
     optlen = (int __user *)user_regs->regs[4];
   } else {
+    fd = (int)regs->regs[0];
     level = (int)regs->regs[1];
     optname = (int)regs->regs[2];
     optval = (void __user *)regs->regs[3];
@@ -539,6 +568,13 @@ static int sys_getsockopt_entry(struct kretprobe_instance *ri,
   data->optval = optval;
   data->optlen = optlen;
   data->net = current->nsproxy ? current->nsproxy->net_ns : &init_net;
+  data->family = level == IPPROTO_IPV6 ? AF_INET6 : AF_INET;
+  sock = sockfd_lookup(fd, &err);
+  if (sock) {
+    if (sock->sk)
+      data->family = sock->sk->sk_family;
+    sockfd_put(sock);
+  }
 
   return 0;
 }
@@ -590,6 +626,7 @@ static int sk_getsockopt_entry(struct kretprobe_instance *ri,
   data->optlen = (int __user *)regs->regs[5];
   data->net = sk ? sock_net(sk)
                  : (current->nsproxy ? current->nsproxy->net_ns : &init_net);
+  data->family = sk ? sk->sk_family : AF_UNSPEC;
 
   return 0;
 }
@@ -608,6 +645,193 @@ struct kretprobe sock_common_getsockopt_krp = {
     .maxactive = VPNHIDE_KRETPROBE_MAXACTIVE,
     .data_size = sizeof(struct sock_getsockopt_data),
     .kp.symbol_name = "sock_common_getsockopt",
+};
+
+/* --- recvmsg ancillary packet-info hooks --- */
+
+struct vh_pktinfo_recv_data {
+  struct msghdr *msg;
+  void __user *control_start;
+  size_t controllen_start;
+  uid_t uid;
+  enum vpnhide_hook_idx hook;
+};
+
+struct vh_compat_cmsghdr {
+  u32 cmsg_len;
+  s32 cmsg_level;
+  s32 cmsg_type;
+};
+
+static bool vh_spoof_pktinfo4(struct in_pktinfo *info, uid_t uid,
+                              enum vpnhide_hook_idx hook) {
+  int cover_ifindex;
+
+  if (!info || !is_active_vpn_ifindex(info->ipi_ifindex))
+    return false;
+  if (!is_hook_active(hook, uid) || !is_target_uid_val(uid))
+    return false;
+  cover_ifindex = atomic_read(&global_cover_ifindex);
+  if (cover_ifindex <= 0)
+    return false;
+  info->ipi_ifindex = cover_ifindex;
+  return true;
+}
+
+static bool vh_spoof_pktinfo6(struct in6_pktinfo *info, uid_t uid,
+                              enum vpnhide_hook_idx hook) {
+  struct vpnhide_spoof_ip sip;
+  int cover_ifindex;
+
+  if (!info || !is_active_vpn_ifindex(info->ipi6_ifindex))
+    return false;
+  if (!is_hook_active(hook, uid) || !is_target_uid_val(uid))
+    return false;
+  cover_ifindex = atomic_read(&global_cover_ifindex);
+  if (cover_ifindex <= 0)
+    return false;
+  info->ipi6_ifindex = cover_ifindex;
+  if (ipv6_addr_type(&info->ipi6_addr) & IPV6_ADDR_LINKLOCAL) {
+    get_spoof_ip(&sip);
+    if (sip.has_ipv6_linklocal)
+      memcpy(&info->ipi6_addr, sip.ipv6_linklocal_addr,
+             sizeof(info->ipi6_addr));
+  } else if (!ipv6_addr_is_multicast(&info->ipi6_addr)) {
+    get_spoof_ip(&sip);
+    if (sip.has_ipv6)
+      memcpy(&info->ipi6_addr, sip.ipv6_addr, sizeof(info->ipi6_addr));
+  }
+  return true;
+}
+
+static void vh_rewrite_pktinfo_cmsgs(struct vh_pktinfo_recv_data *data) {
+  struct msghdr *msg = data->msg;
+  char __user *cursor = data->control_start;
+  size_t used, offset = 0;
+  bool compat;
+
+  if (!msg || !cursor || !msg->msg_control_is_user ||
+      msg->msg_controllen > data->controllen_start)
+    return;
+  used = data->controllen_start - msg->msg_controllen;
+  compat = !!(msg->msg_flags & MSG_CMSG_COMPAT);
+
+  while (offset < used) {
+    size_t cmsg_len, header_len, step;
+    int level, type;
+
+    if (compat) {
+      struct vh_compat_cmsghdr header;
+
+      header_len = sizeof(header);
+      if (used - offset < header_len ||
+          copy_from_user(&header, cursor + offset, sizeof(header)))
+        break;
+      cmsg_len = header.cmsg_len;
+      level = header.cmsg_level;
+      type = header.cmsg_type;
+      step = ALIGN(cmsg_len, sizeof(s32));
+    } else {
+      struct cmsghdr header;
+
+      header_len = sizeof(header);
+      if (used - offset < header_len ||
+          copy_from_user(&header, cursor + offset, sizeof(header)))
+        break;
+      cmsg_len = header.cmsg_len;
+      level = header.cmsg_level;
+      type = header.cmsg_type;
+      step = CMSG_ALIGN(cmsg_len);
+    }
+    if (cmsg_len < header_len || cmsg_len > used - offset ||
+        step < cmsg_len)
+      break;
+
+    if (level == SOL_IP && type == IP_PKTINFO &&
+        cmsg_len - header_len >= sizeof(struct in_pktinfo)) {
+      struct in_pktinfo info;
+      void __user *payload = cursor + offset + header_len;
+
+      if (!copy_from_user(&info, payload, sizeof(info)) &&
+          vh_spoof_pktinfo4(&info, data->uid, data->hook) &&
+          !copy_to_user(payload, &info, sizeof(info)))
+        record_kmod_intercept(data->uid, 5);
+    } else if (level == SOL_IPV6 && type == IPV6_PKTINFO &&
+               cmsg_len - header_len >= sizeof(struct in6_pktinfo)) {
+      struct in6_pktinfo info;
+      void __user *payload = cursor + offset + header_len;
+
+      if (!copy_from_user(&info, payload, sizeof(info)) &&
+          vh_spoof_pktinfo6(&info, data->uid, data->hook) &&
+          !copy_to_user(payload, &info, sizeof(info)))
+        record_kmod_intercept(data->uid, 5);
+    }
+
+    if (!step || step > used - offset)
+      break;
+    offset += step;
+  }
+}
+
+static int vh_pktinfo_recv_entry(struct kretprobe_instance *ri,
+                                 struct msghdr *msg,
+                                 enum vpnhide_hook_idx hook) {
+  struct vh_pktinfo_recv_data *data;
+  uid_t uid = from_kuid(&init_user_ns, current_uid());
+
+  if (!msg || !msg->msg_control_is_user || !msg->msg_control_user ||
+      !msg->msg_controllen || !is_hook_active(hook, uid) ||
+      !is_target_uid_val(uid))
+    return 1;
+  data = (void *)ri->data;
+  data->msg = msg;
+  data->control_start = msg->msg_control_user;
+  data->controllen_start = msg->msg_controllen;
+  data->uid = uid;
+  data->hook = hook;
+  return 0;
+}
+
+static int ip_cmsg_recv_entry(struct kretprobe_instance *ri,
+                              struct pt_regs *regs) {
+  return vh_pktinfo_recv_entry(ri, (struct msghdr *)regs->regs[0],
+                               HOOK_GETNAME_INET);
+}
+
+static int ip6_cmsg_recv_entry(struct kretprobe_instance *ri,
+                               struct pt_regs *regs) {
+  return vh_pktinfo_recv_entry(ri, (struct msghdr *)regs->regs[1],
+                               HOOK_GETNAME_INET6);
+}
+
+static int vh_pktinfo_recv_ret(struct kretprobe_instance *ri,
+                               struct pt_regs *regs) {
+  vh_rewrite_pktinfo_cmsgs((void *)ri->data);
+  return 0;
+}
+
+struct kretprobe ip_cmsg_recv_krp = {
+    .entry_handler = ip_cmsg_recv_entry,
+    .handler = vh_pktinfo_recv_ret,
+    .maxactive = VPNHIDE_KRETPROBE_MAXACTIVE,
+    .data_size = sizeof(struct vh_pktinfo_recv_data),
+    .kp.symbol_name = "ip_cmsg_recv_offset",
+};
+
+struct kretprobe ip6_cmsg_recv_krp = {
+    .entry_handler = ip6_cmsg_recv_entry,
+    .handler = vh_pktinfo_recv_ret,
+    .maxactive = VPNHIDE_KRETPROBE_MAXACTIVE,
+    .data_size = sizeof(struct vh_pktinfo_recv_data),
+    .kp.symbol_name = "ip6_datagram_recv_common_ctl",
+};
+
+struct kretprobe ip6_cmsg_recv_fallback_krp = {
+    .entry_handler = ip6_cmsg_recv_entry,
+    .handler = vh_pktinfo_recv_ret,
+    .maxactive = VPNHIDE_KRETPROBE_MAXACTIVE,
+    .data_size = sizeof(struct vh_pktinfo_recv_data),
+    .kp.symbol_name = "ip6_datagram_recv_ctl",
 };
 
 /* --- Socket connect, bind, names and UDP hooks --- */

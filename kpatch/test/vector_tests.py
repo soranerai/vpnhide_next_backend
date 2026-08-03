@@ -293,6 +293,67 @@ def test_getsockname():
     return True
 
 
+def test_pktinfo(vpn0_idx):
+    """IP_PKTINFO must expose the cover ifindex and preserve multicast dst."""
+    print("\n--- IP_PKTINFO ancillary-data checks ---")
+    ip_pktinfo = getattr(socket, "IP_PKTINFO", 8)
+    group = "239.255.0.1"
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    receiver.settimeout(2)
+    try:
+        receiver.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        receiver.setsockopt(socket.IPPROTO_IP, ip_pktinfo, 1)
+        receiver.bind(("", 0))
+        membership = socket.inet_aton(group) + socket.inet_aton("10.9.0.1")
+        receiver.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
+        sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
+                          socket.inet_aton("10.9.0.1"))
+        sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+        destination = (group, receiver.getsockname()[1])
+
+        def receive_info(payload):
+            sender.sendto(payload, destination)
+            data, ancillary, _, _ = receiver.recvmsg(64, 256)
+            if data != payload:
+                raise RuntimeError("unexpected multicast payload")
+            for level, kind, value in ancillary:
+                if level == socket.IPPROTO_IP and kind == ip_pktinfo:
+                    ifindex, _, dst = struct.unpack("=I4s4s", value[:12])
+                    return ifindex, socket.inet_ntoa(dst)
+            raise RuntimeError("IP_PKTINFO CMSG missing")
+
+        root_ifindex, root_dst = receive_info(b"root")
+        if root_ifindex != vpn0_idx or root_dst != group:
+            print(f"FAIL: pktinfo non-target got ifindex={root_ifindex}, dst={root_dst}")
+            return False
+
+        pid = safe_fork()
+        if pid == 0:
+            try:
+                os.setuid(115555)
+                target_ifindex, target_dst = receive_info(b"target")
+                print(f"[pktinfo] Target ifindex={target_ifindex}, dst={target_dst}")
+                if target_ifindex == vpn0_idx or target_ifindex <= 0:
+                    print("FAIL: pktinfo target leaked VPN ifindex")
+                    sys.exit(1)
+                if target_dst != group:
+                    print("FAIL: pktinfo target changed multicast destination")
+                    sys.exit(1)
+                sys.exit(0)
+            except Exception as e:
+                print(f"FAIL: pktinfo target: {e}")
+                sys.exit(1)
+        _, status = os.waitpid(pid, 0)
+        return status == 0
+    except Exception as e:
+        print(f"FAIL: pktinfo setup/non-target: {e}")
+        return False
+    finally:
+        receiver.close()
+        sender.close()
+
+
 def test_connect_port_block():
     print("\n--- connect port block checks ---")
 
@@ -1179,6 +1240,7 @@ def main():
     run("setsockopt", test_setsockopt, vpn0_idx)
     run("getsockopt", test_getsockopt, vpn0_idx)
     run("getsockname", test_getsockname)
+    run("pktinfo", test_pktinfo, vpn0_idx)
     run("connect_port_block", test_connect_port_block)
     run("bind_port_block", test_bind_port_block)
     run("bpf_laundering", test_bpf_laundering, vpn0_idx)
