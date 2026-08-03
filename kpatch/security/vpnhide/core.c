@@ -450,6 +450,23 @@ int update_spoof_ip(const struct vpnhide_spoof_ip *sip)
 	if (!n)
 		return -ENOMEM;
 	n->sip = *sip;
+	n->sip.has_ipv4 = !!n->sip.has_ipv4;
+	n->sip.has_ipv6 = !!n->sip.has_ipv6;
+	n->sip.has_ipv6_linklocal = !!n->sip.has_ipv6_linklocal;
+	n->sip.reserved = 0;
+	if (!n->sip.has_ipv4 || n->sip.ipv4_mtu < 68 ||
+	    n->sip.ipv4_mtu > 65535)
+		n->sip.ipv4_mtu = 0;
+	if (!n->sip.has_ipv6 || n->sip.ipv6_mtu < 1280 ||
+	    n->sip.ipv6_mtu > 65535)
+		n->sip.ipv6_mtu = 0;
+	if (!n->sip.has_ipv6_linklocal ||
+	    n->sip.ipv6_linklocal_addr[0] != 0xfe ||
+	    (n->sip.ipv6_linklocal_addr[1] & 0xc0) != 0x80) {
+		n->sip.has_ipv6_linklocal = 0;
+		memset(n->sip.ipv6_linklocal_addr, 0,
+		       sizeof(n->sip.ipv6_linklocal_addr));
+	}
 
 	spin_lock(&spoof_ip_lock);
 	old = rcu_dereference_protected(global_spoof_ip,

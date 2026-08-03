@@ -15,6 +15,8 @@
 #include <linux/seq_file.h>
 #include <linux/bpf.h>
 #include <linux/socket.h>
+#include <linux/in.h>
+#include <linux/ipv6.h>
 #include <linux/fs.h>
 #include <linux/dirent.h>
 
@@ -38,6 +40,8 @@ int  vpnhide_connect_pre(struct socket *sock,
 int  vpnhide_bind_pre(struct socket *sock,
 		      struct sockaddr *addr, int addrlen);
 void vpnhide_getname_post(struct socket *sock, struct sockaddr *addr, int peer);
+void vpnhide_pktinfo4_post(struct in_pktinfo *info);
+void vpnhide_pktinfo6_post(struct in6_pktinfo *info);
 /* Wrappers matching patch_kernel.py injection names */
 void vpnhide_bind(struct socket *sock, struct sockaddr __user *umyaddr,
 		  int addrlen);
@@ -94,6 +98,8 @@ struct path;
 struct linux_dirent64;
 struct inode;
 struct filename;
+struct in_pktinfo;
+struct in6_pktinfo;
 #ifndef _LINUX_SOCKPTR_H
 typedef struct { const void *user; bool is_kernel; } sockptr_t;
 #endif
@@ -111,6 +117,8 @@ static inline int vpnhide_bind_pre(struct socket *sock,
 	struct sockaddr *a, int l) { return 0; }
 static inline void vpnhide_getname_post(struct socket *sock,
 	struct sockaddr *a, int p) {}
+static inline void vpnhide_pktinfo4_post(struct in_pktinfo *i) {}
+static inline void vpnhide_pktinfo6_post(struct in6_pktinfo *i) {}
 static inline void vpnhide_bind(struct socket *sock,
 	struct sockaddr __user *u, int l) {}
 static inline bool vpnhide_connect(struct socket *sock,

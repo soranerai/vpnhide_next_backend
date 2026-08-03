@@ -131,6 +131,11 @@ if [ -f "$SOCKET_C" ]; then
         || die "socket hook injection failed for $SOCKET_C"
 fi
 
-log "Done. Applied $PATCH_COUNT patches for $VERSION."
+# Rewrite packet-info immediately before put_cmsg(). This keeps the ancillary
+# layout unchanged and covers recvmsg, recvmmsg, compat and io_uring paths.
+log "Applying ancillary packet-info hooks..."
+"$SCRIPT_DIR/fix_cmsg_hooks.py" "$KERNEL_DIR" \
+	|| die "ancillary packet-info hook injection failed"
 
+log "Done. Applied $PATCH_COUNT patches for $VERSION."
 
