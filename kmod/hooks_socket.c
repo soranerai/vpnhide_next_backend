@@ -946,7 +946,8 @@ static int socket_connect_entry(struct kretprobe_instance *ri,
       unsigned char proto =
           (sock->sk->sk_type == SOCK_STREAM) ? VH_PROTO_TCP : VH_PROTO_UDP;
 
-      if (should_block_port(snapshot, urules, port, proto)) {
+      if (should_block_port(snapshot, urules, port, proto) &&
+          !vpnhide_uid_owns_port(uid, port, proto)) {
         data->should_block = true;
         if (sys_connect_uses_wrapper) {
           struct pt_regs *user_regs = (struct pt_regs *)regs->regs[0];
@@ -978,7 +979,8 @@ static int socket_connect_entry(struct kretprobe_instance *ri,
       unsigned char proto =
           (sock->sk->sk_type == SOCK_STREAM) ? VH_PROTO_TCP : VH_PROTO_UDP;
 
-      if (should_block_port(snapshot, urules, port, proto)) {
+      if (should_block_port(snapshot, urules, port, proto) &&
+          !vpnhide_uid_owns_port(uid, port, proto)) {
         data->should_block = true;
         if (sys_connect_uses_wrapper) {
           struct pt_regs *user_regs = (struct pt_regs *)regs->regs[0];
@@ -1042,6 +1044,8 @@ static int socket_bind_entry(struct kretprobe_instance *ri,
   int fd = -1;
   bool put_needed = false;
 
+  /* Ownership tracking is independent of whether bind hiding is enabled. */
+  vpnhide_notify_port_change(uid);
   if (!is_hook_active(HOOK_BIND, from_kuid(&init_user_ns, current_uid())))
     return 1;
 

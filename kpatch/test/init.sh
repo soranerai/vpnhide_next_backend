@@ -57,7 +57,7 @@ cat > "$TEST_CONFIG" <<'EOF'
   "globalConfig": {"listMode":"BLACKLIST", "kernelHookMask":4294967295, "javaHookMask":4294967295, "debugLogging":1},
   "ifacePrefixes": ["vpn"],
   "apps": [{"packageName":"com.vpnhide.test", "userId":1, "uid":115555, "kmod":true, "lsposed":true, "portHiding":true}],
-  "portRules": [{"enabled":true, "packageName":"com.vpnhide.test", "userId":1, "startPort":8080, "endPort":8080, "protocol":"BOTH"}]
+  "portRules": [{"enabled":true, "packageName":"com.vpnhide.test", "userId":1, "startPort":0, "endPort":65535, "protocol":"BOTH"}]
 }
 EOF
 export VPNHIDE_PM_COMMAND="echo 'package:/data/app/~~test==/test-install==/base.apk=com.vpnhide.test uid:115555'; echo 'package:/data/app/~~keep==/keep-install==/base.apk=com.vpnhide.keep uid:115556'; echo 'package:/system/priv-app/Settings/Settings.apk=com.android.settings uid:1000'"

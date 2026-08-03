@@ -104,6 +104,26 @@ struct vpnhide_stats_snapshot {
 #define VH_GET_STATS _IOWR(VH_IOCTL_MAGIC, 0x0B, struct vpnhide_stats_snapshot)
 #define VH_CLEAR_STATS _IO(VH_IOCTL_MAGIC, 0x0C)
 #define VH_GET_STATS_SESSION _IOR(VH_IOCTL_MAGIC, 0x22, __u64)
+
+/* Event-driven own-port cache. The daemon receives bind notifications through
+ * eventfd, refreshes socket ownership with SOCK_DIAG, then replaces this set. */
+struct vpnhide_owned_port {
+	__u32 uid;
+	__u16 port;
+	__u8 protocol;
+	__u8 reserved;
+};
+
+struct vpnhide_owned_ports_update {
+	__u32 count;
+	__u32 reserved;
+	__u64 entries_ptr;
+};
+
+#define VPNHIDE_OWNED_PORTS_MAX 65536U
+#define VH_SET_PORT_EVENTFD _IOW(VH_IOCTL_MAGIC, 0x23, int)
+#define VH_SET_OWNED_PORTS \
+	_IOW(VH_IOCTL_MAGIC, 0x24, struct vpnhide_owned_ports_update)
 #define VH_GET_TARGETS _IOR(VH_IOCTL_MAGIC, 0x0D, struct vpnhide_ioctl_data)
 #define VH_SET_BPF_MAP_FOPS _IOW(VH_IOCTL_MAGIC, 0x0E, unsigned long)
 #define VH_SET_STATS_MAP_A _IOW(VH_IOCTL_MAGIC, 0x0F, int)

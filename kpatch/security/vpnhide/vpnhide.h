@@ -199,6 +199,8 @@ bool is_active_vpn_ifindex(u32 ifindex);
 bool is_active_vpn_ifname(const char *name);
 bool is_target_uid_val(uid_t uid);
 bool is_target_uid(void);
+bool vpnhide_uid_owns_port(uid_t uid, u16 port, u8 protocol);
+void vpnhide_notify_port_change(uid_t uid);
 int vpnhide_apply_policy(const struct vpnhide_policy_payload *payload,
 			 u64 expected_generation);
 int vpnhide_apply_policy_v3(const void *payload, size_t payload_size,

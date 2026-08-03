@@ -7,6 +7,7 @@ import platform
 import socket
 import struct
 import sys
+import time
 
 # ruff: noqa: E501
 
@@ -506,6 +507,59 @@ def test_bind_port_block():
         if status != 0:
             return False
     return True
+
+
+def test_own_port_access():
+    print("\n--- own port access checks ---")
+    read_fd, write_fd = os.pipe()
+    listener_pid = safe_fork()
+    if listener_pid == 0:
+        os.close(read_fd)
+        try:
+            os.setuid(115555)
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.settimeout(3)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            os.write(write_fd, struct.pack("I", listener.getsockname()[1]))
+            connection, _ = listener.accept()
+            connection.close()
+            listener.close()
+            os._exit(0)
+        except Exception as error:
+            print(f"FAIL: own port listener: {error}", flush=True)
+            os._exit(1)
+
+    os.close(write_fd)
+    raw_port = os.read(read_fd, 4)
+    os.close(read_fd)
+    if len(raw_port) != 4:
+        os.waitpid(listener_pid, 0)
+        print("FAIL: own port listener did not publish its port")
+        return False
+    port = struct.unpack("I", raw_port)[0]
+    time.sleep(0.5)
+    client_pid = safe_fork()
+    if client_pid == 0:
+        try:
+            os.setuid(115555)
+            client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client.settimeout(2)
+            client.connect(("127.0.0.1", port))
+            client.close()
+            os._exit(0)
+        except Exception as error:
+            print(f"FAIL: own port client: {error}", flush=True)
+            os._exit(1)
+    _, client_status = os.waitpid(client_pid, 0)
+    _, listener_status = os.waitpid(listener_pid, 0)
+    if client_status == 0 and listener_status == 0:
+        print(f"[own_port_access] Target UID connected to its own port {port}")
+        return True
+    print(
+        f"FAIL: own port access client_status={client_status} listener_status={listener_status}"
+    )
+    return False
 
 
 # BPF constants / structs
@@ -1243,6 +1297,7 @@ def main():
     run("pktinfo", test_pktinfo, vpn0_idx)
     run("connect_port_block", test_connect_port_block)
     run("bind_port_block", test_bind_port_block)
+    run("own_port_access", test_own_port_access)
     run("bpf_laundering", test_bpf_laundering, vpn0_idx)
     run("udp_queue_pressure", test_udp_queue_pressure)
     run("tc_qdisc", test_tc_qdisc, vpn0_idx)

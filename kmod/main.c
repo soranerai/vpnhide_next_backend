@@ -10,6 +10,19 @@ struct vpnhide_policy_snapshot __rcu *global_policy_snapshot = NULL;
 DEFINE_SPINLOCK(policy_snapshot_lock);
 static DEFINE_MUTEX(policy_apply_lock);
 
+struct vpnhide_owned_ports_snapshot {
+  u32 bucket_count;
+  u32 entry_count;
+  unsigned long expires;
+  struct rcu_head rcu;
+  struct vpnhide_owned_port buckets[];
+};
+
+static struct vpnhide_owned_ports_snapshot __rcu *owned_ports_snapshot;
+static DEFINE_SPINLOCK(owned_ports_lock);
+static struct eventfd_ctx *port_event_ctx;
+static DEFINE_SPINLOCK(port_event_lock);
+
 struct vpnhide_spoof_ip_rcu __rcu *global_spoof_ip = NULL;
 DEFINE_SPINLOCK(spoof_ip_lock);
 
@@ -37,6 +50,125 @@ bool sys_newfstatat_uses_wrapper = false;
 bool sys_readlinkat_uses_wrapper = false;
 
 /* --- Core Configuration & Helper Functions --- */
+
+static u32 owned_port_hash(uid_t uid, u16 port, u8 protocol) {
+  u32 value = (u32)uid * 0x9e3779b1U;
+  value ^= (u32)port * 0x85ebca6bU;
+  value ^= (u32)protocol * 0xc2b2ae35U;
+  value ^= value >> 16;
+  return value;
+}
+
+bool vpnhide_uid_owns_port(uid_t uid, u16 port, u8 protocol) {
+  struct vpnhide_owned_ports_snapshot *snapshot;
+  bool found = false;
+  u32 slot, probes;
+
+  rcu_read_lock();
+  snapshot = rcu_dereference(owned_ports_snapshot);
+  if (!snapshot || !snapshot->bucket_count ||
+      time_after_eq(jiffies, snapshot->expires))
+    goto out;
+  slot = owned_port_hash(uid, port, protocol) & (snapshot->bucket_count - 1);
+  for (probes = 0; probes < snapshot->bucket_count; probes++) {
+    const struct vpnhide_owned_port *entry = &snapshot->buckets[slot];
+    if (!entry->uid)
+      break;
+    if (entry->uid == uid && entry->port == port &&
+        entry->protocol == protocol) {
+      found = true;
+      break;
+    }
+    slot = (slot + 1) & (snapshot->bucket_count - 1);
+  }
+out:
+  rcu_read_unlock();
+  return found;
+}
+
+void vpnhide_notify_port_change(uid_t uid) {
+  struct vpnhide_policy_snapshot *policy;
+  struct eventfd_ctx *ctx = NULL;
+
+  rcu_read_lock();
+  policy = rcu_dereference(global_policy_snapshot);
+  if (vpnhide_find_port_target(policy, uid)) {
+    spin_lock(&port_event_lock);
+    ctx = port_event_ctx;
+    if (ctx) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+      eventfd_signal(ctx);
+#else
+      eventfd_signal(ctx, 1);
+#endif
+    }
+    spin_unlock(&port_event_lock);
+  }
+  rcu_read_unlock();
+}
+
+static int replace_owned_ports(const struct vpnhide_owned_ports_update *update) {
+  struct vpnhide_owned_ports_snapshot *snapshot, *old;
+  struct vpnhide_owned_port *entries = NULL;
+  size_t size;
+  u32 buckets = 8, i;
+
+  if (update->reserved || update->count > VPNHIDE_OWNED_PORTS_MAX ||
+      (update->count && !update->entries_ptr))
+    return -EINVAL;
+  while (buckets < max_t(u32, 8, update->count * 2))
+    buckets <<= 1;
+  if (update->count) {
+    entries = kvmalloc_array(update->count, sizeof(*entries), GFP_KERNEL);
+    if (!entries)
+      return -ENOMEM;
+    if (copy_from_user(entries, u64_to_user_ptr(update->entries_ptr),
+                       update->count * sizeof(*entries))) {
+      kvfree(entries);
+      return -EFAULT;
+    }
+  }
+  size = struct_size(snapshot, buckets, buckets);
+  snapshot = kvzalloc(size, GFP_KERNEL);
+  if (!snapshot) {
+    kvfree(entries);
+    return -ENOMEM;
+  }
+  snapshot->bucket_count = buckets;
+  snapshot->expires = jiffies + 120 * HZ;
+  for (i = 0; i < update->count; i++) {
+    u32 slot, probes;
+    if (!entries[i].uid || !entries[i].port || entries[i].reserved ||
+        entries[i].protocol > VH_PROTO_UDP) {
+      kvfree(entries);
+      kvfree(snapshot);
+      return -EINVAL;
+    }
+    slot = owned_port_hash(entries[i].uid, entries[i].port,
+                           entries[i].protocol) & (buckets - 1);
+    for (probes = 0; probes < buckets; probes++) {
+      struct vpnhide_owned_port *dst = &snapshot->buckets[slot];
+      if (!dst->uid) {
+        *dst = entries[i];
+        snapshot->entry_count++;
+        break;
+      }
+      if (dst->uid == entries[i].uid && dst->port == entries[i].port &&
+          dst->protocol == entries[i].protocol)
+        break;
+      slot = (slot + 1) & (buckets - 1);
+    }
+  }
+  kvfree(entries);
+  spin_lock(&owned_ports_lock);
+  old = rcu_dereference_protected(owned_ports_snapshot,
+                                  lockdep_is_held(&owned_ports_lock));
+  rcu_assign_pointer(owned_ports_snapshot, snapshot);
+  spin_unlock(&owned_ports_lock);
+  if (old)
+    kvfree_rcu(old, rcu);
+  return 0;
+}
 
 bool vpnhide_debug_is_enabled(void)
 {
@@ -1296,6 +1428,31 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
     break;
   }
 
+  case VH_SET_PORT_EVENTFD: {
+    struct eventfd_ctx *new_ctx, *old_ctx;
+    int event_fd;
+    if (copy_from_user(&event_fd, (void __user *)arg, sizeof(event_fd)))
+      return -EFAULT;
+    new_ctx = eventfd_ctx_fdget(event_fd);
+    if (IS_ERR(new_ctx))
+      return PTR_ERR(new_ctx);
+    spin_lock(&port_event_lock);
+    old_ctx = port_event_ctx;
+    port_event_ctx = new_ctx;
+    spin_unlock(&port_event_lock);
+    if (old_ctx)
+      eventfd_ctx_put(old_ctx);
+    ret = 0;
+    break;
+  }
+
+  case VH_SET_OWNED_PORTS: {
+    struct vpnhide_owned_ports_update update;
+    if (copy_from_user(&update, (void __user *)arg, sizeof(update)))
+      return -EFAULT;
+    return replace_owned_ports(&update);
+  }
+
   default:
     return -ENOIOCTLCMD;
   }
@@ -1499,6 +1656,8 @@ static void __exit vpnhide_exit(void) {
   struct vpnhide_active_vpns *vpns;
   struct vpnhide_spoof_ip_rcu *old_sip;
   struct vpnhide_policy_snapshot *snapshot;
+  struct vpnhide_owned_ports_snapshot *owned;
+  struct eventfd_ctx *event_ctx;
   int i;
 
   for (i = 0; i < ARRAY_SIZE(probes); i++) {
@@ -1518,6 +1677,21 @@ static void __exit vpnhide_exit(void) {
     synchronize_rcu();
     kvfree(snapshot);
   }
+  spin_lock(&owned_ports_lock);
+  owned = rcu_dereference_protected(owned_ports_snapshot,
+                                    lockdep_is_held(&owned_ports_lock));
+  rcu_assign_pointer(owned_ports_snapshot, NULL);
+  spin_unlock(&owned_ports_lock);
+  if (owned) {
+    synchronize_rcu();
+    kvfree(owned);
+  }
+  spin_lock(&port_event_lock);
+  event_ctx = port_event_ctx;
+  port_event_ctx = NULL;
+  spin_unlock(&port_event_lock);
+  if (event_ctx)
+    eventfd_ctx_put(event_ctx);
   kvfree(kmod_stats);
   kmod_stats = NULL;
   kmod_stats_count = 0;

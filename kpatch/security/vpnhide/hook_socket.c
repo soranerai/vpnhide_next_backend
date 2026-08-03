@@ -396,7 +396,8 @@ int vpnhide_connect_pre(struct socket *sock,
 
 		if (ipv4_is_loopback(sin->sin_addr.s_addr) ||
 		    sin->sin_addr.s_addr == 0) {
-			if (should_block_port(uid, sin->sin_port, protocol)) {
+			if (should_block_port(uid, sin->sin_port, protocol) &&
+			    !vpnhide_uid_owns_port(uid, ntohs(sin->sin_port), protocol)) {
 				record_kmod_intercept(uid, HOOK_CONNECT);
 				return -ECONNREFUSED;
 			}
@@ -412,7 +413,8 @@ int vpnhide_connect_pre(struct socket *sock,
 			local = ipv4_is_loopback(v4addr) || v4addr == 0;
 		}
 		if (local) {
-			if (should_block_port(uid, sin6->sin6_port, protocol)) {
+			if (should_block_port(uid, sin6->sin6_port, protocol) &&
+			    !vpnhide_uid_owns_port(uid, ntohs(sin6->sin6_port), protocol)) {
 				record_kmod_intercept(uid, HOOK_CONNECT);
 				return -ECONNREFUSED;
 			}
@@ -433,9 +435,11 @@ int vpnhide_bind_pre(struct socket *sock,
 	sa_family_t family;
 	unsigned char protocol;
 
+	uid = from_kuid(&init_user_ns, current_uid());
+	/* Ownership tracking is independent of whether bind hiding is enabled. */
+	vpnhide_notify_port_change(uid);
 	if (!(vpnhide_active_hooks_mask() & BIT(HOOK_BIND)))
 		return 0;
-	uid = from_kuid(&init_user_ns, current_uid());
 	if (!is_hook_active(HOOK_BIND, uid))
 		return 0;
 	if (!sock || !sock->sk)
@@ -463,8 +467,7 @@ int vpnhide_bind_pre(struct socket *sock,
 			__be32 v4addr = sin6->sin6_addr.s6_addr32[3];
 			local = ipv4_is_loopback(v4addr) || v4addr == 0;
 		}
-		if (local &&
-		    should_block_port(uid, sin6->sin6_port, protocol)) {
+		if (local && should_block_port(uid, sin6->sin6_port, protocol)) {
 			sin6->sin6_port = 0;
 			record_kmod_intercept(uid, HOOK_BIND);
 		}

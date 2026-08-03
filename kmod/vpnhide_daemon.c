@@ -24,6 +24,10 @@
 #include <stdint.h>
 #include <sys/un.h>
 #include <sys/types.h>
+#include <sys/eventfd.h>
+#include <linux/inet_diag.h>
+#include <linux/sock_diag.h>
+#include <netinet/tcp.h>
 
 #include "include/vpnhide.h"
 #include "generated/iface_lists.h"
@@ -775,9 +779,181 @@ static int package_fingerprint(unsigned long long *out)
 	return 0;
 }
 
+struct owned_port_list {
+	struct vpnhide_owned_port *items;
+	size_t count;
+	size_t capacity;
+};
+
+static int append_owned_port(struct owned_port_list *list, uint32_t uid,
+			     uint16_t port, uint8_t protocol)
+{
+	struct vpnhide_owned_port *grown;
+	if (uid < 10000 || port == 0)
+		return 0;
+	if (list->count >= VPNHIDE_OWNED_PORTS_MAX)
+		return -1;
+	if (list->count == list->capacity) {
+		size_t capacity = list->capacity ? list->capacity * 2 : 128;
+		grown = realloc(list->items, capacity * sizeof(*grown));
+		if (!grown)
+			return -1;
+		list->items = grown;
+		list->capacity = capacity;
+	}
+	list->items[list->count++] = (struct vpnhide_owned_port) {
+		.uid = uid, .port = port, .protocol = protocol,
+	};
+	return 0;
+}
+
+static bool diag_local_address(const struct inet_diag_msg *msg)
+{
+	if (msg->idiag_family == AF_INET) {
+		uint32_t addr = msg->id.idiag_src[0];
+		return addr == 0 || (ntohl(addr) >> 24) == 127;
+	}
+	if (msg->idiag_family == AF_INET6) {
+		struct in6_addr addr;
+		memcpy(&addr, msg->id.idiag_src, sizeof(addr));
+		if (IN6_IS_ADDR_UNSPECIFIED(&addr) || IN6_IS_ADDR_LOOPBACK(&addr))
+			return true;
+		if (IN6_IS_ADDR_V4MAPPED(&addr)) {
+			uint32_t v4;
+			memcpy(&v4, &addr.s6_addr[12], sizeof(v4));
+			return (ntohl(v4) >> 24) == 127;
+		}
+	}
+	return false;
+}
+
+static int dump_owned_ports_family(int fd, int family, int protocol,
+				   uint32_t sequence,
+				   struct owned_port_list *list)
+{
+	struct {
+		struct nlmsghdr nlh;
+		struct inet_diag_req_v2 req;
+	} request;
+	struct sockaddr_nl kernel = { .nl_family = AF_NETLINK };
+	char buffer[32768];
+
+	memset(&request, 0, sizeof(request));
+	request.nlh.nlmsg_len = sizeof(request);
+	request.nlh.nlmsg_type = SOCK_DIAG_BY_FAMILY;
+	request.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+	request.nlh.nlmsg_seq = sequence;
+	request.req.sdiag_family = family;
+	request.req.sdiag_protocol = protocol;
+	request.req.idiag_states = protocol == IPPROTO_TCP ?
+		(1U << TCP_LISTEN) : UINT32_MAX;
+	if (sendto(fd, &request, sizeof(request), 0,
+		   (struct sockaddr *)&kernel, sizeof(kernel)) < 0)
+		return -1;
+
+	for (;;) {
+		ssize_t length = recv(fd, buffer, sizeof(buffer), 0);
+		struct nlmsghdr *nlh;
+		if (length < 0) {
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+		for (nlh = (struct nlmsghdr *)buffer; NLMSG_OK(nlh, length);
+		     nlh = NLMSG_NEXT(nlh, length)) {
+			struct inet_diag_msg *msg;
+			if (nlh->nlmsg_seq != sequence)
+				continue;
+			if (nlh->nlmsg_type == NLMSG_DONE)
+				return 0;
+			if (nlh->nlmsg_type == NLMSG_ERROR)
+				return -1;
+			if (nlh->nlmsg_type != SOCK_DIAG_BY_FAMILY ||
+			    nlh->nlmsg_len < NLMSG_LENGTH(sizeof(*msg)))
+				continue;
+			msg = NLMSG_DATA(nlh);
+			if (!diag_local_address(msg))
+				continue;
+			/* Connected UDP clients are not local services. */
+			if (protocol == IPPROTO_UDP && msg->id.idiag_dport != 0)
+				continue;
+			if (append_owned_port(list, msg->idiag_uid,
+					      ntohs(msg->id.idiag_sport),
+					      protocol == IPPROTO_TCP ?
+						VH_PROTO_TCP : VH_PROTO_UDP) < 0)
+				return -1;
+		}
+	}
+}
+
+static int owned_port_compare(const void *left, const void *right)
+{
+	const struct vpnhide_owned_port *a = left, *b = right;
+	if (a->uid != b->uid)
+		return a->uid < b->uid ? -1 : 1;
+	if (a->port != b->port)
+		return a->port < b->port ? -1 : 1;
+	return (int)a->protocol - (int)b->protocol;
+}
+
+static int refresh_owned_ports(int control_fd)
+{
+	struct owned_port_list list = {0};
+	struct vpnhide_owned_ports_update update;
+	int diag_fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_SOCK_DIAG);
+	uint32_t sequence = 1;
+	int ret = -1;
+
+	if (diag_fd < 0)
+		return -1;
+	if (dump_owned_ports_family(diag_fd, AF_INET, IPPROTO_TCP, sequence++, &list) ||
+	    dump_owned_ports_family(diag_fd, AF_INET6, IPPROTO_TCP, sequence++, &list) ||
+	    dump_owned_ports_family(diag_fd, AF_INET, IPPROTO_UDP, sequence++, &list) ||
+	    dump_owned_ports_family(diag_fd, AF_INET6, IPPROTO_UDP, sequence++, &list))
+		goto out;
+
+	qsort(list.items, list.count, sizeof(*list.items), owned_port_compare);
+	if (list.count) {
+		size_t out_count = 1;
+		for (size_t i = 1; i < list.count; i++)
+			if (owned_port_compare(&list.items[out_count - 1], &list.items[i]))
+				list.items[out_count++] = list.items[i];
+		list.count = out_count;
+	}
+	memset(&update, 0, sizeof(update));
+	update.count = (uint32_t)list.count;
+	update.entries_ptr = (uint64_t)(uintptr_t)list.items;
+	ret = ioctl(control_fd, VH_SET_OWNED_PORTS, &update);
+out:
+	close(diag_fd);
+	free(list.items);
+	return ret;
+}
+
+static int open_diag_events(void)
+{
+	struct sockaddr_nl address;
+	int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC,
+			NETLINK_SOCK_DIAG);
+	if (fd < 0)
+		return -1;
+	memset(&address, 0, sizeof(address));
+	address.nl_family = AF_NETLINK;
+	address.nl_groups = (1U << (SKNLGRP_INET_TCP_DESTROY - 1)) |
+		(1U << (SKNLGRP_INET_UDP_DESTROY - 1)) |
+		(1U << (SKNLGRP_INET6_TCP_DESTROY - 1)) |
+		(1U << (SKNLGRP_INET6_UDP_DESTROY - 1));
+	if (bind(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
 int main(int argc, char **argv)
 {
 	int fd, nl_fd, config_fd = -1, stats_fd = -1;
+	int port_event_fd = -1, diag_events_fd = -1;
 	const char *ctl = argc > 1 ? argv[1] : NULL;
 	const char *config = argc > 2 ? argv[2] : NULL;
 	const char *self_uid = argc > 3 ? argv[3] : NULL;
@@ -850,6 +1026,23 @@ int main(int argc, char **argv)
 		fprintf(stderr, "vpnhide-daemon: statistics socket unavailable: %s\n",
 			strerror(errno));
 
+	port_event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+	if (port_event_fd >= 0 &&
+	    ioctl(fd, VH_SET_PORT_EVENTFD, &port_event_fd) < 0) {
+		close(port_event_fd);
+		port_event_fd = -1;
+	}
+	if (port_event_fd < 0)
+		fprintf(stderr, "vpnhide-daemon: own-port bind events unavailable: %s\n",
+			strerror(errno));
+	diag_events_fd = open_diag_events();
+	if (diag_events_fd < 0)
+		fprintf(stderr, "vpnhide-daemon: socket destroy events unavailable: %s\n",
+			strerror(errno));
+	if (refresh_owned_ports(fd) < 0)
+		fprintf(stderr, "vpnhide-daemon: initial own-port scan failed: %s\n",
+			strerror(errno));
+
 	// Initial update
 	update_spoof_ip(fd, last_ipv4, last_ipv6, last_ipv6_linklocal,
 			&last_ipv4_mtu, &last_ipv6_mtu);
@@ -866,6 +1059,8 @@ int main(int argc, char **argv)
 	unsigned long long next_stats_sample = get_time_ms() + STATS_RESOLUTION_SEC * 1000ULL;
 	unsigned long long pm_fingerprint = 0;
 	bool pm_fingerprint_valid = false;
+	unsigned long long owned_ports_due = 0;
+	unsigned long long next_owned_ports_reconcile = get_time_ms() + 60000;
 
 	while (1) {
 		int poll_timeout = -1;
@@ -898,19 +1093,43 @@ int main(int argc, char **argv)
 			if (poll_timeout < 0 || stats_timeout < poll_timeout)
 				poll_timeout = stats_timeout;
 		}
+		{
+			unsigned long long now = get_time_ms();
+			unsigned long long deadline = owned_ports_due ? owned_ports_due :
+				next_owned_ports_reconcile;
+			int owned_timeout = now >= deadline ? 0 : (int)(deadline - now);
+			if (poll_timeout < 0 || owned_timeout < poll_timeout)
+				poll_timeout = owned_timeout;
+		}
 
-		struct pollfd pfds[3];
+		struct pollfd pfds[5];
 		int nfds = 1;
+		int config_index = -1, stats_index = -1;
+		int port_event_index = -1, diag_events_index = -1;
 		memset(pfds, 0, sizeof(pfds));
 		pfds[0].fd = nl_fd;
 		pfds[0].events = POLLIN;
 		if (config_fd >= 0) {
+			config_index = nfds;
 			pfds[nfds].fd = config_fd;
 			pfds[nfds].events = POLLIN;
 			nfds++;
 		}
 		if (stats_fd >= 0) {
+			stats_index = nfds;
 			pfds[nfds].fd = stats_fd;
+			pfds[nfds].events = POLLIN;
+			nfds++;
+		}
+		if (port_event_fd >= 0) {
+			port_event_index = nfds;
+			pfds[nfds].fd = port_event_fd;
+			pfds[nfds].events = POLLIN;
+			nfds++;
+		}
+		if (diag_events_fd >= 0) {
+			diag_events_index = nfds;
+			pfds[nfds].fd = diag_events_fd;
 			pfds[nfds].events = POLLIN;
 			nfds++;
 		}
@@ -935,13 +1154,28 @@ int main(int argc, char **argv)
 			trigger_update = true;
 			netlink_event = true;
 		}
-		if (config_fd >= 0 && ret > 0 && (pfds[1].revents & POLLIN)) {
+		if (config_index >= 0 && ret > 0 &&
+		    (pfds[config_index].revents & POLLIN)) {
 			drain_config_events(config_fd, config, ctl, self_uid);
+			owned_ports_due = get_time_ms() + 100;
 		}
-		if (stats_fd >= 0) {
-			int stats_index = config_fd >= 0 ? 2 : 1;
+		if (stats_index >= 0) {
 			if (ret > 0 && (pfds[stats_index].revents & POLLIN))
 				serve_stats_client(stats_fd, stats_allowed_uid, &stats_ring);
+		}
+		if (port_event_index >= 0 && ret > 0 &&
+		    (pfds[port_event_index].revents & POLLIN)) {
+			uint64_t events;
+			while (read(port_event_fd, &events, sizeof(events)) > 0)
+				;
+			owned_ports_due = get_time_ms() + 75;
+		}
+		if (diag_events_index >= 0 && ret > 0 &&
+		    (pfds[diag_events_index].revents & POLLIN)) {
+			char buffer[8192];
+			while (recv(diag_events_fd, buffer, sizeof(buffer), MSG_DONTWAIT) > 0)
+				;
+			owned_ports_due = get_time_ms() + 25;
 		}
 		if (get_time_ms() >= next_stats_sample) {
 			do {
@@ -962,6 +1196,15 @@ int main(int argc, char **argv)
 		if (pm_reload_due && get_time_ms() >= pm_reload_due) {
 			pm_reload_due = 0;
 			reload_policy(ctl, config, self_uid);
+			owned_ports_due = get_time_ms() + 100;
+		}
+		if ((owned_ports_due && get_time_ms() >= owned_ports_due) ||
+		    get_time_ms() >= next_owned_ports_reconcile) {
+			owned_ports_due = 0;
+			next_owned_ports_reconcile = get_time_ms() + 60000;
+			if (refresh_owned_ports(fd) < 0)
+				fprintf(stderr, "vpnhide-daemon: own-port refresh failed: %s\n",
+					strerror(errno));
 		}
 
 		if (update_pending && get_time_ms() >= next_update_time) {
@@ -994,6 +1237,10 @@ int main(int argc, char **argv)
 		close(config_fd);
 	if (stats_fd >= 0)
 		close(stats_fd);
+	if (port_event_fd >= 0)
+		close(port_event_fd);
+	if (diag_events_fd >= 0)
+		close(diag_events_fd);
 	clear_stats_ring(&stats_ring);
 	close(fd);
 	return 0;
