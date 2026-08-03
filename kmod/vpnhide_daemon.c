@@ -27,6 +27,7 @@
 
 #include "include/vpnhide.h"
 #include "generated/iface_lists.h"
+#include "daemon_iface.h"
 
 static bool is_interface_operstate_up(const char *ifname)
 {
@@ -214,6 +215,9 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6)
 			}
 			continue;
 		}
+
+		if (!vpnhide_daemon_is_cover_candidate(name))
+			continue;
 
 		if (!is_interface_operstate_up(name))
 			continue;

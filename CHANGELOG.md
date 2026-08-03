@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Optimize JSON configuration storage to only persist apps with active protections
 
+### Fixed
+- Prevent the daemon from selecting `dummy0` (or another `dummy*` routing-anchor netdev) as the physical cover interface or spoof-IP source
+
 ## v1.12.0
 
 ### Changed
