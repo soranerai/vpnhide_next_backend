@@ -167,6 +167,9 @@ def main() -> int:
             "kmod/test/build-kernel.sh",
             "kmod/test/init.sh",
             "kmod/test/test_kmi_check.sh",
+            "kpatch/module/kernel-update.sh",
+            "kpatch/module/customize.sh",
+            "kpatch/test/test_kernel_update.sh",
         ]
         # Filter files that exist
         existing_shell_files = [f for f in shell_files if (ROOT_DIR / f).exists()]
