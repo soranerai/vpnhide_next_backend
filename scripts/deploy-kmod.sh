@@ -10,6 +10,7 @@ set -euo pipefail
 # 1. Determine script and repo directories
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+. "$REPO_ROOT/kmod/module/kmi-check.sh"
 
 # Color constants for rich aesthetics in terminal output
 BOLD="\033[1m"
@@ -55,28 +56,22 @@ for arg in "$@"; do
     fi
 done
 
-# 4. Auto-detect KMI if not specified
+# 4. Detect the device KMI and reject an explicitly selected mismatch.
+log_info "Detecting GKI kernel variant from device..."
+UNAME_R=$(adb shell uname -r 2>/dev/null | tr -d '\r\n')
+DEVICE_KMI=$(vpnhide_detect_gki "$UNAME_R") || true
+if [[ -z "$DEVICE_KMI" ]]; then
+    log_error "Could not determine GKI from device kernel '${UNAME_R:-unknown}'."
+    exit 1
+fi
+log_info "Device kernel: ${BOLD}$UNAME_R${NC} (${BOLD}$DEVICE_KMI${NC})"
+
 if [[ -z "$KMI" ]]; then
-    log_info "Attempting to auto-detect GKI kernel variant from device..."
-    UNAME_R=$(adb shell uname -r 2>/dev/null | tr -d '\r\n')
-    if [[ -z "$UNAME_R" ]]; then
-        log_error "Failed to retrieve uname -r from device. Please specify KMI manually."
-        exit 1
-    fi
-    log_info "Device kernel version: ${BOLD}$UNAME_R${NC}"
-    
-    # Parse KMI from uname -r (e.g. 6.1.75-android14-11-g... -> android14-6.1)
-    KERNEL_VER=$(echo "$UNAME_R" | grep -oE '^[0-9]+\.[0-9]+' || true)
-    ANDROID_VER=$(echo "$UNAME_R" | grep -oE 'android[0-9]+' || true)
-    
-    if [[ -n "$KERNEL_VER" && -n "$ANDROID_VER" ]]; then
-        KMI="${ANDROID_VER}-${KERNEL_VER}"
-        log_success "Auto-detected KMI variant: ${BOLD}$KMI${NC}"
-    else
-        log_warn "Could not parse KMI from '$UNAME_R'."
-        log_warn "Falling back to default 'android14-6.1'."
-        KMI="android14-6.1"
-    fi
+    KMI="$DEVICE_KMI"
+    log_success "Auto-detected KMI variant: ${BOLD}$KMI${NC}"
+elif [[ "$KMI" != "$DEVICE_KMI" ]]; then
+    log_error "Refusing to deploy $KMI to a $DEVICE_KMI kernel."
+    exit 1
 fi
 
 ZIP_NAME="vpnhide-kmod-${KMI}.zip"

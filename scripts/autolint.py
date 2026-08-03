@@ -157,6 +157,7 @@ def main() -> int:
     print("\n=== Step 4: Shell scripts (shellcheck) ===")
     if is_tool_available("shellcheck"):
         shell_files = [
+            "kmod/module/kmi-check.sh",
             "kmod/module/customize.sh",
             "kmod/module/post-fs-data.sh",
             "kmod/module/service.sh",
@@ -165,6 +166,7 @@ def main() -> int:
             "kmod/test/run.sh",
             "kmod/test/build-kernel.sh",
             "kmod/test/init.sh",
+            "kmod/test/test_kmi_check.sh",
         ]
         # Filter files that exist
         existing_shell_files = [f for f in shell_files if (ROOT_DIR / f).exists()]

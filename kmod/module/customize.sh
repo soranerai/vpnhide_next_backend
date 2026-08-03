@@ -4,6 +4,32 @@ MOD_VER="$(grep '^version=' "$MODPATH/module.prop" | cut -d= -f2)"
 ui_print "- VPNHide Next (kernel) ${MOD_VER:-unknown}"
 ui_print "- Installing kernel module to $MODPATH"
 
+# Refuse the archive before touching the installed module or migrating data.
+# A .ko built for another GKI may fail to load or destabilize the device.
+KMI_CHECK="$MODPATH/kmi-check.sh"
+EXPECTED_GKI="$(grep '^gkiVariant=' "$MODPATH/module.prop" 2>/dev/null | cut -d= -f2- | tr -d '\r')"
+RUNNING_KERNEL="$(uname -r 2>/dev/null | tr -d '\r\n')"
+
+if [ ! -r "$KMI_CHECK" ] || [ -z "$EXPECTED_GKI" ]; then
+    abort "! Invalid VPNHide package: GKI metadata is missing"
+fi
+
+# Resolved from Magisk/KernelSU's runtime MODPATH.
+# shellcheck disable=SC1090,SC1091
+. "$KMI_CHECK"
+ACTUAL_GKI="$(vpnhide_detect_gki "$RUNNING_KERNEL")"
+if [ -z "$ACTUAL_GKI" ]; then
+    ui_print "! Running kernel: ${RUNNING_KERNEL:-unknown}"
+    abort "! Cannot determine the device GKI; installation aborted"
+fi
+
+ui_print "- Package GKI: $EXPECTED_GKI"
+ui_print "- Device GKI:  $ACTUAL_GKI"
+if ! vpnhide_kmi_matches "$EXPECTED_GKI" "$RUNNING_KERNEL"; then
+    ui_print "! This package is incompatible with the running kernel"
+    abort "! Install vpnhide-kmod-$ACTUAL_GKI.zip instead"
+fi
+
 set_perm "$MODPATH/vpnhide_kmod.ko" 0 0 0644
 set_perm "$MODPATH/vpnhide-ctl" 0 0 0755
 
