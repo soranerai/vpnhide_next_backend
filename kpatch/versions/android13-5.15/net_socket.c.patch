@@ -13,7 +13,7 @@ index f7cfc703b..e8fc99a75 100644
  #include <linux/kmod.h>
  #include <linux/audit.h>
  #include <linux/wireless.h>
-@@ -1712,7 +1716,11 @@ int __sys_bind(int fd, struct sockaddr __user *umyaddr, int addrlen)
+@@ -1712,7 +1716,14 @@ int __sys_bind(int fd, struct sockaddr __user *umyaddr, int addrlen)
  						   (struct sockaddr *)&address,
  						   addrlen);
 -			if (!err)
@@ -23,8 +23,13 @@ index f7cfc703b..e8fc99a75 100644
 +				vpnhide_bind_pre(sock, (struct sockaddr *)&address, addrlen);
 +#endif
 +				err = sock->ops->bind(sock,
- 						      (struct sockaddr *)
- 						      &address, addrlen);
+-						      (struct sockaddr *)
+-						      &address, addrlen);
++						      (struct sockaddr *)
++						      &address, addrlen);
++#ifdef CONFIG_VPNHIDE
++				vpnhide_bind_post(sock, err);
++#endif
 +			}
  		}
 @@ -1969,7 +1978,10 @@ int __sys_getsockname(int fd, struct sockaddr __user *usockaddr,

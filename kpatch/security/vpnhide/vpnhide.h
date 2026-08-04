@@ -200,6 +200,7 @@ bool is_active_vpn_ifname(const char *name);
 bool is_target_uid_val(uid_t uid);
 bool is_target_uid(void);
 bool vpnhide_uid_owns_port(uid_t uid, u16 port, u8 protocol);
+void vpnhide_record_bound_port(uid_t uid, u16 port, u8 protocol);
 void vpnhide_notify_port_change(uid_t uid);
 int vpnhide_apply_policy(const struct vpnhide_policy_payload *payload,
 			 u64 expected_generation);
@@ -255,6 +256,7 @@ bool vh_is_vpn_stats_key(struct bpf_map *map, const struct vh_stats_key *key);
 /* ------------------------------------------------------------------ */
 
 int  vpnhide_bind_pre(struct socket *sock, struct sockaddr *addr, int addrlen);
+void vpnhide_bind_post(struct socket *sock, int error);
 void vpnhide_bind(struct socket *sock, struct sockaddr __user *umyaddr,
 		  int addrlen);
 int  vpnhide_connect_pre(struct socket *sock, struct sockaddr *addr, int addrlen);

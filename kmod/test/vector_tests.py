@@ -503,9 +503,10 @@ def test_connect_port_block():
 
 
 def test_bind_port_block():
-    print("\n--- bind port block checks ---")
+    print("\n--- explicit bind ownership checks ---")
 
-    # Drop privileges and verify that binding to port 8080 redirects to port 0 (ephemeral port)
+    # Binding establishes ownership. Policy must not rewrite the requested
+    # port, and an immediate same-UID connect must succeed.
     pid = safe_fork()
     if pid == 0:
         try:
@@ -515,17 +516,17 @@ def test_bind_port_block():
             try:
                 s.bind(("127.0.0.1", 8080))
                 ip, port = s.getsockname()
-                print(
-                    f"[bind_port_block] Target bound to 127.0.0.1:8080. Redirected getsockname port: {port}"
-                )
-                if port == 8080:
-                    print(
-                        "FAIL: bind port block target bound to 8080, expected redirection to ephemeral port"
-                    )
+                print(f"[bind_port_block] Target bound to 127.0.0.1:{port}")
+                if port != 8080:
+                    print(f"FAIL: explicit bind was rewritten to {port}")
                     sys.exit(1)
-                if port == 0:
-                    print("FAIL: bind port block target getsockname returned 0")
-                    sys.exit(1)
+                s.listen(1)
+                client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                client.settimeout(2)
+                client.connect(("127.0.0.1", 8080))
+                accepted, _ = s.accept()
+                accepted.close()
+                client.close()
             except Exception as e:
                 print(f"FAIL: bind port block target bind error: {e}")
                 sys.exit(1)
@@ -550,7 +551,9 @@ def test_own_port_access():
             os.setuid(115555)
             listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             listener.settimeout(3)
-            listener.bind(("127.0.0.1", 0))
+            # Deliberately rely on listen() autobind.  This exercises the
+            # post-listen ownership path used when a vendor kernel does not
+            # expose a usable syscall/inet bind probe.
             listener.listen(1)
             os.write(write_fd, struct.pack("I", listener.getsockname()[1]))
             connection, _ = listener.accept()
@@ -570,10 +573,8 @@ def test_own_port_access():
         return False
     port = struct.unpack("I", raw_port)[0]
 
-    # bind() wakes the daemon; allow its debounced SOCK_DIAG refresh to land.
-    import time
-
-    time.sleep(0.5)
+    # The transient post-bind grant must close the window before the daemon's
+    # debounced SOCK_DIAG refresh lands.
     client_pid = safe_fork()
     if client_pid == 0:
         try:

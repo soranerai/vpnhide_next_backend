@@ -23,6 +23,19 @@ static DEFINE_SPINLOCK(owned_ports_lock);
 static struct eventfd_ctx *port_event_ctx;
 static DEFINE_SPINLOCK(port_event_lock);
 
+#define VPNHIDE_PENDING_PORT_SETS 256U
+#define VPNHIDE_PENDING_PORT_WAYS 4U
+#define VPNHIDE_PENDING_PORT_TTL (2 * HZ)
+
+struct vpnhide_pending_port {
+  u64 key;
+  unsigned long expires;
+};
+
+static struct vpnhide_pending_port
+    pending_ports[VPNHIDE_PENDING_PORT_SETS][VPNHIDE_PENDING_PORT_WAYS];
+static DEFINE_SPINLOCK(pending_ports_lock);
+
 struct vpnhide_spoof_ip_rcu __rcu *global_spoof_ip = NULL;
 DEFINE_SPINLOCK(spoof_ip_lock);
 
@@ -59,6 +72,29 @@ static u32 owned_port_hash(uid_t uid, u16 port, u8 protocol) {
   return value;
 }
 
+static u64 pending_port_key(uid_t uid, u16 port, u8 protocol) {
+  return ((u64)(u32)uid << 24) | ((u64)port << 8) | (u64)(protocol + 1);
+}
+
+static bool pending_port_lookup(uid_t uid, u16 port, u8 protocol) {
+  u64 wanted = pending_port_key(uid, port, protocol);
+  u32 set = owned_port_hash(uid, port, protocol) &
+            (VPNHIDE_PENDING_PORT_SETS - 1);
+  unsigned int way;
+
+  for (way = 0; way < VPNHIDE_PENDING_PORT_WAYS; way++) {
+    struct vpnhide_pending_port *entry = &pending_ports[set][way];
+    unsigned long expires = READ_ONCE(entry->expires);
+
+    /* Writers publish the expiry before the key.  Reading in the opposite
+     * order prevents a replaced key from borrowing the new entry's TTL. */
+    smp_rmb();
+    if (READ_ONCE(entry->key) == wanted && time_before(jiffies, expires))
+      return true;
+  }
+  return false;
+}
+
 bool vpnhide_uid_owns_port(uid_t uid, u16 port, u8 protocol) {
   struct vpnhide_owned_ports_snapshot *snapshot;
   bool found = false;
@@ -83,7 +119,58 @@ bool vpnhide_uid_owns_port(uid_t uid, u16 port, u8 protocol) {
   }
 out:
   rcu_read_unlock();
-  return found;
+  return found || pending_port_lookup(uid, port, protocol);
+}
+
+void vpnhide_record_bound_port(uid_t uid, u16 port, u8 protocol) {
+  struct vpnhide_policy_snapshot *policy;
+  struct vpnhide_pending_port *selected;
+  unsigned long now = jiffies;
+  unsigned long oldest;
+  u64 key;
+  u32 set;
+  unsigned int way;
+  bool targeted;
+
+  if (!uid || !port || protocol > VH_PROTO_UDP)
+    return;
+
+  rcu_read_lock();
+  policy = rcu_dereference(global_policy_snapshot);
+  targeted = vpnhide_find_port_target(policy, uid) != NULL;
+  rcu_read_unlock();
+  if (!targeted)
+    return;
+
+  key = pending_port_key(uid, port, protocol);
+  set = owned_port_hash(uid, port, protocol) &
+        (VPNHIDE_PENDING_PORT_SETS - 1);
+
+  spin_lock(&pending_ports_lock);
+  selected = &pending_ports[set][0];
+  oldest = READ_ONCE(selected->expires);
+  for (way = 0; way < VPNHIDE_PENDING_PORT_WAYS; way++) {
+    struct vpnhide_pending_port *entry = &pending_ports[set][way];
+    u64 entry_key = READ_ONCE(entry->key);
+    unsigned long expires = READ_ONCE(entry->expires);
+
+    if (entry_key == key || !entry_key || time_after_eq(now, expires)) {
+      selected = entry;
+      break;
+    }
+    if (time_before(expires, oldest)) {
+      selected = entry;
+      oldest = expires;
+    }
+  }
+
+  WRITE_ONCE(selected->key, 0);
+  smp_wmb();
+  WRITE_ONCE(selected->expires, now + VPNHIDE_PENDING_PORT_TTL);
+  smp_wmb();
+  WRITE_ONCE(selected->key, key);
+  spin_unlock(&pending_ports_lock);
+  vpnhide_notify_port_change(uid);
 }
 
 void vpnhide_notify_port_change(uid_t uid) {
@@ -1518,6 +1605,8 @@ static struct kretprobe_reg probes[] = {
     {&socket_bind_krp, "__arm64_sys_bind", NULL, false, -1},
     {&socket_connect_krp, "security_socket_connect", NULL, false, 19},
     {&socket_bind_krp, "security_socket_bind", NULL, false, 20},
+    {&inet_bind_owner_krp, "inet_bind", NULL, false, -1},
+    {&inet_listen_owner_krp, "inet_listen", NULL, false, -1},
     {&inet6_bind_ll_krp, "inet6_bind", NULL, false, -1},
     {&sys_getsockname_krp, "__arm64_sys_getsockname", NULL, false, -1},
     {&inet_getname_krp, "inet_getname", NULL, false, 25},

@@ -473,7 +473,7 @@ def test_allowlist_local_port():
 
 
 def test_bind_port_block():
-    print("\n--- bind port block checks ---")
+    print("\n--- explicit bind ownership checks ---")
 
     pid = safe_fork()
     if pid == 0:
@@ -484,17 +484,17 @@ def test_bind_port_block():
             try:
                 s.bind(("127.0.0.1", 8080))
                 _, port = s.getsockname()
-                print(
-                    f"[bind_port_block] Target bound to 127.0.0.1:8080. Redirected port: {port}"
-                )
-                if port == 8080:
-                    print(
-                        "FAIL: bind port block target bound to 8080, expected redirection to ephemeral port"
-                    )
+                print(f"[bind_port_block] Target bound to 127.0.0.1:{port}")
+                if port != 8080:
+                    print(f"FAIL: explicit bind was rewritten to {port}")
                     sys.exit(1)
-                if port == 0:
-                    print("FAIL: bind port block target getsockname returned 0")
-                    sys.exit(1)
+                s.listen(1)
+                client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                client.settimeout(2)
+                client.connect(("127.0.0.1", 8080))
+                accepted, _ = s.accept()
+                accepted.close()
+                client.close()
             except Exception as e:
                 print(f"FAIL: bind port block target bind error: {e}")
                 sys.exit(1)
@@ -538,7 +538,7 @@ def test_own_port_access():
         print("FAIL: own port listener did not publish its port")
         return False
     port = struct.unpack("I", raw_port)[0]
-    time.sleep(0.5)
+    # Connect immediately: the post-bind grant must cover the daemon race.
     client_pid = safe_fork()
     if client_pid == 0:
         try:

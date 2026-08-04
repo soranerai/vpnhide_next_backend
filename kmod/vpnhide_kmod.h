@@ -236,6 +236,7 @@ bool is_active_vpn_ifname(const char *name);
 bool is_target_uid_val(uid_t uid);
 bool is_target_uid(void);
 bool vpnhide_uid_owns_port(uid_t uid, u16 port, u8 protocol);
+void vpnhide_record_bound_port(uid_t uid, u16 port, u8 protocol);
 void vpnhide_notify_port_change(uid_t uid);
 int vpnhide_apply_policy(const struct vpnhide_policy_payload *payload,
                          u64 expected_generation);
@@ -306,6 +307,8 @@ extern struct kretprobe ipv6_route_krp;
 extern struct kretprobe rt_fill_krp;
 extern struct kretprobe socket_connect_krp;
 extern struct kretprobe socket_bind_krp;
+extern struct kretprobe inet_bind_owner_krp;
+extern struct kretprobe inet_listen_owner_krp;
 extern struct kretprobe inet6_bind_ll_krp;
 extern struct kretprobe sys_getsockname_krp;
 extern struct kretprobe inet_getname_krp;

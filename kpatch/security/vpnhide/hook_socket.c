@@ -425,56 +425,41 @@ int vpnhide_connect_pre(struct socket *sock,
 EXPORT_SYMBOL_GPL(vpnhide_connect_pre);
 
 /* ------------------------------------------------------------------ */
-/* bind — redirect blocked ports to 0                                  */
+/* bind — establish ownership without applying connect access policy   */
 /* ------------------------------------------------------------------ */
 
 int vpnhide_bind_pre(struct socket *sock,
 		     struct sockaddr *addr, int addrlen)
 {
 	uid_t uid;
-	sa_family_t family;
-	unsigned char protocol;
 
 	uid = from_kuid(&init_user_ns, current_uid());
-	/* Ownership tracking is independent of whether bind hiding is enabled. */
-	vpnhide_notify_port_change(uid);
-	if (!(vpnhide_active_hooks_mask() & BIT(HOOK_BIND)))
-		return 0;
-	if (!is_hook_active(HOOK_BIND, uid))
-		return 0;
-	if (!sock || !sock->sk)
-		return 0;
-
-	family = addr->sa_family;
-	protocol = sock->sk->sk_type == SOCK_STREAM ?
-		VH_PROTO_TCP : VH_PROTO_UDP;
-
-	if (family == AF_INET) {
-		struct sockaddr_in *sin = (struct sockaddr_in *)addr;
-
-		if ((ipv4_is_loopback(sin->sin_addr.s_addr) ||
-		     sin->sin_addr.s_addr == 0) &&
-		    should_block_port(uid, sin->sin_port, protocol)) {
-			sin->sin_port = 0;
-			record_kmod_intercept(uid, HOOK_BIND);
-		}
-	} else if (family == AF_INET6) {
-		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
-		bool local = ipv6_addr_loopback(&sin6->sin6_addr) ||
-			     ipv6_addr_any(&sin6->sin6_addr);
-
-		if (!local && ipv6_addr_v4mapped(&sin6->sin6_addr)) {
-			__be32 v4addr = sin6->sin6_addr.s6_addr32[3];
-			local = ipv4_is_loopback(v4addr) || v4addr == 0;
-		}
-		if (local && should_block_port(uid, sin6->sin6_port, protocol)) {
-			sin6->sin6_port = 0;
-			record_kmod_intercept(uid, HOOK_BIND);
-		}
-	}
+	/* A successful bind is recorded by vpnhide_bind_post().  Rewriting the
+	 * requested port here would make an app unable to reach its own service. */
+	(void)sock;
+	(void)addr;
+	(void)addrlen;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(vpnhide_bind_pre);
+
+void vpnhide_bind_post(struct socket *sock, int error)
+{
+	struct sock *sk;
+	uid_t uid;
+	u16 port;
+	u8 protocol;
+
+	if (error || !sock || !(sk = sock->sk) ||
+	    (sk->sk_family != AF_INET && sk->sk_family != AF_INET6) ||
+	    (sk->sk_type != SOCK_STREAM && sk->sk_type != SOCK_DGRAM))
+		return;
+	uid = from_kuid(&init_user_ns, current_uid());
+	port = inet_sk(sk)->inet_num;
+	protocol = sk->sk_type == SOCK_STREAM ? VH_PROTO_TCP : VH_PROTO_UDP;
+	vpnhide_record_bound_port(uid, port, protocol);
+}
+EXPORT_SYMBOL_GPL(vpnhide_bind_post);
 
 /* ------------------------------------------------------------------ */
 /* getname — spoof IP address in the returned sockaddr                 */

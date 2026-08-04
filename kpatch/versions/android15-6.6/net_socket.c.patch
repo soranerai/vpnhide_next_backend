@@ -12,7 +12,7 @@ index 3bfb48143..ecb683a38 100644
  #include <linux/kmod.h>
  #include <linux/audit.h>
  #include <linux/wireless.h>
-@@ -1855,10 +1858,14 @@ int __sys_bind(int fd, struct sockaddr __user *umyaddr, int addrlen)
+@@ -1855,10 +1858,17 @@ int __sys_bind(int fd, struct sockaddr __user *umyaddr, int addrlen)
  			err = security_socket_bind(sock,
  						   (struct sockaddr *)&address,
  						   addrlen);
@@ -21,9 +21,15 @@ index 3bfb48143..ecb683a38 100644
 +#ifdef CONFIG_VPNHIDE
 +				vpnhide_bind_pre(sock, (struct sockaddr *)&address, addrlen);
 +#endif
- 				err = READ_ONCE(sock->ops)->bind(sock,
- 						      (struct sockaddr *)
- 						      &address, addrlen);
+-				err = READ_ONCE(sock->ops)->bind(sock,
+-						      (struct sockaddr *)
+-						      &address, addrlen);
++				err = READ_ONCE(sock->ops)->bind(sock,
++						      (struct sockaddr *)
++						      &address, addrlen);
++#ifdef CONFIG_VPNHIDE
++				vpnhide_bind_post(sock, err);
++#endif
 +			}
  		}
  		fput_light(sock->file, fput_needed);

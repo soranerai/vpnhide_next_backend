@@ -12,7 +12,7 @@ index 9b233861f..075d0a775 100644
  #include <linux/kmod.h>
  #include <linux/audit.h>
  #include <linux/wireless.h>
-@@ -1661,7 +1664,11 @@ int __sys_bind(int fd, struct sockaddr __user *umyaddr, int addrlen)
+@@ -1661,7 +1664,14 @@ int __sys_bind(int fd, struct sockaddr __user *umyaddr, int addrlen)
  			err = security_socket_bind(sock,
  						   (struct sockaddr *)&address,
  						   addrlen);
@@ -21,9 +21,15 @@ index 9b233861f..075d0a775 100644
 +#ifdef CONFIG_VPNHIDE
 +			vpnhide_bind_pre(sock, (struct sockaddr *)&address, addrlen);
 +#endif
- 				err = sock->ops->bind(sock,
- 						      (struct sockaddr *)
- 						      &address, addrlen);
+-				err = sock->ops->bind(sock,
+-						      (struct sockaddr *)
+-						      &address, addrlen);
++				err = sock->ops->bind(sock,
++						      (struct sockaddr *)
++						      &address, addrlen);
++#ifdef CONFIG_VPNHIDE
++			vpnhide_bind_post(sock, err);
++#endif
 +			}
 @@ -1916,6 +1923,9 @@ int __sys_getsockname(int fd, struct sockaddr __user *usockaddr,
  	err = sock->ops->getname(sock, (struct sockaddr *)&address, 0);

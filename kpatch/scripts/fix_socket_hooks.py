@@ -99,7 +99,7 @@ def fix_bind(lines):
             func_end = i
             break
 
-    if any("vpnhide_bind_pre" in lines[i] for i in range(func_start, func_end)):
+    if any("vpnhide_bind_post" in lines[i] for i in range(func_start, func_end)):
         print("bind hook already present, skipping.")
         return lines
 
@@ -133,14 +133,20 @@ def fix_bind(lines):
         "\t\tvpnhide_bind_pre(sock, (struct sockaddr *)address, addrlen);\n",
         "#endif\n",
     ]
+    post_hook = [
+        "#ifdef CONFIG_VPNHIDE\n",
+        "\t\tvpnhide_bind_post(sock, err);\n",
+        "#endif\n",
+    ]
     lines = (
         lines[:target_idx]
         + hook
         + lines[target_idx : stmt_end + 1]
+        + post_hook
         + [guard_indent + "}\n"]
         + lines[stmt_end + 1 :]
     )
-    print(f"bind hook injected before bind() call at line {target_idx + 1}")
+    print(f"bind hooks injected around bind() call at line {target_idx + 1}")
     return lines
 
 
