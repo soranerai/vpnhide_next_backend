@@ -20,6 +20,7 @@
 #include <linux/timekeeping.h>
 #include <linux/eventfd.h>
 #include <linux/version.h>
+#include <net/ipv6.h>
 
 #include "vpnhide.h"
 
@@ -85,7 +86,8 @@ static DEFINE_SPINLOCK(port_event_lock);
 #define VPNHIDE_PENDING_PORT_TTL (2 * HZ)
 
 struct vpnhide_pending_port {
-	u64 key;
+	u32 sequence;
+	struct vpnhide_owned_port owner;
 	unsigned long expires;
 };
 
@@ -115,79 +117,171 @@ struct vpnhide_dev_reader {
 /* FNV-1a hash                                                         */
 /* ------------------------------------------------------------------ */
 
-static u32 owned_port_hash(uid_t uid, u16 port, u8 protocol)
+static u32 owned_port_hash(const struct vpnhide_owned_port *owner)
 {
-	u32 value = (u32)uid * 0x9e3779b1U;
-	value ^= (u32)port * 0x85ebca6bU;
-	value ^= (u32)protocol * 0xc2b2ae35U;
+	u32 value = owner->uid * 0x9e3779b1U;
+	unsigned int i;
+
+	value ^= (u32)owner->port * 0x85ebca6bU;
+	value ^= (u32)owner->protocol * 0xc2b2ae35U;
+	value ^= (u32)owner->family * 0x27d4eb2fU;
+	for (i = 0; i < ARRAY_SIZE(owner->address); i++) {
+		value ^= owner->address[i] * 0x165667b1U;
+		value = rol32(value, 13);
+	}
 	value ^= value >> 16;
 	return value;
 }
 
-static u64 pending_port_key(uid_t uid, u16 port, u8 protocol)
+static bool owned_port_equal(const struct vpnhide_owned_port *left,
+			     const struct vpnhide_owned_port *right)
 {
-	return ((u64)(u32)uid << 24) | ((u64)port << 8) | (u64)(protocol + 1);
+	return left->uid == right->uid && left->port == right->port &&
+	       left->protocol == right->protocol && left->family == right->family &&
+	       !memcmp(left->address, right->address, sizeof(left->address));
 }
 
-static bool pending_port_lookup(uid_t uid, u16 port, u8 protocol)
+static bool owned_port_is_local(const struct vpnhide_owned_port *owner)
 {
-	u64 wanted = pending_port_key(uid, port, protocol);
-	u32 set = owned_port_hash(uid, port, protocol) &
-		  (VPNHIDE_PENDING_PORT_SETS - 1);
+	if (owner->family == AF_INET) {
+		__be32 address = (__force __be32)owner->address[0];
+
+		return !owner->address[1] && !owner->address[2] && !owner->address[3] &&
+		       (address == htonl(INADDR_ANY) || ipv4_is_loopback(address));
+	}
+	if (owner->family == AF_INET6) {
+		struct in6_addr address;
+
+		memcpy(&address, owner->address, sizeof(address));
+		return ipv6_addr_any(&address) || ipv6_addr_loopback(&address);
+	}
+	return false;
+}
+
+static bool owned_port_from_sock(struct vpnhide_owned_port *owner, uid_t uid,
+				 struct sock *sk)
+{
+	memset(owner, 0, sizeof(*owner));
+	if (!sk || (sk->sk_type != SOCK_STREAM && sk->sk_type != SOCK_DGRAM))
+		return false;
+	owner->uid = uid;
+	owner->port = inet_sk(sk)->inet_num;
+	owner->protocol = sk->sk_type == SOCK_STREAM ? VH_PROTO_TCP : VH_PROTO_UDP;
+	if (!owner->port)
+		return false;
+	if (sk->sk_family == AF_INET) {
+		owner->family = AF_INET;
+		owner->address[0] = (__force u32)inet_sk(sk)->inet_rcv_saddr;
+	} else if (sk->sk_family == AF_INET6) {
+		struct in6_addr address = sk->sk_v6_rcv_saddr;
+
+		if (ipv6_addr_v4mapped(&address)) {
+			owner->family = AF_INET;
+			owner->address[0] = (__force u32)address.s6_addr32[3];
+		} else {
+			owner->family = AF_INET6;
+			memcpy(owner->address, &address, sizeof(address));
+		}
+	} else {
+		return false;
+	}
+	return owned_port_is_local(owner);
+}
+
+static bool pending_port_lookup_one(const struct vpnhide_owned_port *wanted)
+{
+	u32 set = owned_port_hash(wanted) & (VPNHIDE_PENDING_PORT_SETS - 1);
 	unsigned int way;
 
 	for (way = 0; way < VPNHIDE_PENDING_PORT_WAYS; way++) {
 		struct vpnhide_pending_port *entry = &pending_ports[set][way];
-		unsigned long expires = READ_ONCE(entry->expires);
+		struct vpnhide_owned_port owner;
+		unsigned long expires;
+		u32 before, after;
 
+		before = READ_ONCE(entry->sequence);
+		if (before & 1)
+			continue;
 		smp_rmb();
-		if (READ_ONCE(entry->key) == wanted &&
-		    time_before(jiffies, expires))
+		owner.uid = READ_ONCE(entry->owner.uid);
+		owner.port = READ_ONCE(entry->owner.port);
+		owner.protocol = READ_ONCE(entry->owner.protocol);
+		owner.family = READ_ONCE(entry->owner.family);
+		owner.address[0] = READ_ONCE(entry->owner.address[0]);
+		owner.address[1] = READ_ONCE(entry->owner.address[1]);
+		owner.address[2] = READ_ONCE(entry->owner.address[2]);
+		owner.address[3] = READ_ONCE(entry->owner.address[3]);
+		expires = READ_ONCE(entry->expires);
+		smp_rmb();
+		after = READ_ONCE(entry->sequence);
+		if (before == after && !(after & 1) &&
+		    owned_port_equal(&owner, wanted) && time_before(jiffies, expires))
 			return true;
 	}
 	return false;
 }
 
-bool vpnhide_uid_owns_port(uid_t uid, u16 port, u8 protocol)
+static bool owned_snapshot_contains(
+	const struct vpnhide_owned_ports_snapshot *snapshot,
+	const struct vpnhide_owned_port *wanted)
+{
+	u32 slot = owned_port_hash(wanted) & (snapshot->bucket_count - 1);
+	u32 probes;
+
+	for (probes = 0; probes < snapshot->bucket_count; probes++) {
+		const struct vpnhide_owned_port *entry = &snapshot->buckets[slot];
+
+		if (!entry->uid)
+			return false;
+		if (owned_port_equal(entry, wanted))
+			return true;
+		slot = (slot + 1) & (snapshot->bucket_count - 1);
+	}
+	return false;
+}
+
+bool vpnhide_uid_owns_port(uid_t uid, u16 port, u8 protocol, u8 family,
+			   const u32 address[4])
 {
 	struct vpnhide_owned_ports_snapshot *snapshot;
+	struct vpnhide_owned_port wanted = {
+		.uid = uid, .port = port, .protocol = protocol, .family = family };
+	struct vpnhide_owned_port wildcard;
 	bool found = false;
-	u32 slot, probes;
+
+	memcpy(wanted.address, address, sizeof(wanted.address));
+	if (!owned_port_is_local(&wanted))
+		return false;
+	wildcard = wanted;
+	memset(wildcard.address, 0, sizeof(wildcard.address));
 
 	rcu_read_lock();
 	snapshot = rcu_dereference(owned_ports_snapshot);
 	if (!snapshot || !snapshot->bucket_count ||
 	    time_after_eq(jiffies, snapshot->expires))
 		goto out;
-	slot = owned_port_hash(uid, port, protocol) & (snapshot->bucket_count - 1);
-	for (probes = 0; probes < snapshot->bucket_count; probes++) {
-		const struct vpnhide_owned_port *entry = &snapshot->buckets[slot];
-		if (!entry->uid)
-			break;
-		if (entry->uid == uid && entry->port == port &&
-		    entry->protocol == protocol) {
-			found = true;
-			break;
-		}
-		slot = (slot + 1) & (snapshot->bucket_count - 1);
-	}
+	found = owned_snapshot_contains(snapshot, &wanted) ||
+		(memcmp(wanted.address, wildcard.address, sizeof(wanted.address)) &&
+		 owned_snapshot_contains(snapshot, &wildcard));
 out:
 	rcu_read_unlock();
-	return found || pending_port_lookup(uid, port, protocol);
+	return found || pending_port_lookup_one(&wanted) ||
+	       (memcmp(wanted.address, wildcard.address, sizeof(wanted.address)) &&
+		pending_port_lookup_one(&wildcard));
 }
 
-void vpnhide_record_bound_port(uid_t uid, u16 port, u8 protocol)
+void vpnhide_record_bound_socket(uid_t uid, struct sock *sk)
 {
 	struct vpnhide_policy_snapshot *policy;
 	struct vpnhide_pending_port *selected;
+	struct vpnhide_owned_port owner;
 	unsigned long now = jiffies;
 	unsigned long oldest;
-	u64 key;
 	u32 set;
 	unsigned int way;
-	bool targeted;
+	bool targeted, changed;
 
-	if (!uid || !port || protocol > VH_PROTO_UDP)
+	if (!uid || !owned_port_from_sock(&owner, uid, sk))
 		return;
 	rcu_read_lock();
 	policy = rcu_dereference(global_policy_snapshot);
@@ -196,18 +290,16 @@ void vpnhide_record_bound_port(uid_t uid, u16 port, u8 protocol)
 	if (!targeted)
 		return;
 
-	key = pending_port_key(uid, port, protocol);
-	set = owned_port_hash(uid, port, protocol) &
-	      (VPNHIDE_PENDING_PORT_SETS - 1);
+	set = owned_port_hash(&owner) & (VPNHIDE_PENDING_PORT_SETS - 1);
 	spin_lock(&pending_ports_lock);
 	selected = &pending_ports[set][0];
 	oldest = READ_ONCE(selected->expires);
 	for (way = 0; way < VPNHIDE_PENDING_PORT_WAYS; way++) {
 		struct vpnhide_pending_port *entry = &pending_ports[set][way];
-		u64 entry_key = READ_ONCE(entry->key);
 		unsigned long expires = READ_ONCE(entry->expires);
 
-		if (entry_key == key || !entry_key || time_after_eq(now, expires)) {
+		if (owned_port_equal(&entry->owner, &owner) || !entry->owner.uid ||
+		    time_after_eq(now, expires)) {
 			selected = entry;
 			break;
 		}
@@ -216,13 +308,17 @@ void vpnhide_record_bound_port(uid_t uid, u16 port, u8 protocol)
 			oldest = expires;
 		}
 	}
-	WRITE_ONCE(selected->key, 0);
+	changed = !owned_port_equal(&selected->owner, &owner) ||
+		  time_after_eq(now, selected->expires);
+	WRITE_ONCE(selected->sequence, selected->sequence + 1);
 	smp_wmb();
-	WRITE_ONCE(selected->expires, now + VPNHIDE_PENDING_PORT_TTL);
+	selected->owner = owner;
+	selected->expires = now + VPNHIDE_PENDING_PORT_TTL;
 	smp_wmb();
-	WRITE_ONCE(selected->key, key);
+	WRITE_ONCE(selected->sequence, selected->sequence + 1);
 	spin_unlock(&pending_ports_lock);
-	vpnhide_notify_port_change(uid);
+	if (changed)
+		vpnhide_notify_port_change(uid);
 }
 
 void vpnhide_notify_port_change(uid_t uid)
@@ -277,14 +373,14 @@ static int replace_owned_ports(const struct vpnhide_owned_ports_update *update)
 	snapshot->expires = jiffies + 120 * HZ;
 	for (i = 0; i < update->count; i++) {
 		u32 slot, probes;
-		if (!entries[i].uid || !entries[i].port || entries[i].reserved ||
-		    entries[i].protocol > VH_PROTO_UDP) {
+		if (!entries[i].uid || !entries[i].port ||
+		    entries[i].protocol > VH_PROTO_UDP ||
+		    !owned_port_is_local(&entries[i])) {
 			kvfree(entries);
 			kvfree(snapshot);
 			return -EINVAL;
 		}
-		slot = owned_port_hash(entries[i].uid, entries[i].port,
-				       entries[i].protocol) & (buckets - 1);
+		slot = owned_port_hash(&entries[i]) & (buckets - 1);
 		for (probes = 0; probes < buckets; probes++) {
 			struct vpnhide_owned_port *dst = &snapshot->buckets[slot];
 			if (!dst->uid) {
@@ -292,8 +388,7 @@ static int replace_owned_ports(const struct vpnhide_owned_ports_update *update)
 				snapshot->entry_count++;
 				break;
 			}
-			if (dst->uid == entries[i].uid && dst->port == entries[i].port &&
-			    dst->protocol == entries[i].protocol)
+			if (owned_port_equal(dst, &entries[i]))
 				break;
 			slot = (slot + 1) & (buckets - 1);
 		}

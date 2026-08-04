@@ -890,6 +890,61 @@ static bool should_block_port(const struct vpnhide_policy_snapshot *snapshot,
   return false;
 }
 
+static bool direct_connect_should_block(struct socket *sock,
+                                        struct sockaddr *addr, uid_t uid) {
+  struct vpnhide_policy_snapshot *snapshot;
+  const struct vpnhide_port_target_v3 *urules;
+  bool block = false;
+
+  if (!sock || !sock->sk || !addr)
+    return false;
+
+  rcu_read_lock();
+  snapshot = rcu_dereference(global_policy_snapshot);
+  urules = vpnhide_find_port_target(snapshot, uid);
+  if (!urules)
+    goto out;
+
+  if (addr->sa_family == AF_INET) {
+    struct sockaddr_in *sin = (struct sockaddr_in *)addr;
+    unsigned short port = ntohs(sin->sin_port);
+    unsigned char proto = sock->sk->sk_type == SOCK_STREAM ?
+                              VH_PROTO_TCP : VH_PROTO_UDP;
+    u32 address[4] = {(__force u32)sin->sin_addr.s_addr, 0, 0, 0};
+
+    if ((ipv4_is_loopback(sin->sin_addr.s_addr) ||
+         sin->sin_addr.s_addr == htonl(INADDR_ANY)) &&
+        should_block_port(snapshot, urules, port, proto) &&
+        !vpnhide_uid_owns_port(uid, port, proto, AF_INET, address))
+      block = true;
+  } else if (addr->sa_family == AF_INET6) {
+    struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
+    unsigned short port = ntohs(sin6->sin6_port);
+    unsigned char proto = sock->sk->sk_type == SOCK_STREAM ?
+                              VH_PROTO_TCP : VH_PROTO_UDP;
+    u8 family = AF_INET6;
+    u32 address[4];
+    bool local = ipv6_addr_loopback(&sin6->sin6_addr) ||
+                 ipv6_addr_any(&sin6->sin6_addr);
+
+    memcpy(address, &sin6->sin6_addr, sizeof(address));
+    if (ipv6_addr_v4mapped(&sin6->sin6_addr)) {
+      __be32 v4addr = sin6->sin6_addr.s6_addr32[3];
+
+      local = ipv4_is_loopback(v4addr) || v4addr == htonl(INADDR_ANY);
+      family = AF_INET;
+      address[0] = (__force u32)v4addr;
+      address[1] = address[2] = address[3] = 0;
+    }
+    if (local && should_block_port(snapshot, urules, port, proto) &&
+        !vpnhide_uid_owns_port(uid, port, proto, family, address))
+      block = true;
+  }
+out:
+  rcu_read_unlock();
+  return block;
+}
+
 struct socket_connect_data {
   bool should_block;
   bool intercepted;
@@ -945,9 +1000,10 @@ static int socket_connect_entry(struct kretprobe_instance *ri,
       unsigned short port = ntohs(sin->sin_port);
       unsigned char proto =
           (sock->sk->sk_type == SOCK_STREAM) ? VH_PROTO_TCP : VH_PROTO_UDP;
+      u32 address[4] = {(__force u32)sin->sin_addr.s_addr, 0, 0, 0};
 
       if (should_block_port(snapshot, urules, port, proto) &&
-          !vpnhide_uid_owns_port(uid, port, proto)) {
+          !vpnhide_uid_owns_port(uid, port, proto, AF_INET, address)) {
         data->should_block = true;
         if (sys_connect_uses_wrapper) {
           struct pt_regs *user_regs = (struct pt_regs *)regs->regs[0];
@@ -978,9 +1034,18 @@ static int socket_connect_entry(struct kretprobe_instance *ri,
       unsigned short port = ntohs(sin6->sin6_port);
       unsigned char proto =
           (sock->sk->sk_type == SOCK_STREAM) ? VH_PROTO_TCP : VH_PROTO_UDP;
+      u8 family = AF_INET6;
+      u32 address[4];
+
+      memcpy(address, &sin6->sin6_addr, sizeof(address));
+      if (ipv6_addr_v4mapped(&sin6->sin6_addr)) {
+        family = AF_INET;
+        address[0] = (__force u32)sin6->sin6_addr.s6_addr32[3];
+        address[1] = address[2] = address[3] = 0;
+      }
 
       if (should_block_port(snapshot, urules, port, proto) &&
-          !vpnhide_uid_owns_port(uid, port, proto)) {
+          !vpnhide_uid_owns_port(uid, port, proto, family, address)) {
         data->should_block = true;
         if (sys_connect_uses_wrapper) {
           struct pt_regs *user_regs = (struct pt_regs *)regs->regs[0];
@@ -1032,6 +1097,39 @@ struct kretprobe socket_connect_krp = {
     .kp.symbol_name = "__arm64_sys_connect",
 };
 
+static int security_socket_connect_entry(struct kretprobe_instance *ri,
+                                         struct pt_regs *regs) {
+  struct socket_connect_data *data = (void *)ri->data;
+  uid_t uid = from_kuid(&init_user_ns, current_uid());
+
+  data->should_block = false;
+  data->intercepted = false;
+  if (!is_hook_active(HOOK_CONNECT, uid))
+    return 1;
+  data->should_block = direct_connect_should_block(
+      (struct socket *)regs->regs[0], (struct sockaddr *)regs->regs[1], uid);
+  return data->should_block ? 0 : 1;
+}
+
+static int security_socket_connect_ret(struct kretprobe_instance *ri,
+                                       struct pt_regs *regs) {
+  struct socket_connect_data *data = (void *)ri->data;
+
+  if (data->should_block) {
+    record_kmod_intercept(from_kuid(&init_user_ns, current_uid()), 6);
+    regs_set_return_value(regs, -ECONNREFUSED);
+  }
+  return 0;
+}
+
+struct kretprobe security_socket_connect_krp = {
+    .handler = security_socket_connect_ret,
+    .entry_handler = security_socket_connect_entry,
+    .data_size = sizeof(struct socket_connect_data),
+    .maxactive = VPNHIDE_KRETPROBE_MAXACTIVE,
+    .kp.symbol_name = "security_socket_connect",
+};
+
 struct socket_bind_data {
   struct socket *sock;
   uid_t uid;
@@ -1074,12 +1172,8 @@ static int socket_bind_ret(struct kretprobe_instance *ri,
 
     if (regs_return_value(regs) == 0 && sk &&
         (sk->sk_family == AF_INET || sk->sk_family == AF_INET6) &&
-        (sk->sk_type == SOCK_STREAM || sk->sk_type == SOCK_DGRAM)) {
-      u16 port = inet_sk(sk)->inet_num;
-      u8 protocol = sk->sk_type == SOCK_STREAM ? VH_PROTO_TCP : VH_PROTO_UDP;
-
-      vpnhide_record_bound_port(data->uid, port, protocol);
-    }
+        sk->sk_type == SOCK_DGRAM)
+      vpnhide_record_bound_socket(data->uid, sk);
     if (data->put_needed)
       sockfd_put(data->sock);
   }
@@ -1106,7 +1200,7 @@ static int inet_bind_owner_entry(struct kretprobe_instance *ri,
 
   memset(data, 0, sizeof(*data));
   if (!sock || !sock->sk || sock->sk->sk_family != AF_INET ||
-      (sock->sk->sk_type != SOCK_STREAM && sock->sk->sk_type != SOCK_DGRAM))
+      sock->sk->sk_type != SOCK_DGRAM)
     return 1;
   data->sock = sock;
   data->uid = from_kuid(&init_user_ns, current_uid());
@@ -1118,11 +1212,8 @@ static int inet_bind_owner_ret(struct kretprobe_instance *ri,
   struct inet_bind_owner_data *data = (void *)ri->data;
   struct sock *sk = data->sock ? data->sock->sk : NULL;
 
-  if (regs_return_value(regs) == 0 && sk) {
-    u8 protocol = sk->sk_type == SOCK_STREAM ? VH_PROTO_TCP : VH_PROTO_UDP;
-
-    vpnhide_record_bound_port(data->uid, inet_sk(sk)->inet_num, protocol);
-  }
+  if (regs_return_value(regs) == 0 && sk)
+    vpnhide_record_bound_socket(data->uid, sk);
   return 0;
 }
 
@@ -1160,7 +1251,7 @@ static int inet_listen_owner_ret(struct kretprobe_instance *ri,
   struct sock *sk = data->sock ? data->sock->sk : NULL;
 
   if (regs_return_value(regs) == 0 && sk)
-    vpnhide_record_bound_port(data->uid, inet_sk(sk)->inet_num, VH_PROTO_TCP);
+    vpnhide_record_bound_socket(data->uid, sk);
   return 0;
 }
 
@@ -1187,7 +1278,7 @@ static int inet6_bind_ll_entry(struct kretprobe_instance *ri,
   data = (void *)ri->data;
   memset(data, 0, sizeof(*data));
   if (sock && sock->sk && sock->sk->sk_family == AF_INET6 &&
-      (sock->sk->sk_type == SOCK_STREAM || sock->sk->sk_type == SOCK_DGRAM)) {
+      sock->sk->sk_type == SOCK_DGRAM) {
     data->sock = sock;
     data->uid = from_kuid(&init_user_ns, current_uid());
   }
@@ -1222,11 +1313,11 @@ static int inet6_bind_ll_ret(struct kretprobe_instance *ri,
   struct sock *sk = data->sock ? data->sock->sk : NULL;
 
   if (!data->should_deny) {
-    if (regs_return_value(regs) == 0 && sk) {
-      u8 protocol = sk->sk_type == SOCK_STREAM ? VH_PROTO_TCP : VH_PROTO_UDP;
-
-      vpnhide_record_bound_port(data->uid, inet_sk(sk)->inet_num, protocol);
-    }
+    /* __arm64_sys_bind already records successful UDP binds.  inet6_bind is
+     * also a policy hook, so it remains registered; only use its ownership
+     * side effect when the syscall-level probe was unavailable. */
+    if (!sys_bind_uses_wrapper && regs_return_value(regs) == 0 && sk)
+      vpnhide_record_bound_socket(data->uid, sk);
     return 0;
   }
 

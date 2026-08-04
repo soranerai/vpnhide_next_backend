@@ -106,7 +106,8 @@ struct vpnhide_owned_port {
 	__u32 uid;
 	__u16 port;
 	__u8 protocol;
-	__u8 reserved;
+	__u8 family;
+	__u32 address[4]; /* network byte order; unused words are zero */
 };
 
 struct vpnhide_owned_ports_update {

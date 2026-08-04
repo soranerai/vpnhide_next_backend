@@ -519,7 +519,6 @@ def test_own_port_access():
             os.setuid(115555)
             listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             listener.settimeout(3)
-            listener.bind(("127.0.0.1", 0))
             listener.listen(1)
             os.write(write_fd, struct.pack("I", listener.getsockname()[1]))
             connection, _ = listener.accept()
@@ -559,6 +558,62 @@ def test_own_port_access():
     print(
         f"FAIL: own port access client_status={client_status} listener_status={listener_status}"
     )
+    return False
+
+
+def test_owned_port_address_scope():
+    print("\n--- owned port address-scope checks ---")
+    listeners = []
+    try:
+        for port in (18081, 18082):
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", port))
+            listener.listen(1)
+            listeners.append(listener)
+    except Exception as error:
+        for listener in listeners:
+            listener.close()
+        print(f"FAIL: address-scope listener setup: {error}")
+        return False
+
+    pid = safe_fork()
+    if pid == 0:
+        try:
+            os.setuid(115555)
+            for family, address, port in (
+                (socket.AF_INET, "127.0.0.2", 18081),
+                (socket.AF_INET6, "::1", 18082),
+            ):
+                decoy = socket.socket(family, socket.SOCK_STREAM)
+                if family == socket.AF_INET6:
+                    decoy.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                decoy.bind((address, port))
+                decoy.listen(1)
+                client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                client.settimeout(1)
+                try:
+                    client.connect(("127.0.0.1", port))
+                    print(f"FAIL: ownership for {address}:{port} leaked to 127.0.0.1")
+                    os._exit(1)
+                except OSError as error:
+                    if error.errno != errno.ECONNREFUSED:
+                        print(f"FAIL: address-scope errno={error.errno}")
+                        os._exit(1)
+                finally:
+                    client.close()
+                    decoy.close()
+            os._exit(0)
+        except Exception as error:
+            print(f"FAIL: address-scope child: {error}", flush=True)
+            os._exit(1)
+
+    _, status = os.waitpid(pid, 0)
+    for listener in listeners:
+        listener.close()
+    if status == 0:
+        print("[owned_port_address_scope] exact address and family enforced")
+        return True
     return False
 
 
@@ -1298,6 +1353,7 @@ def main():
     run("connect_port_block", test_connect_port_block)
     run("bind_port_block", test_bind_port_block)
     run("own_port_access", test_own_port_access)
+    run("owned_port_address_scope", test_owned_port_address_scope)
     run("bpf_laundering", test_bpf_laundering, vpn0_idx)
     run("udp_queue_pressure", test_udp_queue_pressure)
     run("tc_qdisc", test_tc_qdisc, vpn0_idx)

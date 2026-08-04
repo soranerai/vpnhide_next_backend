@@ -786,7 +786,8 @@ struct owned_port_list {
 };
 
 static int append_owned_port(struct owned_port_list *list, uint32_t uid,
-			     uint16_t port, uint8_t protocol)
+			     uint16_t port, uint8_t protocol, uint8_t family,
+			     const uint32_t address[4])
 {
 	struct vpnhide_owned_port *grown;
 	if (uid < 10000 || port == 0)
@@ -802,26 +803,41 @@ static int append_owned_port(struct owned_port_list *list, uint32_t uid,
 		list->capacity = capacity;
 	}
 	list->items[list->count++] = (struct vpnhide_owned_port) {
-		.uid = uid, .port = port, .protocol = protocol,
+		.uid = uid, .port = port, .protocol = protocol, .family = family,
 	};
+	memcpy(list->items[list->count - 1].address, address,
+	       sizeof(list->items[list->count - 1].address));
 	return 0;
 }
 
-static bool diag_local_address(const struct inet_diag_msg *msg)
+static bool diag_local_endpoint(const struct inet_diag_msg *msg, uint8_t *family,
+				uint32_t address[4])
 {
+	memset(address, 0, 4 * sizeof(*address));
 	if (msg->idiag_family == AF_INET) {
 		uint32_t addr = msg->id.idiag_src[0];
-		return addr == 0 || (ntohl(addr) >> 24) == 127;
+		if (addr != 0 && (ntohl(addr) >> 24) != 127)
+			return false;
+		*family = AF_INET;
+		address[0] = addr;
+		return true;
 	}
 	if (msg->idiag_family == AF_INET6) {
 		struct in6_addr addr;
 		memcpy(&addr, msg->id.idiag_src, sizeof(addr));
-		if (IN6_IS_ADDR_UNSPECIFIED(&addr) || IN6_IS_ADDR_LOOPBACK(&addr))
+		if (IN6_IS_ADDR_UNSPECIFIED(&addr) || IN6_IS_ADDR_LOOPBACK(&addr)) {
+			*family = AF_INET6;
+			memcpy(address, &addr, sizeof(addr));
 			return true;
+		}
 		if (IN6_IS_ADDR_V4MAPPED(&addr)) {
 			uint32_t v4;
 			memcpy(&v4, &addr.s6_addr[12], sizeof(v4));
-			return (ntohl(v4) >> 24) == 127;
+			if ((ntohl(v4) >> 24) != 127)
+				return false;
+			*family = AF_INET;
+			address[0] = v4;
+			return true;
 		}
 	}
 	return false;
@@ -862,6 +878,8 @@ static int dump_owned_ports_family(int fd, int family, int protocol,
 		for (nlh = (struct nlmsghdr *)buffer; NLMSG_OK(nlh, length);
 		     nlh = NLMSG_NEXT(nlh, length)) {
 			struct inet_diag_msg *msg;
+			uint32_t local_address[4];
+			uint8_t local_family;
 			if (nlh->nlmsg_seq != sequence)
 				continue;
 			if (nlh->nlmsg_type == NLMSG_DONE)
@@ -872,7 +890,7 @@ static int dump_owned_ports_family(int fd, int family, int protocol,
 			    nlh->nlmsg_len < NLMSG_LENGTH(sizeof(*msg)))
 				continue;
 			msg = NLMSG_DATA(nlh);
-			if (!diag_local_address(msg))
+			if (!diag_local_endpoint(msg, &local_family, local_address))
 				continue;
 			/* Connected UDP clients are not local services. */
 			if (protocol == IPPROTO_UDP && msg->id.idiag_dport != 0)
@@ -880,7 +898,8 @@ static int dump_owned_ports_family(int fd, int family, int protocol,
 			if (append_owned_port(list, msg->idiag_uid,
 					      ntohs(msg->id.idiag_sport),
 					      protocol == IPPROTO_TCP ?
-						VH_PROTO_TCP : VH_PROTO_UDP) < 0)
+						VH_PROTO_TCP : VH_PROTO_UDP,
+					      local_family, local_address) < 0)
 				return -1;
 		}
 	}
@@ -893,7 +912,11 @@ static int owned_port_compare(const void *left, const void *right)
 		return a->uid < b->uid ? -1 : 1;
 	if (a->port != b->port)
 		return a->port < b->port ? -1 : 1;
-	return (int)a->protocol - (int)b->protocol;
+	if (a->protocol != b->protocol)
+		return (int)a->protocol - (int)b->protocol;
+	if (a->family != b->family)
+		return (int)a->family - (int)b->family;
+	return memcmp(a->address, b->address, sizeof(a->address));
 }
 
 static int refresh_owned_ports(int control_fd)

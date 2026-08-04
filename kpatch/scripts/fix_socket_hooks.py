@@ -150,6 +150,40 @@ def fix_bind(lines):
     return lines
 
 
+def fix_listen(lines):
+    func_start = _find_function(lines, "int __sys_listen_socket(")
+    if func_start is None:
+        func_start = _find_function(lines, "int __sys_listen(")
+    if func_start is None:
+        print("ERROR: listen implementation not found in socket.c")
+        return lines
+
+    func_end = min(len(lines), func_start + 160)
+    if any("vpnhide_listen_post" in lines[i] for i in range(func_start, func_end)):
+        print("listen hook already present, skipping.")
+        return lines
+
+    target_idx = None
+    for i in range(func_start, func_end):
+        if "->listen(sock," in lines[i]:
+            target_idx = i
+            break
+    if target_idx is None:
+        print("ERROR: could not find listen() call")
+        return lines
+
+    _, stmt_end = _statement_span(lines, target_idx, "listen(")
+    indent = _leading_ws(lines[target_idx])
+    hook = [
+        "#ifdef CONFIG_VPNHIDE\n",
+        f"{indent}vpnhide_listen_post(sock, err);\n",
+        "#endif\n",
+    ]
+    lines = lines[: stmt_end + 1] + hook + lines[stmt_end + 1 :]
+    print(f"listen post-hook injected after line {stmt_end + 1}")
+    return lines
+
+
 def fix_connect(lines):
     func_start = _find_function(lines, "int __sys_connect(")
     if func_start is None:
@@ -541,6 +575,7 @@ def main():
         lines = fix_setsockopt(lines)
     if do_connect:
         lines = fix_connect(lines)
+    lines = fix_listen(lines)
     if do_bind_getname:
         lines = fix_bind(lines)
         lines = fix_getname(lines, "int __sys_getsockname(", 0)

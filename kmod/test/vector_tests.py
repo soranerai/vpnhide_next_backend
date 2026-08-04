@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import ctypes
+import errno
 import fcntl
 import os
 import platform
@@ -598,6 +599,63 @@ def test_own_port_access():
     return False
 
 
+def test_owned_port_address_scope():
+    print("\n--- owned port address-scope checks ---")
+    listeners = []
+    try:
+        for port in (18081, 18082):
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", port))
+            listener.listen(1)
+            listeners.append(listener)
+    except Exception as error:
+        for listener in listeners:
+            listener.close()
+        print(f"FAIL: address-scope listener setup: {error}")
+        return False
+
+    pid = safe_fork()
+    if pid == 0:
+        try:
+            os.setuid(115555)
+            decoys = [
+                (socket.AF_INET, "127.0.0.2", 18081),
+                (socket.AF_INET6, "::1", 18082),
+            ]
+            for family, address, port in decoys:
+                decoy = socket.socket(family, socket.SOCK_STREAM)
+                if family == socket.AF_INET6:
+                    decoy.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                decoy.bind((address, port))
+                decoy.listen(1)
+                client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                client.settimeout(1)
+                try:
+                    client.connect(("127.0.0.1", port))
+                    print(f"FAIL: ownership for {address}:{port} leaked to 127.0.0.1")
+                    os._exit(1)
+                except OSError as error:
+                    if error.errno != errno.ECONNREFUSED:
+                        print(f"FAIL: address-scope errno={error.errno}")
+                        os._exit(1)
+                finally:
+                    client.close()
+                    decoy.close()
+            os._exit(0)
+        except Exception as error:
+            print(f"FAIL: address-scope child: {error}", flush=True)
+            os._exit(1)
+
+    _, status = os.waitpid(pid, 0)
+    for listener in listeners:
+        listener.close()
+    if status == 0:
+        print("[owned_port_address_scope] exact address and family enforced")
+        return True
+    return False
+
+
 # BPF Constants and Structs for Laundering checks
 
 machine = platform.machine()
@@ -973,6 +1031,12 @@ def main():
         success = False
     else:
         print("RESULT own_port_access=PASS")
+
+    if not test_owned_port_address_scope():
+        print("RESULT owned_port_address_scope=FAIL")
+        success = False
+    else:
+        print("RESULT owned_port_address_scope=PASS")
 
     # Run BPF laundering checks
     if not test_bpf_laundering(vpn0_idx):
