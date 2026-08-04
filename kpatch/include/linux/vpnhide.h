@@ -85,7 +85,9 @@ void vpnhide_filename_lookup(int dfd, struct filename *name,
 #else /* !CONFIG_VPNHIDE */
 
 #include <linux/types.h>
+#include <linux/sockptr.h>
 
+struct msghdr;
 struct sk_buff;
 struct net_device;
 struct seq_file;
@@ -100,9 +102,6 @@ struct inode;
 struct filename;
 struct in_pktinfo;
 struct in6_pktinfo;
-#ifndef _LINUX_SOCKPTR_H
-typedef struct { const void *user; bool is_kernel; } sockptr_t;
-#endif
 
 static inline bool vpnhide_should_hide_dev(const struct net_device *d)
 	{ return false; }
