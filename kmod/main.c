@@ -628,7 +628,13 @@ struct kmod_uid_stats_total {
   u64 connect_count;
   u64 getname_count;
   u64 port_count;
-  u64 java_count;
+  u64 java_pm_count;
+  u64 java_um_count;
+  u64 java_nc_count;
+  u64 java_ni_count;
+  u64 java_net_count;
+  u64 java_lp_count;
+  u64 java_cs_count;
 };
 
 static struct kmod_uid_stats_total *kmod_stats;
@@ -675,7 +681,7 @@ void record_kmod_intercept(uid_t uid, int type) {
   spin_unlock_irqrestore(&kmod_stats_lock, flags);
 }
 
-void vpnhide_kmod_record_java_stat(uid_t uid, u64 count) {
+void vpnhide_kmod_record_java_stat(uid_t uid, const char *hook, u64 count) {
   unsigned long flags;
   int i, lo = 0, hi;
   spin_lock_irqsave(&kmod_stats_lock, flags);
@@ -683,7 +689,13 @@ void vpnhide_kmod_record_java_stat(uid_t uid, u64 count) {
   while (lo <= hi) {
     i = lo + ((hi - lo) >> 1);
     if (kmod_stats[i].uid == uid) {
-      kmod_stats[i].java_count += count;
+      if (strcmp(hook, "PackageManager") == 0) kmod_stats[i].java_pm_count += count;
+      else if (strcmp(hook, "UserManager") == 0) kmod_stats[i].java_um_count += count;
+      else if (strcmp(hook, "NetworkCapabilities") == 0) kmod_stats[i].java_nc_count += count;
+      else if (strcmp(hook, "NetworkInfo") == 0) kmod_stats[i].java_ni_count += count;
+      else if (strcmp(hook, "Network") == 0) kmod_stats[i].java_net_count += count;
+      else if (strcmp(hook, "LinkProperties") == 0) kmod_stats[i].java_lp_count += count;
+      else if (strcmp(hook, "ConnectivityService") == 0) kmod_stats[i].java_cs_count += count;
       spin_unlock_irqrestore(&kmod_stats_lock, flags);
       return;
     }
@@ -1260,9 +1272,9 @@ static ssize_t vpnhide_dev_write(struct file *file, const char __user *buf,
           unsigned int uid = 0, count = 0;
           char hook_buf[128] = {0};
           if (sscanf(ptr, "%u;%127[^;];%u", &uid, hook_buf, &count) == 3 && count > 0) {
-            vpnhide_kmod_record_java_stat((uid_t)uid, (u64)count);
+            vpnhide_kmod_record_java_stat((uid_t)uid, hook_buf, (u64)count);
           } else if (sscanf(ptr, "%u;%u", &uid, &count) == 2 && count > 0) {
-            vpnhide_kmod_record_java_stat((uid_t)uid, (u64)count);
+            vpnhide_kmod_record_java_stat((uid_t)uid, "", (u64)count);
           }
         }
         if (!line_end) break;
@@ -1572,7 +1584,13 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
         out[i].connect_count = kmod_stats[i].connect_count;
         out[i].getname_count = kmod_stats[i].getname_count;
         out[i].port_count = kmod_stats[i].port_count;
-        out[i].java_count = kmod_stats[i].java_count;
+        out[i].java_pm_count = kmod_stats[i].java_pm_count;
+        out[i].java_um_count = kmod_stats[i].java_um_count;
+        out[i].java_nc_count = kmod_stats[i].java_nc_count;
+        out[i].java_ni_count = kmod_stats[i].java_ni_count;
+        out[i].java_net_count = kmod_stats[i].java_net_count;
+        out[i].java_lp_count = kmod_stats[i].java_lp_count;
+        out[i].java_cs_count = kmod_stats[i].java_cs_count;
       }
     }
     spin_unlock_irqrestore(&kmod_stats_lock, flags);

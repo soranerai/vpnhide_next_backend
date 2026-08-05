@@ -58,7 +58,13 @@ struct vh_uid_stats_total {
 	u64 connect_count;
 	u64 getname_count;
 	u64 port_count;
-	u64 java_count;
+	u64 java_pm_count;
+	u64 java_um_count;
+	u64 java_nc_count;
+	u64 java_ni_count;
+	u64 java_net_count;
+	u64 java_lp_count;
+	u64 java_cs_count;
 };
 
 static struct {
@@ -717,7 +723,7 @@ increment:
 	spin_unlock(&intercept_stats.lock);
 }
 
-void vpnhide_record_java_stat(uid_t uid, u64 count)
+void vpnhide_record_java_stat(uid_t uid, const char *hook, u64 count)
 {
 	int i, lo = 0, hi;
 	spin_lock(&intercept_stats.lock);
@@ -725,7 +731,13 @@ void vpnhide_record_java_stat(uid_t uid, u64 count)
 	while (lo <= hi) {
 		i = lo + ((hi - lo) >> 1);
 		if (intercept_stats.stats[i].uid == uid) {
-			intercept_stats.stats[i].java_count += count;
+			if (strcmp(hook, "PackageManager") == 0) intercept_stats.stats[i].java_pm_count += count;
+			else if (strcmp(hook, "UserManager") == 0) intercept_stats.stats[i].java_um_count += count;
+			else if (strcmp(hook, "NetworkCapabilities") == 0) intercept_stats.stats[i].java_nc_count += count;
+			else if (strcmp(hook, "NetworkInfo") == 0) intercept_stats.stats[i].java_ni_count += count;
+			else if (strcmp(hook, "Network") == 0) intercept_stats.stats[i].java_net_count += count;
+			else if (strcmp(hook, "LinkProperties") == 0) intercept_stats.stats[i].java_lp_count += count;
+			else if (strcmp(hook, "ConnectivityService") == 0) intercept_stats.stats[i].java_cs_count += count;
 			spin_unlock(&intercept_stats.lock);
 			return;
 		}
@@ -989,9 +1001,9 @@ static ssize_t vpnhide_dev_write(struct file *file, const char __user *buf,
 					unsigned int uid = 0, count = 0;
 					char hook_buf[128] = {0};
 					if (sscanf(ptr, "%u;%127[^;];%u", &uid, hook_buf, &count) == 3 && count > 0) {
-						vpnhide_record_java_stat((uid_t)uid, (u64)count);
+						vpnhide_record_java_stat((uid_t)uid, hook_buf, (u64)count);
 					} else if (sscanf(ptr, "%u;%u", &uid, &count) == 2 && count > 0) {
-						vpnhide_record_java_stat((uid_t)uid, (u64)count);
+						vpnhide_record_java_stat((uid_t)uid, "", (u64)count);
 					}
 				}
 				if (!line_end) break;
@@ -1551,7 +1563,13 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 				out[i].connect_count = intercept_stats.stats[i].connect_count;
 				out[i].getname_count = intercept_stats.stats[i].getname_count;
 				out[i].port_count = intercept_stats.stats[i].port_count;
-				out[i].java_count = intercept_stats.stats[i].java_count;
+				out[i].java_pm_count = intercept_stats.stats[i].java_pm_count;
+				out[i].java_um_count = intercept_stats.stats[i].java_um_count;
+				out[i].java_nc_count = intercept_stats.stats[i].java_nc_count;
+				out[i].java_ni_count = intercept_stats.stats[i].java_ni_count;
+				out[i].java_net_count = intercept_stats.stats[i].java_net_count;
+				out[i].java_lp_count = intercept_stats.stats[i].java_lp_count;
+				out[i].java_cs_count = intercept_stats.stats[i].java_cs_count;
 			}
 		}
 		spin_unlock(&intercept_stats.lock);

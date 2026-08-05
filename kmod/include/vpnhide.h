@@ -91,7 +91,13 @@ struct vpnhide_uid_stats {
 	__u64 connect_count;
 	__u64 getname_count;
 	__u64 port_count;
-	__u64 java_count;
+	__u64 java_pm_count;
+	__u64 java_um_count;
+	__u64 java_nc_count;
+	__u64 java_ni_count;
+	__u64 java_net_count;
+	__u64 java_lp_count;
+	__u64 java_cs_count;
 };
 
 struct vpnhide_stats_snapshot {
