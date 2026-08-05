@@ -1528,7 +1528,7 @@ pub fn check_tcp_mss() -> CheckOutput {
         }
         libc::close(tcp_fd);
 
-        let suspicious = (udp_mtu > 0 && udp_mtu < 1450) || (tcp_mss > 0 && tcp_mss < 1420);
+        let suspicious = (udp_mtu > 0 && udp_mtu < 1380) || (tcp_mss > 0 && tcp_mss < 1340);
 
         if suspicious {
             CheckOutput::fail("VPN detected")
@@ -1598,7 +1598,7 @@ pub fn check_tcp_info_mss() -> CheckOutput {
 
         let snd = info.tcpi_snd_mss;
         let rcv = info.tcpi_rcv_mss;
-        let suspicious = (snd > 0 && snd < 1440) || (rcv > 0 && rcv < 1440);
+        let suspicious = (snd > 0 && snd < 1340) || (rcv > 0 && rcv < 1340);
 
         if suspicious {
             CheckOutput::fail("VPN detected")
@@ -1648,9 +1648,9 @@ pub fn check_udp_pmtu() -> CheckOutput {
             return CheckOutput::fail("check error");
         }
 
-        // Send a 1472-byte payload. Combined with 20-byte IP header and 8-byte UDP header,
-        // it makes a 1500-byte IP packet.
-        let payload = vec![0u8; 1472];
+        // Send a 1382-byte payload. Combined with 20-byte IP header and 8-byte UDP header,
+        // it makes a 1410-byte IP packet.
+        let payload = vec![0u8; 1382];
         let send_ret = libc::send(fd, payload.as_ptr().cast(), payload.len(), 0);
         let err_no = if send_ret < 0 { last_os_errno() } else { 0 };
 
@@ -3305,7 +3305,7 @@ pub fn check_pmtu_cache_poisoning() -> CheckOutput {
             return CheckOutput::fail("check error");
         }
 
-        if mtu > 0 && mtu < 1450 {
+        if mtu > 0 && mtu < 1380 {
             CheckOutput::fail("VPN detected")
         } else {
             CheckOutput::pass("not detected")
