@@ -559,7 +559,8 @@ static void append_stats_point(struct daemon_stats_ring *ring,
 				stats_delta(current[i].sockopt_count, old->sockopt_count) ||
 				stats_delta(current[i].connect_count, old->connect_count) ||
 				stats_delta(current[i].getname_count, old->getname_count) ||
-				stats_delta(current[i].port_count, old->port_count))
+				stats_delta(current[i].port_count, old->port_count) ||
+				stats_delta(current[i].java_count, old->java_count))
 				delta_count++;
 		}
 	}
@@ -584,7 +585,8 @@ static void append_stats_point(struct daemon_stats_ring *ring,
 				 !stats_delta(current[i].sockopt_count, old->sockopt_count) &&
 				 !stats_delta(current[i].connect_count, old->connect_count) &&
 				 !stats_delta(current[i].getname_count, old->getname_count) &&
-				 !stats_delta(current[i].port_count, old->port_count)))
+				 !stats_delta(current[i].port_count, old->port_count) &&
+				 !stats_delta(current[i].java_count, old->java_count)))
 				continue;
 			point.entries[out].uid = current[i].uid;
 			dst = &point.entries[out].ioctl_count;
@@ -595,6 +597,7 @@ static void append_stats_point(struct daemon_stats_ring *ring,
 			dst[4] = stats_delta(current[i].connect_count, old ? old->connect_count : 0);
 			dst[5] = stats_delta(current[i].getname_count, old ? old->getname_count : 0);
 			dst[6] = stats_delta(current[i].port_count, old ? old->port_count : 0);
+			dst[7] = stats_delta(current[i].java_count, old ? old->java_count : 0);
 			out++;
 		}
 		point.count = delta_count;
@@ -645,11 +648,11 @@ static void write_stats_json(FILE *out, const struct daemon_stats_ring *ring)
 		for (uint32_t i = 0; i < point->count; i++) {
 			const struct vpnhide_uid_stats *s = &point->entries[i];
 			if (i) fputc(',', out);
-			fprintf(out, "{\"uid\":%u,\"ioctl\":%llu,\"netlink\":%llu,\"proc\":%llu,\"sockopt\":%llu,\"connect\":%llu,\"getname\":%llu,\"port\":%llu}",
+			fprintf(out, "{\"uid\":%u,\"ioctl\":%llu,\"netlink\":%llu,\"proc\":%llu,\"sockopt\":%llu,\"connect\":%llu,\"getname\":%llu,\"port\":%llu,\"java\":%llu}",
 				s->uid, (unsigned long long)s->ioctl_count, (unsigned long long)s->netlink_count,
 				(unsigned long long)s->proc_count, (unsigned long long)s->sockopt_count,
 				(unsigned long long)s->connect_count, (unsigned long long)s->getname_count,
-				(unsigned long long)s->port_count);
+				(unsigned long long)s->port_count, (unsigned long long)s->java_count);
 		}
 		fputs("]}", out);
 	}

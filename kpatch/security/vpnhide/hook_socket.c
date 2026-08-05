@@ -401,7 +401,7 @@ int vpnhide_connect_pre(struct socket *sock,
 			if (should_block_port(uid, sin->sin_port, protocol) &&
 			    !vpnhide_uid_owns_port(uid, ntohs(sin->sin_port), protocol,
 						   AF_INET, address)) {
-				record_kmod_intercept(uid, HOOK_CONNECT);
+				record_kmod_intercept(uid, HOOK_PORT);
 				return -ECONNREFUSED;
 			}
 		}
@@ -429,7 +429,7 @@ int vpnhide_connect_pre(struct socket *sock,
 			if (should_block_port(uid, sin6->sin6_port, protocol) &&
 			    !vpnhide_uid_owns_port(uid, ntohs(sin6->sin6_port), protocol,
 						   owner_family, owner_address)) {
-				record_kmod_intercept(uid, HOOK_CONNECT);
+				record_kmod_intercept(uid, HOOK_PORT);
 				return -ECONNREFUSED;
 			}
 		}

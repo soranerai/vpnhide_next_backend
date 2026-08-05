@@ -701,6 +701,10 @@ increment:
 	case HOOK_BIND:
 		intercept_stats.stats[i].connect_count++;
 		break;
+	case HOOK_PORT:
+	case 6:
+		intercept_stats.stats[i].port_count++;
+		break;
 	case HOOK_GETNAME_INET:
 	case HOOK_GETNAME_INET6:
 		intercept_stats.stats[i].getname_count++;
@@ -708,6 +712,26 @@ increment:
 	default:
 		intercept_stats.stats[i].ioctl_count++;
 		break;
+	}
+	spin_unlock(&intercept_stats.lock);
+}
+
+void vpnhide_record_java_stat(uid_t uid, u64 count)
+{
+	int i, lo = 0, hi;
+	spin_lock(&intercept_stats.lock);
+	hi = (int)intercept_stats.count - 1;
+	while (lo <= hi) {
+		i = lo + ((hi - lo) >> 1);
+		if (intercept_stats.stats[i].uid == uid) {
+			intercept_stats.stats[i].java_count += count;
+			spin_unlock(&intercept_stats.lock);
+			return;
+		}
+		if (intercept_stats.stats[i].uid < uid)
+			lo = i + 1;
+		else
+			hi = i - 1;
 	}
 	spin_unlock(&intercept_stats.lock);
 }
@@ -954,6 +978,25 @@ static ssize_t vpnhide_dev_write(struct file *file, const char __user *buf,
 		strncpy(java_stats_buf, kbuf + 6, sizeof(java_stats_buf) - 1);
 		java_stats_buf[sizeof(java_stats_buf) - 1] = '\0';
 		mutex_unlock(&java_stats_lock);
+
+		{
+			char *ptr = java_stats_buf;
+			while (*ptr) {
+				char *line_end = strchr(ptr, '\n');
+				if (line_end) *line_end = '\0';
+				if (*ptr) {
+					unsigned int uid = 0, count = 0;
+					char hook_buf[128] = {0};
+					if (sscanf(ptr, "%u;%127[^;];%u", &uid, hook_buf, &count) == 3 && count > 0) {
+						vpnhide_record_java_stat((uid_t)uid, (u64)count);
+					} else if (sscanf(ptr, "%u;%u", &uid, &count) == 2 && count > 0) {
+						vpnhide_record_java_stat((uid_t)uid, (u64)count);
+					}
+				}
+				if (!line_end) break;
+				ptr = line_end + 1;
+			}
+		}
 	} else if (strncmp(kbuf, "status:", 7) == 0) {
 		mutex_lock(&java_status_lock);
 		strncpy(java_status_buf, kbuf + 7, sizeof(java_status_buf) - 1);
@@ -1507,6 +1550,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 				out[i].connect_count = intercept_stats.stats[i].connect_count;
 				out[i].getname_count = intercept_stats.stats[i].getname_count;
 				out[i].port_count = intercept_stats.stats[i].port_count;
+				out[i].java_count = intercept_stats.stats[i].java_count;
 			}
 		}
 		spin_unlock(&intercept_stats.lock);

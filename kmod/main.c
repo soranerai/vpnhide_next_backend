@@ -674,6 +674,27 @@ void record_kmod_intercept(uid_t uid, int type) {
   spin_unlock_irqrestore(&kmod_stats_lock, flags);
 }
 
+void vpnhide_kmod_record_java_stat(uid_t uid, u64 count) {
+  unsigned long flags;
+  int i, lo = 0, hi;
+  spin_lock_irqsave(&kmod_stats_lock, flags);
+  hi = (int)kmod_stats_count - 1;
+  while (lo <= hi) {
+    i = lo + ((hi - lo) >> 1);
+    if (kmod_stats[i].uid == uid) {
+      kmod_stats[i].java_count += count;
+      spin_unlock_irqrestore(&kmod_stats_lock, flags);
+      return;
+    }
+    if (kmod_stats[i].uid < uid)
+      lo = i + 1;
+    else
+      hi = i - 1;
+  }
+  spin_unlock_irqrestore(&kmod_stats_lock, flags);
+}
+
+
 static int kmod_stats_reconcile(const struct vpnhide_policy_snapshot *snapshot) {
   struct kmod_uid_stats_total *replacement = NULL, *old;
   unsigned long flags;
@@ -1228,6 +1249,25 @@ static ssize_t vpnhide_dev_write(struct file *file, const char __user *buf,
     strncpy(java_stats_buf, kbuf + 6, sizeof(java_stats_buf) - 1);
     java_stats_buf[sizeof(java_stats_buf) - 1] = '\0';
     mutex_unlock(&java_stats_lock);
+
+    {
+      char *ptr = java_stats_buf;
+      while (*ptr) {
+        char *line_end = strchr(ptr, '\n');
+        if (line_end) *line_end = '\0';
+        if (*ptr) {
+          unsigned int uid = 0, count = 0;
+          char hook_buf[128] = {0};
+          if (sscanf(ptr, "%u;%127[^;];%u", &uid, hook_buf, &count) == 3 && count > 0) {
+            vpnhide_kmod_record_java_stat((uid_t)uid, (u64)count);
+          } else if (sscanf(ptr, "%u;%u", &uid, &count) == 2 && count > 0) {
+            vpnhide_kmod_record_java_stat((uid_t)uid, (u64)count);
+          }
+        }
+        if (!line_end) break;
+        ptr = line_end + 1;
+      }
+    }
   } else if (strncmp(kbuf, "status:", 7) == 0) {
     mutex_lock(&java_status_lock);
     strncpy(java_status_buf, kbuf + 7, sizeof(java_status_buf) - 1);
@@ -1531,6 +1571,7 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
         out[i].connect_count = kmod_stats[i].connect_count;
         out[i].getname_count = kmod_stats[i].getname_count;
         out[i].port_count = kmod_stats[i].port_count;
+        out[i].java_count = kmod_stats[i].java_count;
       }
     }
     spin_unlock_irqrestore(&kmod_stats_lock, flags);

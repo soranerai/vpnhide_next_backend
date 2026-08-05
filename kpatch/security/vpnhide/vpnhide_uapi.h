@@ -88,6 +88,7 @@ struct vpnhide_uid_stats {
 	__u64 connect_count;
 	__u64 getname_count;
 	__u64 port_count;
+	__u64 java_count;
 };
 
 struct vpnhide_stats_snapshot {

@@ -8,7 +8,7 @@ _Static_assert(sizeof(struct vpnhide_policy_ioctl) == 24,
 	       "policy ioctl header must remain pointer ABI stable");
 _Static_assert(sizeof(struct vpnhide_policy_payload) > 16383,
 	       "legacy payload must use the explicit pointer ABI");
-_Static_assert(sizeof(struct vpnhide_uid_stats) == 64,
+_Static_assert(sizeof(struct vpnhide_uid_stats) == 72,
 	       "stats entry ABI must remain fixed-width");
 _Static_assert(sizeof(struct vpnhide_stats_snapshot) == 32,
 	       "stats snapshot ABI must remain pointer-based");

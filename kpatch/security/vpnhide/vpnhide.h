@@ -97,6 +97,7 @@ enum vpnhide_hook_idx {
 	HOOK_UDPV6_SENDMSG = 29,
 	HOOK_FIB_TRIE      = 30,
 	HOOK_TC_FILL_QDISC = 31,
+	HOOK_PORT          = 32,
 };
 
 struct vpnhide_policy_snapshot {
