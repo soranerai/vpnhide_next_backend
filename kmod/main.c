@@ -628,6 +628,7 @@ struct kmod_uid_stats_total {
   u64 connect_count;
   u64 getname_count;
   u64 port_count;
+  u64 java_count;
 };
 
 static struct kmod_uid_stats_total *kmod_stats;
