@@ -214,13 +214,9 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6,
 			continue;
 
 		char *name = ifa->ifa_name;
-		bool is_vpn = false;
-
-		if (ifa->ifa_flags & IFF_POINTOPOINT) {
-			is_vpn = true;
-		} else {
-			is_vpn = daemon_is_vpn_ifname(name, &prefixes);
-		}
+		bool is_vpn = vpnhide_daemon_is_vpn_interface(
+			name, (ifa->ifa_flags & IFF_POINTOPOINT) != 0,
+			daemon_is_vpn_ifname(name, &prefixes));
 
 		if (is_vpn) {
 			unsigned int vpn_idx = if_nametoindex(name);
@@ -308,11 +304,7 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6,
 		} else if (strncmp(info->name, "wlan", 4) == 0 ||
 			   strncmp(info->name, "ap", 2) == 0) {
 			info->score = 50000;
-		} else if (strncmp(info->name, "rmnet", 5) == 0 ||
-			   strncmp(info->name, "ccmni", 5) == 0 ||
-			   strncmp(info->name, "epdg", 4) == 0 ||
-			   strncmp(info->name, "r_net", 5) == 0 ||
-			   strncmp(info->name, "pdp", 3) == 0) {
+		} else if (vpnhide_daemon_is_cellular_uplink(info->name)) {
 			info->score = 10000;
 		}
 
@@ -395,6 +387,8 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6,
 			}
 		}
 	} else {
+		struct vpnhide_cover_iface ci = { .ifindex = 0 };
+		ioctl(fd, VH_SET_COVER_IFACE, &ci);
 		if (write(fd, "cover_iface:none\n", 17) < 0) {
 			/* The control fd may disappear during module removal. */
 		}

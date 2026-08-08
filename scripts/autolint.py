@@ -201,7 +201,8 @@ def main() -> int:
 
     # host test
     if is_tool_available("gcc"):
-        test_bin = ROOT_DIR / "kmod/test_iface_lists"
+        iface_test_bin = ROOT_DIR / "kmod/test_iface_lists"
+        daemon_test_bin = ROOT_DIR / "kmod/test/daemon_iface_test"
         try:
             run_command(
                 [
@@ -210,16 +211,29 @@ def main() -> int:
                     "-Wall",
                     "-Werror",
                     "-o",
-                    str(test_bin),
+                    str(iface_test_bin),
                     "kmod/test_iface_lists.c",
                 ]
             )
-            run_command([str(test_bin)])
+            run_command([str(iface_test_bin)])
+            run_command(
+                [
+                    "gcc",
+                    "-O2",
+                    "-Wall",
+                    "-Werror",
+                    "-o",
+                    str(daemon_test_bin),
+                    "kmod/test/daemon_iface_test.c",
+                ]
+            )
+            run_command([str(daemon_test_bin)])
         except subprocess.CalledProcessError:
             failed = True
         finally:
-            if test_bin.exists():
-                test_bin.unlink()
+            for test_bin in (iface_test_bin, daemon_test_bin):
+                if test_bin.exists():
+                    test_bin.unlink()
     else:
         print("Warning: 'gcc' not found. Skipping host C test.")
 

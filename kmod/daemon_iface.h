@@ -20,4 +20,35 @@ static inline bool vpnhide_daemon_is_cover_candidate(const char *ifname)
 	return ifname && ifname[0] && strncmp(ifname, "dummy", 5) != 0;
 }
 
+/*
+ * IFF_POINTOPOINT describes the link topology, not whether a netdev is a
+ * VPN.  Android cellular drivers commonly expose the physical uplink with
+ * this flag, so treating it as an unconditional VPN marker drops the only
+ * usable cover interface when Wi-Fi is down.
+ *
+ * Keep this list aligned with the cellular families preferred by the cover
+ * scoring code.  An explicit static/configured VPN-name match still wins;
+ * this exception only narrows the anonymous point-to-point heuristic.
+ */
+static inline bool vpnhide_daemon_is_cellular_uplink(const char *ifname)
+{
+	return ifname &&
+	       (strncmp(ifname, "rmnet", 5) == 0 ||
+		strncmp(ifname, "ccmni", 5) == 0 ||
+		strncmp(ifname, "epdg", 4) == 0 ||
+		strncmp(ifname, "r_net", 5) == 0 ||
+		strncmp(ifname, "pdp", 3) == 0);
+}
+
+static inline bool
+vpnhide_daemon_is_vpn_interface(const char *ifname, bool is_point_to_point,
+				 bool name_matches_vpn)
+{
+	if (name_matches_vpn)
+		return true;
+
+	return is_point_to_point &&
+	       !vpnhide_daemon_is_cellular_uplink(ifname);
+}
+
 #endif /* VPNHIDE_DAEMON_IFACE_H */
