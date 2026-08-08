@@ -5,18 +5,7 @@ ui_print "- VPNHide Next (kernel) ${MOD_VER:-unknown}"
 ui_print "- Installing user-space utilities to $MODPATH"
 
 set_perm "$MODPATH/vpnhide-ctl" 0 0 0755
-
-if [ -r "$MODPATH/kernel-update.sh" ]; then
-    # Resolved from Magisk/KernelSU's runtime MODPATH.
-    # shellcheck disable=SC1090,SC1091
-    . "$MODPATH/kernel-update.sh"
-    if ! vpnhide_offer_kernel_update; then
-        ui_print "! Automatic kernel update was not completed"
-        ui_print "- VPNHide Bridge installation will continue"
-    fi
-else
-    ui_print "! Kernel updater script is missing; skipping kernel update"
-fi
+ui_print "- Kernel updates are managed by the VPNHide Next app"
 
 # Legacy targets files to migrate
 LEGACY_FILES_EXIST=0
