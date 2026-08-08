@@ -19,20 +19,27 @@ blacklist is used.
 
 `ALLOWLIST` means that selected applications are exceptions. The resolver
 queries Package Manager and targets every eligible application UID that is
-not selected for the corresponding layer. It never targets:
+not selected for the corresponding layer. By default it never targets:
 
-- UID 0, UID 1000, or any UID below 10000;
+- UID 0, UID 1000, or any appId below 10000;
 - the manager application's UID in `BLACKLIST` mode (in `ALLOWLIST` it is
   eligible unless selected explicitly);
-- packages whose APK is outside `/data/app/`.
+- system packages, including packages whose APK is outside `/data/app/`.
 
 The last rule is intentionally conservative and protects system, privileged,
 APEX, vendor, product, and shared system UID groups. The resolver also asks
 Package Manager for the authoritative system-package set, so updated system
-APKs under `/data/app/` and every package sharing a protected UID are excluded.
-UID protection uses the appId component (`uid % 100000`) for secondary users.
-A selected system package is reported as ignored rather than being forced into
-the target set.
+APKs under `/data/app/` are classified correctly.
+
+The frontend may opt a Package Manager-verified system package into normal
+per-layer list semantics with `apps[].systemPolicyExplicit: true`. In
+`BLACKLIST`, enabled fields become targets. In `ALLOWLIST`, disabled fields
+become targets. A missing marker always retains the legacy protected default,
+which keeps old configurations and newly installed system packages safe. The
+package name, user and current UID must match; a stale UID hint cannot opt in a
+different package. UID protection uses the appId component (`uid % 100000`)
+for secondary users, and core appIds below 10000 remain ineligible even with
+an explicit marker.
 
 Use the userspace preview before applying a policy:
 
@@ -63,9 +70,10 @@ been removed. The corresponding GET ioctls remain read-only diagnostics.
 
 Port hiding follows the same `listMode`. In `BLACKLIST`, apps with
 `portHiding: true` are targeted. In `ALLOWLIST`, those apps are exceptions and
-all other eligible third-party applications are targeted. System packages,
-the manager UID in `BLACKLIST`, and isolated/system UIDs are never port
-targets. Port rules are resolved independently from the application exception
+all other eligible third-party applications are targeted. System packages
+require the same explicit marker, while the manager UID in `BLACKLIST` and
+core system UIDs are never port targets. Port rules are resolved independently
+from the application exception
 set. In `ALLOWLIST`, a `portHiding: true` app with no enabled matching rules
 sees all ports; when rules exist, its matching app-specific rules and enabled
 `massPortRules` form its visible-port set, and the kernel receives the

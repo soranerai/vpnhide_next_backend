@@ -48,7 +48,7 @@ void vpnhide_uid_vector_free(struct vpnhide_uid_vector *vector);
 void vpnhide_port_policy_free(struct vpnhide_port_policy *policy);
 
 /* Resolve the declarative JSON policy into the two UID snapshots consumed by
- * the kernel. In allowlist mode, system packages are never made targets. */
+ * the kernel. System packages require an explicit, PM-verified override. */
 int vpnhide_resolve_targets(const JSON_Object *root, uid_t self_uid,
 				    struct vpnhide_uid_vector *kmod,
 				    struct vpnhide_uid_vector *lsposed,

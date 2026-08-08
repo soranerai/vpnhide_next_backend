@@ -1,0 +1,15 @@
+{
+  "globalConfig": {
+    "listMode": "BLACKLIST"
+  },
+  "apps": [
+    {
+      "packageName": "com.android.target",
+      "userId": 0,
+      "uid": 10004,
+      "kmod": true,
+      "lsposed": true,
+      "portHiding": true
+    }
+  ]
+}
