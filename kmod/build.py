@@ -288,6 +288,10 @@ def build_bridge(repo_root: Path, kmod_dir: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="vpnhide-bridge-") as tmp:
         staging = Path(tmp)
         shutil.copytree(source, staging, dirs_exist_ok=True)
+        # Kernel selection/flashing is owned by the Android app. Shipping the
+        # legacy volume-key updater in the bridge would create a second,
+        # competing update flow when a root manager runs customize.sh.
+        (staging / "kernel-update.sh").unlink(missing_ok=True)
 
         shutil.copy2(ctl_src, staging / "vpnhide-ctl")
         shutil.copy2(daemon_src, staging / "vpnhide-daemon")
