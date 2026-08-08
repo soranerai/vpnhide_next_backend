@@ -643,6 +643,103 @@ DEFINE_SPINLOCK(kmod_stats_lock);
 static atomic64_t kmod_stats_sequence = ATOMIC64_INIT(0);
 static u64 kmod_stats_session_id;
 
+#define VPNHIDE_PORT_STATS_CAPACITY 65536U
+#define VPNHIDE_PORT_STATS_MASK (VPNHIDE_PORT_STATS_CAPACITY - 1)
+#define VPNHIDE_PORT_STATS_TTL (6UL * 60 * 60 * HZ)
+#define VPNHIDE_PORT_STAT_EMPTY 0
+#define VPNHIDE_PORT_STAT_USED 1
+#define VPNHIDE_PORT_STAT_TOMBSTONE 2
+
+struct kmod_port_stats_total {
+  uid_t uid;
+  u16 port;
+  u8 protocol;
+  u8 state;
+  u64 count;
+  unsigned long last_seen;
+};
+
+static struct kmod_port_stats_total *kmod_port_stats;
+static u64 kmod_port_stats_dropped;
+
+static u32 port_stats_hash(uid_t uid, u16 port, u8 protocol) {
+  u32 value = (u32)uid * 0x9e3779b1U;
+  value ^= (u32)port * 0x85ebca6bU;
+  value ^= (u32)protocol * 0xc2b2ae35U;
+  value ^= value >> 16;
+  return value;
+}
+
+void record_port_intercept(uid_t uid, u16 port, u8 protocol) {
+  unsigned long flags;
+  u32 hash, probe, first_tombstone = VPNHIDE_PORT_STATS_CAPACITY;
+
+  record_kmod_intercept(uid, 6);
+  if (!kmod_port_stats || !port || protocol > VH_PROTO_UDP)
+    return;
+
+  hash = port_stats_hash(uid, port, protocol);
+  spin_lock_irqsave(&kmod_stats_lock, flags);
+  for (probe = 0; probe < VPNHIDE_PORT_STATS_CAPACITY; probe++) {
+    u32 index = (hash + probe) & VPNHIDE_PORT_STATS_MASK;
+    struct kmod_port_stats_total *entry = &kmod_port_stats[index];
+
+    if (entry->state == VPNHIDE_PORT_STAT_USED && entry->uid == uid &&
+        entry->port == port && entry->protocol == protocol) {
+      entry->count++;
+      entry->last_seen = jiffies;
+      spin_unlock_irqrestore(&kmod_stats_lock, flags);
+      return;
+    }
+    if (entry->state == VPNHIDE_PORT_STAT_TOMBSTONE &&
+        first_tombstone == VPNHIDE_PORT_STATS_CAPACITY)
+      first_tombstone = index;
+    if (entry->state == VPNHIDE_PORT_STAT_EMPTY) {
+      if (first_tombstone != VPNHIDE_PORT_STATS_CAPACITY)
+        entry = &kmod_port_stats[first_tombstone];
+      entry->uid = uid;
+      entry->port = port;
+      entry->protocol = protocol;
+      entry->count = 1;
+      entry->last_seen = jiffies;
+      entry->state = VPNHIDE_PORT_STAT_USED;
+      spin_unlock_irqrestore(&kmod_stats_lock, flags);
+      return;
+    }
+  }
+  if (first_tombstone != VPNHIDE_PORT_STATS_CAPACITY) {
+    struct kmod_port_stats_total *entry = &kmod_port_stats[first_tombstone];
+    entry->uid = uid;
+    entry->port = port;
+    entry->protocol = protocol;
+    entry->count = 1;
+    entry->last_seen = jiffies;
+    entry->state = VPNHIDE_PORT_STAT_USED;
+    spin_unlock_irqrestore(&kmod_stats_lock, flags);
+    return;
+  }
+  kmod_port_stats_dropped++;
+  spin_unlock_irqrestore(&kmod_stats_lock, flags);
+}
+
+static u32 count_live_port_stats_locked(void) {
+  u32 i, count = 0;
+
+  if (!kmod_port_stats)
+    return 0;
+  for (i = 0; i < VPNHIDE_PORT_STATS_CAPACITY; i++) {
+    struct kmod_port_stats_total *entry = &kmod_port_stats[i];
+    if (entry->state != VPNHIDE_PORT_STAT_USED)
+      continue;
+    if (time_after(jiffies, entry->last_seen + VPNHIDE_PORT_STATS_TTL)) {
+      entry->state = VPNHIDE_PORT_STAT_TOMBSTONE;
+      continue;
+    }
+    count++;
+  }
+  return count;
+}
+
 void record_kmod_intercept(uid_t uid, int type) {
   int lo, hi;
   unsigned long flags;
@@ -1613,6 +1710,111 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
     ret = 0;
     break;
   }
+  case VH_GET_STATS_V2: {
+    struct vpnhide_stats_snapshot_v2 request;
+    struct vpnhide_uid_stats *uid_out = NULL;
+    struct vpnhide_port_stats *port_out = NULL;
+    unsigned long flags;
+    u32 uid_count, port_count, uid_allocated = 0, port_allocated = 0;
+    u32 i, out_index;
+
+    if (copy_from_user(&request, (void __user *)arg, sizeof(request)))
+      return -EFAULT;
+    if ((request.uid_capacity && !request.uid_entries_ptr) ||
+        (request.port_capacity && !request.port_entries_ptr))
+      return -EINVAL;
+
+    spin_lock_irqsave(&kmod_stats_lock, flags);
+    uid_count = kmod_stats_count;
+    port_count = count_live_port_stats_locked();
+    spin_unlock_irqrestore(&kmod_stats_lock, flags);
+
+    if (request.uid_capacity >= uid_count && uid_count) {
+      uid_out = kvmalloc_array(uid_count, sizeof(*uid_out), GFP_KERNEL);
+      if (!uid_out)
+        return -ENOMEM;
+      uid_allocated = uid_count;
+    }
+    if (request.port_capacity >= port_count && port_count) {
+      port_out = kvmalloc_array(port_count, sizeof(*port_out), GFP_KERNEL);
+      if (!port_out) {
+        kvfree(uid_out);
+        return -ENOMEM;
+      }
+      port_allocated = port_count;
+    }
+
+    spin_lock_irqsave(&kmod_stats_lock, flags);
+    uid_count = kmod_stats_count;
+    port_count = count_live_port_stats_locked();
+    request.uid_count = uid_count;
+    request.port_count = port_count;
+    request.sequence = atomic64_inc_return(&kmod_stats_sequence);
+    request.monotonic_ns = ktime_get_ns();
+    request.dropped_port_entries = kmod_port_stats_dropped;
+    if (uid_out && request.uid_capacity >= uid_count &&
+        uid_allocated >= uid_count) {
+      for (i = 0; i < uid_count; i++) {
+        uid_out[i].uid = kmod_stats[i].uid;
+        uid_out[i].ioctl_count = kmod_stats[i].ioctl_count;
+        uid_out[i].netlink_count = kmod_stats[i].netlink_count;
+        uid_out[i].proc_count = kmod_stats[i].proc_count;
+        uid_out[i].sockopt_count = kmod_stats[i].sockopt_count;
+        uid_out[i].connect_count = kmod_stats[i].connect_count;
+        uid_out[i].getname_count = kmod_stats[i].getname_count;
+        uid_out[i].port_count = kmod_stats[i].port_count;
+        uid_out[i].java_pm_count = kmod_stats[i].java_pm_count;
+        uid_out[i].java_um_count = kmod_stats[i].java_um_count;
+        uid_out[i].java_nc_count = kmod_stats[i].java_nc_count;
+        uid_out[i].java_ni_count = kmod_stats[i].java_ni_count;
+        uid_out[i].java_net_count = kmod_stats[i].java_net_count;
+        uid_out[i].java_lp_count = kmod_stats[i].java_lp_count;
+        uid_out[i].java_cs_count = kmod_stats[i].java_cs_count;
+      }
+    }
+    if (port_out && request.port_capacity >= port_count &&
+        port_allocated >= port_count) {
+      for (i = 0, out_index = 0; i < VPNHIDE_PORT_STATS_CAPACITY; i++) {
+        struct kmod_port_stats_total *entry = &kmod_port_stats[i];
+        if (entry->state != VPNHIDE_PORT_STAT_USED)
+          continue;
+        port_out[out_index].uid = entry->uid;
+        port_out[out_index].port = entry->port;
+        port_out[out_index].protocol = entry->protocol;
+        port_out[out_index].reserved = 0;
+        port_out[out_index].count = entry->count;
+        out_index++;
+      }
+    }
+    spin_unlock_irqrestore(&kmod_stats_lock, flags);
+
+    if (request.uid_capacity < uid_count || request.port_capacity < port_count ||
+        uid_allocated < uid_count || port_allocated < port_count) {
+      kvfree(uid_out);
+      kvfree(port_out);
+      if (copy_to_user((void __user *)arg, &request, sizeof(request)))
+        return -EFAULT;
+      return -ENOSPC;
+    }
+    if (uid_out && copy_to_user((void __user *)(unsigned long)request.uid_entries_ptr,
+                                uid_out, uid_count * sizeof(*uid_out))) {
+      kvfree(uid_out);
+      kvfree(port_out);
+      return -EFAULT;
+    }
+    if (port_out && copy_to_user((void __user *)(unsigned long)request.port_entries_ptr,
+                                 port_out, port_count * sizeof(*port_out))) {
+      kvfree(uid_out);
+      kvfree(port_out);
+      return -EFAULT;
+    }
+    kvfree(uid_out);
+    kvfree(port_out);
+    if (copy_to_user((void __user *)arg, &request, sizeof(request)))
+      return -EFAULT;
+    ret = 0;
+    break;
+  }
   case VH_GET_STATS_SESSION: {
     if (copy_to_user((void __user *)arg, &kmod_stats_session_id,
                      sizeof(kmod_stats_session_id)))
@@ -1623,6 +1825,14 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
   case VH_CLEAR_STATS: {
     unsigned long flags;
     u32 i;
+    struct kmod_port_stats_total *old_port_stats;
+    struct kmod_port_stats_total *replacement_port_stats;
+
+    replacement_port_stats = kvcalloc(VPNHIDE_PORT_STATS_CAPACITY,
+                                      sizeof(*replacement_port_stats),
+                                      GFP_KERNEL);
+    if (!replacement_port_stats)
+      return -ENOMEM;
     spin_lock_irqsave(&kmod_stats_lock, flags);
     for (i = 0; i < kmod_stats_count; i++) {
       uid_t uid = kmod_stats[i].uid;
@@ -1630,7 +1840,11 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
       kmod_stats[i].uid = uid;
     }
     atomic64_set(&kmod_stats_sequence, 0);
+    old_port_stats = kmod_port_stats;
+    kmod_port_stats = replacement_port_stats;
+    kmod_port_stats_dropped = 0;
     spin_unlock_irqrestore(&kmod_stats_lock, flags);
+    kvfree(old_port_stats);
     ret = 0;
     break;
   }
@@ -1781,6 +1995,11 @@ static struct kretprobe_reg probes[] = {
 static int __init vpnhide_init(void) {
   int i, ret, ok = 0;
 
+  kmod_port_stats = kvcalloc(VPNHIDE_PORT_STATS_CAPACITY,
+                             sizeof(*kmod_port_stats), GFP_KERNEL);
+  if (!kmod_port_stats)
+    return -ENOMEM;
+
   kmod_stats_session_id = get_random_u64();
   if (!kmod_stats_session_id)
     kmod_stats_session_id = 1;
@@ -1882,6 +2101,8 @@ static int __init vpnhide_init(void) {
   ret = misc_register(&vpnhide_misc);
   if (ret) {
     pr_err(MODNAME ": failed to register misc device\n");
+    kvfree(kmod_port_stats);
+    kmod_port_stats = NULL;
   }
 
   vpnhide_dbg("loaded\n");
@@ -1931,6 +2152,8 @@ static void __exit vpnhide_exit(void) {
   kvfree(kmod_stats);
   kmod_stats = NULL;
   kmod_stats_count = 0;
+  kvfree(kmod_port_stats);
+  kmod_port_stats = NULL;
   vpnhide_udp_rates_destroy();
 
   spin_lock(&active_vpns_lock);

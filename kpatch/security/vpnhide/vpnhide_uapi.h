@@ -109,6 +109,29 @@ struct vpnhide_stats_snapshot {
 #define VH_CLEAR_STATS _IO(VH_IOCTL_MAGIC, 0x0C)
 #define VH_GET_STATS_SESSION _IOR(VH_IOCTL_MAGIC, 0x22, __u64)
 
+struct vpnhide_port_stats {
+	uid_t uid;
+	__u16 port;
+	__u8 protocol;
+	__u8 reserved;
+	__u64 count;
+};
+
+struct vpnhide_stats_snapshot_v2 {
+	__u32 uid_capacity;
+	__u32 uid_count;
+	__u32 port_capacity;
+	__u32 port_count;
+	__u64 sequence;
+	__u64 monotonic_ns;
+	__u64 uid_entries_ptr;
+	__u64 port_entries_ptr;
+	__u64 dropped_port_entries;
+};
+
+#define VH_GET_STATS_V2 \
+	_IOWR(VH_IOCTL_MAGIC, 0x25, struct vpnhide_stats_snapshot_v2)
+
 struct vpnhide_owned_port {
 	__u32 uid;
 	__u16 port;
