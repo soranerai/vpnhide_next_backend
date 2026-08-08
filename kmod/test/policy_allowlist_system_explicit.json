@@ -1,0 +1,24 @@
+{
+  "globalConfig": {
+    "listMode": "ALLOWLIST"
+  },
+  "apps": [
+    {
+      "packageName": "com.example.keep",
+      "userId": 0,
+      "uid": 10001,
+      "kmod": true,
+      "lsposed": true,
+      "portHiding": true
+    },
+    {
+      "packageName": "com.android.target",
+      "userId": 0,
+      "uid": 10004,
+      "kmod": false,
+      "lsposed": true,
+      "portHiding": false,
+      "systemPolicyExplicit": true
+    }
+  ]
+}

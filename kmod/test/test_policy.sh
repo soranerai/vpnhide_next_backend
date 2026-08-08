@@ -11,7 +11,7 @@ DYNAMIC_JSON="${OUT}.dynamic.json"
 DYNAMIC_PM="${OUT}.pm.sh"
 trap 'rm -f "$OUT" "$ABI_OUT" "$KPATCH_ABI_OUT" "$PACK_OUT" "$DYNAMIC_JSON" "$DYNAMIC_PM"' EXIT
 
-PM_COMMAND="printf 'package:/system/priv-app/Settings/Settings.apk=com.android.settings uid:1000\\npackage:/data/app/manager/base.apk=dev.soranerai.vpnhidenext uid:10003\\npackage:/data/app/~~abc==/com.example.keep-def==/base.apk=com.example.keep uid:10001,110001\\npackage:/data/app/hide/base.apk=com.example.hide uid:10002\\npackage:/data/app/target/base.apk=com.example.target uid:10002\\n'"
+PM_COMMAND="printf 'package:/system/priv-app/Settings/Settings.apk=com.android.settings uid:1000\\npackage:/system/app/Target/Target.apk=com.android.target uid:10004\\npackage:/data/app/manager/base.apk=dev.soranerai.vpnhidenext uid:10003\\npackage:/data/app/~~abc==/com.example.keep-def==/base.apk=com.example.keep uid:10001,110001\\npackage:/data/app/hide/base.apk=com.example.hide uid:10002\\npackage:/data/app/target/base.apk=com.example.target uid:10002\\n'"
 
 ${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror \
   -I"$REPO" -DVPNHIDE_PM_COMMAND="\"$PM_COMMAND\"" \
@@ -43,6 +43,35 @@ grep -q '^kmod_targets=3$' <<<"$OUTPUT"
 grep -q '^lsposed_targets=3$' <<<"$OUTPUT"
 grep -q '^port_targets=4$' <<<"$OUTPUT"
 grep -q '^ignored_selected_system_packages=0$' <<<"$OUTPUT"
+
+# Legacy/default system packages remain protected, while an explicit policy
+# can independently target their kernel, framework, and port layers.
+OUTPUT="$($OUT validate "$HERE/policy_blacklist_system_legacy.json" 10003)"
+grep -q '^kmod_targets=1$' <<<"$OUTPUT"
+grep -q '^lsposed_targets=1$' <<<"$OUTPUT"
+grep -q '^port_targets=0$' <<<"$OUTPUT"
+
+OUTPUT="$($OUT validate "$HERE/policy_blacklist_system_core_explicit.json" 10003)"
+grep -q '^kmod_targets=1$' <<<"$OUTPUT"
+grep -q '^lsposed_targets=1$' <<<"$OUTPUT"
+grep -q '^port_targets=0$' <<<"$OUTPUT"
+
+OUTPUT="$($OUT validate "$HERE/policy_blacklist_system_stale.json" 10003)"
+grep -q '^kmod_targets=1$' <<<"$OUTPUT"
+grep -q '^lsposed_targets=1$' <<<"$OUTPUT"
+grep -q '^port_targets=0$' <<<"$OUTPUT"
+
+OUTPUT="$($OUT preview "$HERE/policy_blacklist_system_explicit.json" 10003)"
+grep -q '^kmod_targets=2$' <<<"$OUTPUT"
+grep -q '^lsposed_targets=2$' <<<"$OUTPUT"
+grep -q '^port_targets=1$' <<<"$OUTPUT"
+grep -q '^port_target\[0\]\.uid=10004$' <<<"$OUTPUT"
+
+OUTPUT="$($OUT preview "$HERE/policy_allowlist_system_explicit.json" 10003)"
+grep -q '^kmod_targets=4$' <<<"$OUTPUT"
+grep -q '^lsposed_targets=3$' <<<"$OUTPUT"
+grep -q '^port_targets=5$' <<<"$OUTPUT"
+grep -q '^port_target\[[0-9]\]\.uid=10004$' <<<"$OUTPUT"
 
 # ALLOWLIST without any active port rules: the selected exception is explicit
 # unrestricted, while unselected eligible UIDs are explicit deny-all.

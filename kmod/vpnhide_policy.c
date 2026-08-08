@@ -501,6 +501,78 @@ static int selected_for_layer(const JSON_Array *apps, const char *package,
 	return 0;
 }
 
+static int system_policy_is_explicit(const JSON_Array *apps, const char *package,
+				     int user_id, uid_t uid)
+{
+	size_t i, count;
+
+	if (!apps)
+		return 0;
+	count = json_array_get_count(apps);
+	for (i = 0; i < count; i++) {
+		JSON_Object *app = json_array_get_object(apps, i);
+		const char *name;
+		int configured_user;
+		uid_t configured_uid;
+
+		if (!app)
+			continue;
+		name = json_object_get_string(app, "packageName");
+		configured_user = (int)json_object_get_number(app, "userId");
+		configured_uid = (uid_t)json_object_get_number(app, "uid");
+		if (name && !strcmp(name, package) && configured_user == user_id &&
+		    configured_uid == uid)
+			return json_object_get_boolean(app, "systemPolicyExplicit") == 1;
+	}
+	return 0;
+}
+
+static int selected_for_explicit_system_layer(
+		const JSON_Array *apps, const char *package, int user_id, uid_t uid,
+		const char *field)
+{
+	size_t i, count;
+
+	if (!apps)
+		return 0;
+	count = json_array_get_count(apps);
+	for (i = 0; i < count; i++) {
+		JSON_Object *app = json_array_get_object(apps, i);
+		const char *name;
+		int configured_user;
+		uid_t configured_uid;
+
+		if (!app)
+			continue;
+		name = json_object_get_string(app, "packageName");
+		configured_user = (int)json_object_get_number(app, "userId");
+		configured_uid = (uid_t)json_object_get_number(app, "uid");
+		if (name && !strcmp(name, package) && configured_user == user_id &&
+		    configured_uid == uid)
+			return json_object_get_boolean(app, field) == 1;
+	}
+	return 0;
+}
+
+static int configured_package_is_verified_system(
+		const JSON_Object *app, const struct discovered_package *packages,
+		int package_count)
+{
+	uid_t uid = (uid_t)json_object_get_number(app, "uid");
+	const char *name = json_object_get_string(app, "packageName");
+	int user_id = (int)json_object_get_number(app, "userId");
+
+	if (!uid || (uid % 100000) < 10000)
+		return 0;
+	for (int i = 0; i < package_count; i++) {
+		const struct discovered_package *pkg = &packages[i];
+		if (name && !strcmp(pkg->name, name) && pkg->user_id == user_id &&
+		    pkg->uid == uid)
+			return pkg->system_package;
+	}
+	return 0;
+}
+
 static int configured_package_is_protected(const JSON_Object *app,
 					   const struct discovered_package *packages,
 					   int package_count)
@@ -536,10 +608,16 @@ static int resolve_layer(const JSON_Array *apps,
 
 	for (i = 0; i < package_count; i++) {
 		const struct discovered_package *pkg = &packages[i];
-		int selected = selected_for_layer(apps, pkg->name, pkg->user_id,
-						  pkg->uid, field);
+		int explicit_system_policy = system_policy_is_explicit(
+			apps, pkg->name, pkg->user_id, pkg->uid);
+		int selected = pkg->system_package && explicit_system_policy ?
+			selected_for_explicit_system_layer(
+				apps, pkg->name, pkg->user_id, pkg->uid, field) :
+			selected_for_layer(apps, pkg->name, pkg->user_id,
+					   pkg->uid, field);
 
-		if (pkg->system_package || pkg->uid < 10000 ||
+		if ((pkg->system_package && !explicit_system_policy) ||
+		    pkg->app_id < 10000 ||
 		    (pkg->uid == self_uid && mode == VPNHIDE_LIST_BLACKLIST)) {
 			if (selected && pkg->system_package)
 				summary->ignored_selected_system_packages++;
@@ -601,7 +679,10 @@ int vpnhide_resolve_targets(const JSON_Object *root, uid_t self_uid,
 			uid = (uid_t)json_object_get_number(app, "uid");
 			if (!uid || uid == 0)
 				continue;
-			if (configured_package_is_protected(app, packages, package_count)) {
+			if (configured_package_is_protected(app, packages, package_count) &&
+			    !(json_object_get_boolean(app, "systemPolicyExplicit") == 1 &&
+			      configured_package_is_verified_system(app, packages,
+							package_count))) {
 				if ((uid % 100000) < 10000)
 					summary->protected_packages++;
 				else
@@ -694,7 +775,10 @@ int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
 			uid = (uid_t)json_object_get_number(app, "uid");
 			if (!uid || uid == self_uid || uid < 10000)
 				continue;
-			if (configured_package_is_protected(app, packages, package_count))
+			if (configured_package_is_protected(app, packages, package_count) &&
+			    !(json_object_get_boolean(app, "systemPolicyExplicit") == 1 &&
+			      configured_package_is_verified_system(app, packages,
+							package_count)))
 				continue;
 			for (size_t existing = 0; existing < result->count; existing++) {
 				if (result->targets[existing].uid == uid)
@@ -737,11 +821,18 @@ int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
 	for (i = 0; i < package_count; i++) {
 		struct discovered_package *pkg = &packages[i];
 		int selected;
-		if (pkg->system_package || pkg->uid < 10000 ||
+		int explicit_system_policy = system_policy_is_explicit(
+			apps, pkg->name, pkg->user_id, pkg->uid);
+		if ((pkg->system_package && !explicit_system_policy) ||
+		    pkg->app_id < 10000 ||
 		    (pkg->uid == self_uid && summary->mode == VPNHIDE_LIST_BLACKLIST))
 			continue;
-		selected = selected_for_layer(apps, pkg->name, pkg->user_id,
-					      pkg->uid, "portHiding");
+		selected = pkg->system_package && explicit_system_policy ?
+			selected_for_explicit_system_layer(
+				apps, pkg->name, pkg->user_id, pkg->uid,
+				"portHiding") :
+			selected_for_layer(apps, pkg->name, pkg->user_id,
+					   pkg->uid, "portHiding");
 		/* Several packages may share one UID. Port policy is keyed by UID,
 		 * so resolve that UID only once rather than emitting duplicate rules. */
 		for (size_t existing = 0; existing < result->count; existing++) {
