@@ -18,6 +18,7 @@ KMIS_DEFAULT=(
     "android14-6.1"
     "android15-6.6"
     "android16-6.12"
+    "android17-6.18"
 )
 
 if [ $# -gt 0 ]; then
@@ -123,6 +124,7 @@ for KMI in "${KMIS[@]}"; do
                 *-6.1)   PATCHVER=android14-6.1  ;;
                 *-6.6)   PATCHVER=android15-6.6  ;;
                 *-6.12)  PATCHVER=android16-6.12 ;;
+                *-6.18)  PATCHVER=android17-6.18 ;;
                 *) echo "ERROR: no VPNHide patchset for KMI $KMI"; exit 1 ;;
             esac
 

@@ -1,0 +1,26 @@
+diff --git a/net/sched/sch_api.c b/net/sched/sch_api.c
+index 87359eb9aac2..2c0db32f7682 100644
+--- a/net/sched/sch_api.c
++++ b/net/sched/sch_api.c
+@@ -30,6 +30,10 @@
+ #include <net/sock.h>
+ #include <net/netlink.h>
+ #include <net/pkt_sched.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ #include <net/pkt_cls.h>
+ #include <net/tc_wrapper.h>
+ 
+@@ -924,6 +928,10 @@ static int tc_fill_qdisc(struct sk_buff *skb, struct Qdisc *q, u32 clid,
+ 	__u32 qlen;
+ 
+ 	cond_resched();
++#ifdef CONFIG_VPNHIDE
++	if (vpnhide_should_hide_dev(qdisc_dev(q)))
++		goto out_nlmsg_trim;
++#endif
+ 	nlh = nlmsg_put(skb, portid, seq, event, sizeof(*tcm), flags);
+ 	if (!nlh)
+ 		goto out_nlmsg_trim;

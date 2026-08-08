@@ -103,6 +103,7 @@ jobs:
           - android14-6.1
           - android15-6.6
           - android16-6.12
+          - android17-6.18
     # DDK image from public ylarod — doesn't depend on our repo
     container:
       image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-20260313
@@ -160,6 +161,7 @@ jobs:
           - android14-6.1
           - android15-6.6
           - android16-6.12
+          - android17-6.18
     container:
       # Built by vpnhide_next's (public repo) qemu-image.yml. Cross-repo
       # GHCR pulls aren't automatic on plain GITHUB_TOKEN — this package
@@ -194,9 +196,67 @@ jobs:
           make -C kmod KERNEL_SRC="$VPNHIDE_QEMU_KSRC" CLANG_DIR="$CLANG_BIN"
           VPNHIDE_QEMU_KO="$PWD/kmod/vpnhide_kmod.ko" kmod/test/run.sh "$KMI"
 
+  # Runtime test for the in-tree kpatch implementation.  The ddk-qemu image
+  # supplies a bootable, matching kernel tree; this job applies the selected
+  # VPNHide patchset, rebuilds only the changed kernel objects/Image, and runs
+  # the same vector harness with VPNHide built in (no .ko).
+  kpatch-qemu:
+    name: Kpatch QEMU runtime test (${{ matrix.kmi }})
+    needs: build-native
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi:
+          - android17-6.18
+    container:
+      image: ghcr.io/soranerai/vpnhide_next/ddk-qemu:${{ matrix.kmi }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      KMI: ${{ matrix.kmi }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Mark workspace safe
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Download ctl/daemon host binaries from build-native
+        uses: actions/download-artifact@v4
+        with:
+          name: vpnhide-host-binaries
+          path: kmod
+
+      - name: Apply kpatch, rebuild Image, and run QEMU test
+        run: |
+          set -euo pipefail
+          chmod +x kmod/vpnhide-ctl-host kmod/vpnhide-daemon-host
+          CLANG_BIN="$(ls -d /opt/ddk/clang/*/bin | head -1)"
+          export PATH="$CLANG_BIN:$PATH"
+          KSRC="$VPNHIDE_QEMU_KSRC"
+
+          bash kpatch/scripts/apply.sh "$KSRC" android17-6.18
+          cd "$KSRC"
+          sed -i '/CONFIG_VPNHIDE/d' .config
+          echo 'CONFIG_VPNHIDE=y' >> .config
+          sed -i '/CONFIG_LTO/d' .config
+          echo 'CONFIG_LTO_NONE=y' >> .config
+          make ARCH=arm64 LLVM=1 olddefconfig
+          grep -q '^CONFIG_VPNHIDE=y' .config
+          make ARCH=arm64 LLVM=1 -j"$(nproc)" Image
+
+          VPNHIDE_QEMU_IMAGE="$KSRC/arch/arm64/boot/Image" \
+          VPNHIDE_QEMU_ROOTFS=/opt/qemu/alpine-minirootfs.tar.gz \
+          VPNHIDE_CTL_BIN="$GITHUB_WORKSPACE/kmod/vpnhide-ctl-host" \
+          VPNHIDE_DAEMON_BIN="$GITHUB_WORKSPACE/kmod/vpnhide-daemon-host" \
+            "$GITHUB_WORKSPACE/kpatch/test/run.sh" "$KMI"
+
   release:
     name: Create GitHub Release
-    needs: [build-native, build-kmod, kmod-qemu]
+    needs: [build-native, build-kmod, kmod-qemu, kpatch-qemu]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -1,0 +1,14 @@
+diff --git a/net/socket.c b/net/socket.c
+index e4de560b95e2..71f597104f93 100644
+--- a/net/socket.c
++++ b/net/socket.c
+@@ -79,6 +79,9 @@
+ #include <linux/security.h>
+ #include <linux/syscalls.h>
+ #include <linux/compat.h>
++#ifdef CONFIG_VPNHIDE
++#include "../security/vpnhide/vpnhide.h"
++#endif
+ #include <linux/kmod.h>
+ #include <linux/audit.h>
+ #include <linux/wireless.h>

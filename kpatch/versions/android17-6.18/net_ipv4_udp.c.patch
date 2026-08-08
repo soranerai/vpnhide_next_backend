@@ -1,0 +1,29 @@
+diff --git a/net/ipv4/udp.c b/net/ipv4/udp.c
+index d6bda6f7be13..6490288dc4ec 100644
+--- a/net/ipv4/udp.c
++++ b/net/ipv4/udp.c
+@@ -114,6 +114,10 @@
+ #include <net/sock_reuseport.h>
+ #include <net/addrconf.h>
+ #include <net/udp_tunnel.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ #include <net/gro.h>
+ #include <net/inet_dscp.h>
+ #if IS_ENABLED(CONFIG_IPV6)
+@@ -1137,6 +1141,13 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
+ 
+ 	trace_android_rvh_udp_sendmsg(sk, msg, len);
+ 
++#ifdef CONFIG_VPNHIDE
++	{
++		int _err = 0;
++		if (vpnhide_udp_sendmsg_pre(sk, msg, len, &_err))
++			return _err;
++	}
++#endif
+ 	if (len > 0xFFFF)
+ 		return -EMSGSIZE;
+ 

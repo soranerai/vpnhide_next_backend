@@ -13,6 +13,7 @@ KMIS=(
     "android14-6.1"
     "android15-6.6"
     "android16-6.12"
+    "android17-6.18"
 )
 
 # Overwrite list if specific KMI(s) passed as arguments
