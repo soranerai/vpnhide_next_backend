@@ -891,7 +891,8 @@ static bool should_block_port(const struct vpnhide_policy_snapshot *snapshot,
 }
 
 static bool direct_connect_should_block(struct socket *sock,
-                                        struct sockaddr *addr, uid_t uid) {
+                                        struct sockaddr *addr, uid_t uid,
+                                        u16 *blocked_port, u8 *blocked_proto) {
   struct vpnhide_policy_snapshot *snapshot;
   const struct vpnhide_port_target_v3 *urules;
   bool block = false;
@@ -917,6 +918,10 @@ static bool direct_connect_should_block(struct socket *sock,
         should_block_port(snapshot, urules, port, proto) &&
         !vpnhide_uid_owns_port(uid, port, proto, AF_INET, address))
       block = true;
+    if (block) {
+      *blocked_port = port;
+      *blocked_proto = proto;
+    }
   } else if (addr->sa_family == AF_INET6) {
     struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
     unsigned short port = ntohs(sin6->sin6_port);
@@ -939,6 +944,10 @@ static bool direct_connect_should_block(struct socket *sock,
     if (local && should_block_port(snapshot, urules, port, proto) &&
         !vpnhide_uid_owns_port(uid, port, proto, family, address))
       block = true;
+    if (block) {
+      *blocked_port = port;
+      *blocked_proto = proto;
+    }
   }
 out:
   rcu_read_unlock();
@@ -948,6 +957,8 @@ out:
 struct socket_connect_data {
   bool should_block;
   bool intercepted;
+  u16 port;
+  u8 protocol;
 };
 
 static int socket_connect_entry(struct kretprobe_instance *ri,
@@ -968,6 +979,8 @@ static int socket_connect_entry(struct kretprobe_instance *ri,
   data = (void *)ri->data;
   data->should_block = false;
   data->intercepted = false;
+  data->port = 0;
+  data->protocol = VH_PROTO_TCP;
 
   sock = resolve_sock_addr(regs, sys_connect_uses_wrapper,
                            (struct sockaddr *)&uaddr_buf, sizeof(uaddr_buf),
@@ -1005,6 +1018,8 @@ static int socket_connect_entry(struct kretprobe_instance *ri,
       if (should_block_port(snapshot, urules, port, proto) &&
           !vpnhide_uid_owns_port(uid, port, proto, AF_INET, address)) {
         data->should_block = true;
+        data->port = port;
+        data->protocol = proto;
         if (sys_connect_uses_wrapper) {
           struct pt_regs *user_regs = (struct pt_regs *)regs->regs[0];
           if (user_regs) {
@@ -1047,6 +1062,8 @@ static int socket_connect_entry(struct kretprobe_instance *ri,
       if (should_block_port(snapshot, urules, port, proto) &&
           !vpnhide_uid_owns_port(uid, port, proto, family, address)) {
         data->should_block = true;
+        data->port = port;
+        data->protocol = proto;
         if (sys_connect_uses_wrapper) {
           struct pt_regs *user_regs = (struct pt_regs *)regs->regs[0];
           if (user_regs) {
@@ -1076,7 +1093,8 @@ static int socket_connect_ret(struct kretprobe_instance *ri,
   int retval = regs_return_value(regs);
 
   if (data->should_block) {
-    record_kmod_intercept(from_kuid(&init_user_ns, current_uid()), 6);
+    record_port_intercept(from_kuid(&init_user_ns, current_uid()), data->port,
+                          data->protocol);
     if (sys_connect_uses_wrapper) {
       if (data->intercepted && retval == -EFAULT) {
         regs_set_return_value(regs, -ECONNREFUSED);
@@ -1104,10 +1122,13 @@ static int security_socket_connect_entry(struct kretprobe_instance *ri,
 
   data->should_block = false;
   data->intercepted = false;
+  data->port = 0;
+  data->protocol = VH_PROTO_TCP;
   if (!is_hook_active(HOOK_CONNECT, uid))
     return 1;
   data->should_block = direct_connect_should_block(
-      (struct socket *)regs->regs[0], (struct sockaddr *)regs->regs[1], uid);
+      (struct socket *)regs->regs[0], (struct sockaddr *)regs->regs[1], uid,
+      &data->port, &data->protocol);
   return data->should_block ? 0 : 1;
 }
 
@@ -1116,7 +1137,8 @@ static int security_socket_connect_ret(struct kretprobe_instance *ri,
   struct socket_connect_data *data = (void *)ri->data;
 
   if (data->should_block) {
-    record_kmod_intercept(from_kuid(&init_user_ns, current_uid()), 6);
+    record_port_intercept(from_kuid(&init_user_ns, current_uid()), data->port,
+                          data->protocol);
     regs_set_return_value(regs, -ECONNREFUSED);
   }
   return 0;

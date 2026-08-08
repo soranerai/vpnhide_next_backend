@@ -213,6 +213,7 @@ const struct vpnhide_port_target_v3 *
 vpnhide_find_port_target(const struct vpnhide_policy_snapshot *snapshot,
 			 uid_t uid);
 void record_kmod_intercept(uid_t uid, int type);
+void record_port_intercept(uid_t uid, u16 port, u8 protocol);
 void get_spoof_ip(struct vpnhide_spoof_ip *dst);
 int  update_spoof_ip(const struct vpnhide_spoof_ip *sip);
 u32  fnv1a_name(const char *s, int maxlen);

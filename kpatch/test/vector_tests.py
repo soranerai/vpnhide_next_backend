@@ -7,7 +7,6 @@ import platform
 import socket
 import struct
 import sys
-import time
 
 # ruff: noqa: E501
 
@@ -308,8 +307,9 @@ def test_pktinfo(vpn0_idx):
         receiver.bind(("", 0))
         membership = socket.inet_aton(group) + socket.inet_aton("10.9.0.1")
         receiver.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
-        sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
-                          socket.inet_aton("10.9.0.1"))
+        sender.setsockopt(
+            socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton("10.9.0.1")
+        )
         sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
         destination = (group, receiver.getsockname()[1])
 
@@ -326,7 +326,9 @@ def test_pktinfo(vpn0_idx):
 
         root_ifindex, root_dst = receive_info(b"root")
         if root_ifindex != vpn0_idx or root_dst != group:
-            print(f"FAIL: pktinfo non-target got ifindex={root_ifindex}, dst={root_dst}")
+            print(
+                f"FAIL: pktinfo non-target got ifindex={root_ifindex}, dst={root_dst}"
+            )
             return False
 
         pid = safe_fork()

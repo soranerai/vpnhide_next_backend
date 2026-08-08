@@ -12,6 +12,10 @@ _Static_assert(sizeof(struct vpnhide_uid_stats) == 120,
 	       "stats entry ABI must remain fixed-width");
 _Static_assert(sizeof(struct vpnhide_stats_snapshot) == 32,
 	       "stats snapshot ABI must remain pointer-based");
+_Static_assert(sizeof(struct vpnhide_port_stats) == 16,
+	       "port stats entry ABI must remain fixed-width");
+_Static_assert(sizeof(struct vpnhide_stats_snapshot_v2) == 56,
+	       "stats v2 snapshot ABI must remain pointer-based");
 _Static_assert(sizeof(struct vpnhide_policy_section_v3) == 8,
 	       "v3 section descriptor must be fixed-width");
 _Static_assert(sizeof(struct vpnhide_port_rule_v3) == 8,

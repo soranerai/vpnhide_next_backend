@@ -1,7 +1,9 @@
 # Intercept statistics contract
 
 The statistics API is session-scoped. It is not persisted across reboot and
-does not contain kernel-side time buckets.
+does not contain kernel-side time buckets. The daemon is the only owner of
+the rolling time window, which is fixed at six hours for both hook and port
+statistics.
 
 ## Kernel ABI
 
@@ -13,8 +15,8 @@ does not contain kernel-side time buckets.
 - `sequence` is a monotonically increasing snapshot sequence;
 - `monotonic_ns` is the snapshot timestamp from `ktime_get_ns()`.
 
-The entry array contains one `struct vpnhide_uid_stats` per UID. All seven
-counters are cumulative `u64` values for the current kernel session. There is
+The entry array contains one `struct vpnhide_uid_stats` per UID. Its hook and
+port-total counters are cumulative `u64` values for the current kernel session. There is
 no fixed UID capacity. Userspace first calls the ioctl with capacity zero,
 allocates the returned `count`, and retries. If the target set grows between
 calls, the ioctl returns `-ENOSPC` with the new required count and the caller
@@ -32,6 +34,13 @@ The kernel retains only counters for UIDs in the current kmod target policy.
 When the policy changes, removed UIDs are pruned so new target UIDs cannot be
 blocked by stale table entries.
 
+New helpers use `VH_GET_STATS_V2`, which returns the same UID counters plus a
+second array of cumulative `struct vpnhide_port_stats` entries keyed by UID,
+numeric port, and TCP/UDP protocol. The v1 ioctl remains available for rolling
+updates. Exact port entries are stored in a bounded sparse table; entries not
+seen for six hours are eligible for reuse. `dropped_port_entries` reports
+attempts that could not be represented because that table was full.
+
 ## Userspace session ring
 
 The frontend or its daemon owns history. It periodically obtains cumulative
@@ -41,9 +50,8 @@ snapshots and computes per-UID deltas against the previous snapshot:
 delta = current_snapshot - previous_snapshot
 ```
 
-The history is an in-memory ring of interval points. Recommended defaults are
-60-second points and a 24-hour retention (`1440` points). No point is written
-to disk.
+The history is an in-memory ring of 60-second interval points with a fixed
+six-hour retention (`360` points). No point is written to disk.
 
 The bundled daemon implements this ring with the following defaults. It takes
 one baseline snapshot when it starts, then samples every 60 seconds. The first
@@ -62,9 +70,10 @@ Each frontend response must include:
   "sessionId": "boot-id",
   "sequence": 1234,
   "resolutionSec": 60,
-  "retentionSec": 86400,
+  "retentionSec": 21600,
   "dropped": false,
   "droppedIntervals": 0,
+  "droppedPortEntries": 0,
   "oldestTimestampMs": 0,
   "newestTimestampMs": 0,
   "points": []
@@ -88,14 +97,21 @@ milliseconds. Each point has this shape:
       "sockopt": 3,
       "connect": 0,
       "getname": 0,
-      "port": 0
+      "port": 2,
+      "ports": [
+        { "port": 80, "protocol": "tcp", "count": 2 }
+      ]
     }
   ]
 }
 ```
 
-`uids` contains interval deltas, not cumulative kernel counters. A missing UID
-means that all seven deltas for that UID are zero for the interval.
+`uids` contains interval deltas, not cumulative kernel counters. `port` is the
+total number of blocked port accesses in the interval and equals the sum of
+`ports[].count`. Each port item identifies the requested numeric port and
+transport protocol (`tcp` or `udp`). A missing UID means that all hook and
+port deltas for that UID are zero for the interval. A missing `ports` member
+is accepted as a response from an older backend.
 
 When the ring evicts old points, `dropped` is `true` and
 `droppedIntervals` is incremented. This describes history loss only; kernel
