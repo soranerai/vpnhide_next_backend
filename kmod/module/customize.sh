@@ -18,16 +18,51 @@ fi
 # shellcheck disable=SC1090,SC1091
 . "$KMI_CHECK"
 ACTUAL_GKI="$(vpnhide_detect_gki "$RUNNING_KERNEL")"
-if [ -z "$ACTUAL_GKI" ]; then
-    ui_print "! Running kernel: ${RUNNING_KERNEL:-unknown}"
-    abort "! Cannot determine the device GKI; installation aborted"
-fi
 
-ui_print "- Package GKI: $EXPECTED_GKI"
-ui_print "- Device GKI:  $ACTUAL_GKI"
-if ! vpnhide_kmi_matches "$EXPECTED_GKI" "$RUNNING_KERNEL"; then
+vpnhide_read_volume_choice() {
+    local getevent_cmd=""
+    for tool in /system/bin/getevent /vendor/bin/getevent /sbin/getevent; do
+        if [ -x "$tool" ]; then
+            getevent_cmd="$tool"
+            break
+        fi
+    done
+    if [ -z "$getevent_cmd" ] && command -v getevent >/dev/null 2>&1; then
+        getevent_cmd=$(command -v getevent)
+    fi
+    [ -n "$getevent_cmd" ] && command -v timeout >/dev/null 2>&1 || return 1
+
+    timeout 30 "$getevent_cmd" -ql 2>/dev/null | awk '
+        /KEY_VOLUMEUP/ && ($NF == "DOWN" || $NF == "00000001") { print "up"; exit }
+        /KEY_VOLUMEDOWN/ && ($NF == "DOWN" || $NF == "00000001") { print "down"; exit }
+    '
+}
+
+if [ -z "$ACTUAL_GKI" ]; then
+    ui_print "! Cannot determine GKI from running kernel: ${RUNNING_KERNEL:-unknown}"
+    ui_print "- Press Volume Up (+) to FORCE install anyway"
+    ui_print "- Press Volume Down (-) to ABORT"
+    choice=$(vpnhide_read_volume_choice) || choice=""
+    if [ "$choice" = "up" ]; then
+        ui_print "- Force installing..."
+    else
+        abort "! Installation aborted"
+    fi
+elif ! vpnhide_kmi_matches "$EXPECTED_GKI" "$RUNNING_KERNEL"; then
+    ui_print "! Package GKI: $EXPECTED_GKI"
+    ui_print "! Device GKI:  $ACTUAL_GKI"
     ui_print "! This package is incompatible with the running kernel"
-    abort "! Install vpnhide-kmod-$ACTUAL_GKI.zip instead"
+    ui_print "- Press Volume Up (+) to FORCE install anyway"
+    ui_print "- Press Volume Down (-) to ABORT"
+    choice=$(vpnhide_read_volume_choice) || choice=""
+    if [ "$choice" = "up" ]; then
+        ui_print "- Force installing..."
+    else
+        abort "! Install vpnhide-kmod-$ACTUAL_GKI.zip instead"
+    fi
+else
+    ui_print "- Package GKI: $EXPECTED_GKI"
+    ui_print "- Device GKI:  $ACTUAL_GKI"
 fi
 
 set_perm "$MODPATH/vpnhide_kmod.ko" 0 0 0644

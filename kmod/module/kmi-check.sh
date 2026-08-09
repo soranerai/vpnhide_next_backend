@@ -7,9 +7,14 @@
 vpnhide_detect_gki() {
     vpnhide_uname_r="$1"
     vpnhide_kernel_version=$(printf '%s\n' "$vpnhide_uname_r" | sed -n 's/^\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
-    vpnhide_android_generation=$(printf '%s\n' "$vpnhide_uname_r" | sed -n 's/^[^-]*-\(android[0-9][0-9]*\)\(-.*\)*$/\1/p')
 
-    if [ -z "$vpnhide_kernel_version" ] || [ -z "$vpnhide_android_generation" ]; then
+    if [ -z "$vpnhide_kernel_version" ]; then
+        return 1
+    fi
+
+    vpnhide_android_generation=$(printf '%s\n' "$vpnhide_uname_r" | sed -n 's/.*\(android[0-9][0-9]*\).*/\1/p')
+
+    if [ -z "$vpnhide_android_generation" ]; then
         return 1
     fi
 

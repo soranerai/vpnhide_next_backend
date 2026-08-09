@@ -32,23 +32,6 @@ NOW=$(date +%s 2>/dev/null)
 GKI_VARIANT=$(grep '^gkiVariant=' "$MODULE_PROP" 2>/dev/null | cut -d= -f2-)
 KMOD_VERSION=$(grep '^version=' "$MODULE_PROP" 2>/dev/null | cut -d= -f2-)
 
-KMI_ERROR=""
-if [ ! -r "$MODDIR/kmi-check.sh" ]; then
-    KMI_ERROR="GKI compatibility checker not found"
-else
-    # Resolved from this module's runtime path.
-    # shellcheck disable=SC1090,SC1091
-    . "$MODDIR/kmi-check.sh"
-    ACTUAL_GKI=$(vpnhide_detect_gki "$UNAME_R")
-    if [ -z "$GKI_VARIANT" ]; then
-        KMI_ERROR="package GKI metadata is missing"
-    elif [ -z "$ACTUAL_GKI" ]; then
-        KMI_ERROR="cannot determine GKI from running kernel: $UNAME_R"
-    elif ! vpnhide_kmi_matches "$GKI_VARIANT" "$UNAME_R"; then
-        KMI_ERROR="GKI mismatch: package=$GKI_VARIANT device=$ACTUAL_GKI"
-    fi
-fi
-
 ROOT_MANAGER="unknown"
 [ -d /data/adb/ksu ] && ROOT_MANAGER="kernelsu"
 [ -d /data/adb/ap ] && ROOT_MANAGER="apatch"
@@ -66,10 +49,7 @@ if [ -r /proc/config.gz ]; then
     fi
 fi
 
-if [ -n "$KMI_ERROR" ]; then
-    INSMOD_EXIT=126
-    INSMOD_STDERR="$KMI_ERROR; refusing to load kernel module"
-elif [ ! -f "$KO" ]; then
+if [ ! -f "$KO" ]; then
     INSMOD_EXIT=127
     INSMOD_STDERR="vpnhide_kmod.ko not found at $KO"
 else

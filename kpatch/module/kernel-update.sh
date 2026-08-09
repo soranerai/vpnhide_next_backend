@@ -6,7 +6,8 @@ VPNHIDE_KERNEL_REPO_URL="https://github.com/soranerai/GKI_KernelSU_SUSFS/release
 vpnhide_detect_running_kernel() {
     vpnhide_release="$1"
     vpnhide_triplet=$(printf '%s\n' "$vpnhide_release" | sed -n 's/^\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
-    vpnhide_generation=$(printf '%s\n' "$vpnhide_release" | sed -n 's/^[^-]*-\(android[0-9][0-9]*\)\(-.*\)*$/\1/p')
+    vpnhide_generation=$(printf '%s\n' "$vpnhide_release" | sed -n 's/.*\(android[0-9][0-9]*\).*/\1/p')
+
     [ -n "$vpnhide_triplet" ] && [ -n "$vpnhide_generation" ] || return 1
     printf '%s %s\n' "$vpnhide_triplet" "$vpnhide_generation"
 }
