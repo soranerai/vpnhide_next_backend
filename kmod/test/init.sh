@@ -84,6 +84,7 @@ REGISTERED=1
 echo "REGISTERED=$REGISTERED"
 # Start the event-driven C daemon in the background to automatically monitor interfaces and update ifindexes in the kmod
 /vpnhide-daemon > /tmp/daemon.log 2>&1 &
+DAEMON_PID=$!
 # Give the daemon a moment to register netlink events
 sleep 1
 
@@ -94,6 +95,10 @@ ip addr add 10.9.0.1/24 dev vpn0 2>/dev/null
 ip route add 10.9.9.0/24 dev vpn0 2>/dev/null
 ip -6 addr add fd00:9::1/64 dev vpn0 2>/dev/null
 ip -6 route add fd00:99::/64 dev vpn0 2>/dev/null
+ip link add vpn1 type dummy 2>/dev/null
+ip link set vpn1 up 2>/dev/null
+ip addr add 10.10.0.1/24 dev vpn1 2>/dev/null
+ip -6 addr add fd00:10::1/64 dev vpn1 2>/dev/null
 ip rule add uidrange 115555-115555 table 199 2>/dev/null
 # Give the daemon a moment to process the interface events and update active_vpns in the kernel
 sleep 3
@@ -138,6 +143,27 @@ check sysfs_ipv4_conf "ls /proc/sys/net/ipv4/conf"   "vpn0"   # getdents64 /proc
 check sysfs_ipv6_neig "ls /proc/sys/net/ipv6/neigh"  "vpn0"   # getdents64 /proc/sys/net/ipv6/neigh
 check proc_net_dev    "cat /proc/net/dev"            "vpn0"   # dev_seq_show
 check proc_net_if_in6 "cat /proc/net/if_inet6"       "vpn0"   # if6_seq_show
+check multi_iface_visibility "ip addr show"          "vpn[01]" # both active VPN ifindexes
+
+# The daemon must publish both interfaces as one active snapshot. This status
+# line is diagnostic only; hiding itself is exercised above through netlink
+# ifindex-based hooks.
+apply_policy
+_active_status=$(timeout 2 cat /dev/vpnhide_ctrl 2>/dev/null || true)
+if printf '%s\n' "$_active_status" | grep -Eq 'active_vpn_ifaces:.*vpn0' &&
+   printf '%s\n' "$_active_status" | grep -Eq 'active_vpn_ifaces:.*vpn1'; then
+	echo "RESULT multi_iface_snapshot=PASS"
+	PASS=$((PASS + 1))
+else
+	echo "RESULT multi_iface_snapshot=FAIL"
+	FAIL=$((FAIL + 1))
+fi
+
+# Freeze the kernel snapshot and rename vpn1. The ifindex stays the same, so
+# this verifies the native hiding path does not depend on interface strings.
+kill "$DAEMON_PID" 2>/dev/null
+ip link set vpn1 name renamed1 2>/dev/null
+check renamed_iface_ifindex "ip addr show" "renamed1"
 
 # --- execute programmatic socket and ioctl vector tests in Python ---
 # 1. Set targets and configure port rules for UID 115555

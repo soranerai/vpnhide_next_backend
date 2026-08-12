@@ -993,6 +993,7 @@ static ssize_t vpnhide_dev_read(struct file *file, char __user *buf,
 			reader_capacity += (size_t)snapshot->app_hook_mask_count * 32;
 			reader_capacity += (size_t)snapshot->iface_prefixes.count *
 				(MAX_IFACE_LEN + 1);
+			reader_capacity += (size_t)MAX_ACTIVE_VPNS * (MAX_IFACE_LEN + 1);
 		}
 		reader->buf = kvmalloc(reader_capacity, GFP_KERNEL);
 		if (!reader->buf)
@@ -1031,6 +1032,22 @@ static ssize_t vpnhide_dev_read(struct file *file, char __user *buf,
 				offset += scnprintf(reader->buf + offset,
 							reader_capacity - offset,
 							" %s", snapshot->iface_prefixes.prefixes[i]);
+		}
+		offset += scnprintf(reader->buf + offset, reader_capacity - offset, "\n");
+
+		offset += scnprintf(reader->buf + offset, reader_capacity - offset,
+				    "active_vpn_ifaces:");
+		{
+			struct vpnhide_active_vpns *vpns;
+			rcu_read_lock();
+			vpns = rcu_dereference(global_active_vpns);
+			if (vpns) {
+				for (i = 0; i < vpns->count; i++)
+					offset += scnprintf(reader->buf + offset,
+							reader_capacity - offset, " %s",
+							vpns->vpns[i].name);
+			}
+			rcu_read_unlock();
 		}
 		offset += scnprintf(reader->buf + offset, reader_capacity - offset, "\n");
 

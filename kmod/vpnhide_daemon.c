@@ -204,9 +204,6 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6,
 	int iface_count = 0;
 
 	for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
-		if (ifa->ifa_addr == NULL)
-			continue;
-
 		if (!(ifa->ifa_flags & IFF_UP))
 			continue;
 
@@ -229,8 +226,7 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6,
 						break;
 					}
 				}
-				if (!dup &&
-				    active_vpns.count < MAX_ACTIVE_VPNS) {
+				if (!dup && active_vpns.count < MAX_ACTIVE_VPNS) {
 					active_vpns.vpns[active_vpns.count].ifindex = vpn_idx;
 					strncpy(active_vpns.vpns[active_vpns.count].name, name, MAX_IFACE_LEN - 1);
 					active_vpns.vpns[active_vpns.count].name[MAX_IFACE_LEN - 1] = '\0';
@@ -239,6 +235,9 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6,
 			}
 			continue;
 		}
+
+		if (ifa->ifa_addr == NULL)
+			continue;
 
 		if (!vpnhide_daemon_is_cover_candidate(name))
 			continue;

@@ -1247,6 +1247,7 @@ static ssize_t vpnhide_dev_read(struct file *file, char __user *buf,
       reader_capacity += (size_t)size_snapshot->app_hook_mask_count * 32;
       reader_capacity += (size_t)size_snapshot->iface_prefixes.count *
                          (MAX_IFACE_LEN + 1);
+      reader_capacity += (size_t)MAX_ACTIVE_VPNS * (MAX_IFACE_LEN + 1);
     }
     reader->buf = kvmalloc(reader_capacity, GFP_KERNEL);
     if (!reader->buf)
@@ -1296,6 +1297,22 @@ static ssize_t vpnhide_dev_read(struct file *file, char __user *buf,
           offset += scnprintf(reader->buf + offset, reader_capacity - offset, " %s",
                               snapshot->iface_prefixes.prefixes[i]);
         }
+      }
+      offset += scnprintf(reader->buf + offset, reader_capacity - offset, "\n");
+
+      offset += scnprintf(reader->buf + offset, reader_capacity - offset,
+                          "active_vpn_ifaces:");
+      {
+        struct vpnhide_active_vpns *vpns;
+        int vpn_index;
+        rcu_read_lock();
+        vpns = rcu_dereference(global_active_vpns);
+        if (vpns) {
+          for (vpn_index = 0; vpn_index < vpns->count; vpn_index++)
+            offset += scnprintf(reader->buf + offset, reader_capacity - offset,
+                                " %s", vpns->vpns[vpn_index].name);
+        }
+        rcu_read_unlock();
       }
       offset += scnprintf(reader->buf + offset, reader_capacity - offset, "\n");
 
@@ -1588,6 +1605,9 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
     spin_unlock(&active_vpns_lock);
 
     vh_rebuild_name_cache(idata);
+
+    atomic_inc(&vpnhide_config_generation);
+    wake_up_all(&vpnhide_config_wait);
 
     if (old_vpns) {
       synchronize_rcu();
