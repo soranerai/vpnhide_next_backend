@@ -37,9 +37,17 @@ run_one() {
     tar xzf "$ALPINE_TAR" -C "$rfs"
     cp "$HERE/perf_init.sh" "$rfs/init"
     cp "$HERE/perf_workload.py" "$rfs/perf_workload.py"
+    [ -f "$HERE/../vpnhide-ctl-host" ] || {
+        echo "missing $HERE/../vpnhide-ctl-host (run-local-container.sh builds it)" >&2
+        rm -rf "$work"
+        return 1
+    }
+    cp "$HERE/../vpnhide-ctl-host" "$rfs/vpnhide-ctl"
     printf '%s\n' "$BACKEND" > "$rfs/perf-backend"
+    printf '%s\n' "${VPNHIDE_PERF_ITERATIONS:-20000}" > "$rfs/perf-iterations"
+    printf '%s\n' "${VPNHIDE_PERF_REPEATS:-5}" > "$rfs/perf-repeats"
     if [ "$BACKEND" = kmod ]; then cp "$ko" "$rfs/vpnhide_kmod.ko"; fi
-    chmod +x "$rfs/init" "$rfs/perf_workload.py"
+    chmod +x "$rfs/init" "$rfs/perf_workload.py" "$rfs/vpnhide-ctl"
     ( cd "$rfs" && find . | cpio -o -H newc 2>/dev/null | gzip > "$work/initramfs.cpio.gz" )
 
     VPNHIDE_PERF_VARIANT="$variant" timeout "${VPNHIDE_QEMU_TIMEOUT:-300}" \
@@ -52,11 +60,19 @@ run_one() {
 
     if grep -q 'PERF_ERROR=' "$log"; then
         grep 'PERF_ERROR=' "$log" >&2
+        tail -30 "$log" >&2
         rm -rf "$work"
         return 1
     fi
-    sed -n '/VPNHIDE-QEMU-PERF START/,/VPNHIDE-QEMU-PERF END/p' "$log" \
-        | grep '^PERF metric=' | sed "s/^/VARIANT=$variant /"
+    output="$(sed -n '/VPNHIDE-QEMU-PERF START/,/VPNHIDE-QEMU-PERF END/p' "$log" \
+        | grep '^PERF metric=' | sed "s/^/VARIANT=$variant /" || true)"
+    if [ -z "$output" ]; then
+        echo "no performance output for $variant" >&2
+        tail -50 "$log" >&2
+        rm -rf "$work"
+        return 1
+    fi
+    printf '%s\n' "$output"
     rm -rf "$work"
 }
 

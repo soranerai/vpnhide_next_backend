@@ -11,6 +11,14 @@ if [ -r /perf-backend ]; then
     PERF_BACKEND=$(cat /perf-backend)
     export PERF_BACKEND
 fi
+if [ -r /perf-iterations ]; then
+    VPNHIDE_PERF_ITERATIONS=$(cat /perf-iterations)
+    export VPNHIDE_PERF_ITERATIONS
+fi
+if [ -r /perf-repeats ]; then
+    VPNHIDE_PERF_REPEATS=$(cat /perf-repeats)
+    export VPNHIDE_PERF_REPEATS
+fi
 echo "##### VPNHIDE-QEMU-PERF START #####"
 echo "KREL=$(uname -r)"
 echo "PERF_BACKEND=${PERF_BACKEND:-kmod}"

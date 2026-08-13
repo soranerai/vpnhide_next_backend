@@ -2,6 +2,7 @@
 # Local script to build static binaries and run kmod vector tests inside the ddk-qemu podman/docker container.
 #
 # Usage: ./kmod/test/run-local-container.sh [kmi] (default: android14-6.1)
+# Performance mode: VPNHIDE_TEST_MODE=perf ./kmod/test/run-local-container.sh <kmi>
 set -euo pipefail
 
 # Default list of all GKI versions supported in the CI matrix
@@ -127,6 +128,9 @@ for KMI in "${KMIS[@]}"; do
         -v "$REPO:/repo:Z" \
         -w /repo \
         -e KMI="$KMI" \
+        -e VPNHIDE_TEST_MODE="${VPNHIDE_TEST_MODE:-normal}" \
+        -e VPNHIDE_PERF_ITERATIONS="${VPNHIDE_PERF_ITERATIONS:-20000}" \
+        -e VPNHIDE_PERF_REPEATS="${VPNHIDE_PERF_REPEATS:-5}" \
         "$IMAGE_NAME" \
         bash -c '
             set -euo pipefail
@@ -136,11 +140,27 @@ for KMI in "${KMIS[@]}"; do
             mkdir -p /tmp/kmod-build
             cp -r /repo/kmod/* /tmp/kmod-build/
             
-            echo "[container] Building kernel module..."
+            echo "[container] Building optimized kernel module..."
             make -C /tmp/kmod-build KERNEL_SRC="$VPNHIDE_QEMU_KSRC" CLANG_DIR="$CLANG_BIN"
-            
-            echo "[container] Running QEMU test runner..."
-            VPNHIDE_QEMU_KO="/tmp/kmod-build/vpnhide_kmod.ko" /repo/kmod/test/run.sh "$KMI"
+
+            if [ "${VPNHIDE_TEST_MODE:-normal}" = "perf" ]; then
+                echo "[container] Building baseline module from HEAD^..."
+                rm -rf /tmp/kmod-baseline
+                mkdir -p /tmp/kmod-baseline
+                git -C /repo archive HEAD^ kmod | tar -x -C /tmp/kmod-baseline
+                make -C /tmp/kmod-baseline/kmod KERNEL_SRC="$VPNHIDE_QEMU_KSRC" CLANG_DIR="$CLANG_BIN"
+
+                echo "[container] Running baseline/optimized QEMU performance comparison..."
+                VPNHIDE_PERF_BASELINE_IMAGE="$VPNHIDE_QEMU_KSRC/arch/arm64/boot/Image" \
+                VPNHIDE_PERF_OPTIMIZED_IMAGE="$VPNHIDE_QEMU_KSRC/arch/arm64/boot/Image" \
+                VPNHIDE_PERF_BASELINE_KO="/tmp/kmod-baseline/kmod/vpnhide_kmod.ko" \
+                VPNHIDE_PERF_OPTIMIZED_KO="/tmp/kmod-build/vpnhide_kmod.ko" \
+                VPNHIDE_QEMU_ROOTFS="/opt/qemu/alpine-minirootfs.tar.gz" \
+                    /repo/kmod/test/run-perf.sh "$KMI"
+            else
+                echo "[container] Running QEMU test runner..."
+                VPNHIDE_QEMU_KO="/tmp/kmod-build/vpnhide_kmod.ko" /repo/kmod/test/run.sh "$KMI"
+            fi
         ' > "$LOG_FILE" 2>&1 &
         
     pids+=($!)
