@@ -339,7 +339,8 @@ EXPORT_SYMBOL_GPL(vpnhide_pktinfo6_post);
 /* ------------------------------------------------------------------ */
 
 static bool should_block_port(uid_t uid, __be16 port_be,
-			      unsigned char protocol)
+			      unsigned char protocol, u8 family,
+			      const u32 address[4])
 {
 	struct vpnhide_policy_snapshot *snapshot;
 	const struct vpnhide_port_target_v3 *target;
@@ -352,11 +353,11 @@ static bool should_block_port(uid_t uid, __be16 port_be,
 	target = vpnhide_find_port_target(snapshot, uid);
 	if (!target)
 		goto out;
-	if (target->mode == VH_PORT_POLICY_UNRESTRICTED)
-		goto out;
-	if (target->mode == VH_PORT_POLICY_DENY_ALL) {
+	if ((target->mode & 0x0f) == VH_PORT_POLICY_UNRESTRICTED)
+		goto dynamic;
+	if ((target->mode & 0x0f) == VH_PORT_POLICY_DENY_ALL) {
 		block = true;
-		goto out;
+		goto dynamic;
 	}
 	for (j = 0; j < target->rule_count; j++) {
 		const struct vpnhide_port_rule_v3 *rule =
@@ -364,9 +365,14 @@ static bool should_block_port(uid_t uid, __be16 port_be,
 		if (port >= rule->start_port && port <= rule->end_port &&
 		    (rule->protocol == VH_PROTO_BOTH || rule->protocol == protocol)) {
 			block = true;
-			goto out;
+			goto dynamic;
 		}
 	}
+dynamic:
+	if (!block && (snapshot->flags & VH_POLICY_FLAG_DYNAMIC_VPN_PORTS) &&
+	    !(target->mode & VH_PORT_POLICY_DYNAMIC_EXEMPT))
+		block = vpnhide_vpn_service_owns_port(
+			port, protocol, family, address);
 out:
 	rcu_read_unlock();
 	return block;
@@ -398,7 +404,8 @@ int vpnhide_connect_pre(struct socket *sock,
 		    sin->sin_addr.s_addr == 0) {
 			u32 address[4] = { (__force u32)sin->sin_addr.s_addr, 0, 0, 0 };
 
-			if (should_block_port(uid, sin->sin_port, protocol) &&
+			if (should_block_port(uid, sin->sin_port, protocol, AF_INET,
+					      address) &&
 			    !vpnhide_uid_owns_port(uid, ntohs(sin->sin_port), protocol,
 						   AF_INET, address)) {
 				record_port_intercept(uid, ntohs(sin->sin_port), protocol);
@@ -426,7 +433,8 @@ int vpnhide_connect_pre(struct socket *sock,
 					(__force u32)sin6->sin6_addr.s6_addr32[3];
 				owner_address[1] = owner_address[2] = owner_address[3] = 0;
 			}
-			if (should_block_port(uid, sin6->sin6_port, protocol) &&
+			if (should_block_port(uid, sin6->sin6_port, protocol, owner_family,
+					      owner_address) &&
 			    !vpnhide_uid_owns_port(uid, ntohs(sin6->sin6_port), protocol,
 						   owner_family, owner_address)) {
 				record_port_intercept(uid, ntohs(sin6->sin6_port), protocol);
@@ -461,7 +469,7 @@ void vpnhide_bind_post(struct socket *sock, int error)
 
 	if (error || !sock || !(sk = sock->sk) ||
 	    (sk->sk_family != AF_INET && sk->sk_family != AF_INET6) ||
-	    sk->sk_type != SOCK_DGRAM)
+	    (sk->sk_type != SOCK_DGRAM && sk->sk_type != SOCK_STREAM))
 		return;
 	uid = from_kuid(&init_user_ns, current_uid());
 	vpnhide_record_bound_socket(uid, sk);

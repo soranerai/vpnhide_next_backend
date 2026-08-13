@@ -855,6 +855,9 @@ int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
 				return ret;
 			}
 			result->targets[result->count].uid = pkg->uid;
+			if (vpnhide_dynamic_vpn_ports_enabled(root))
+				result->targets[result->count].mode |=
+					VH_PORT_POLICY_DYNAMIC_EXEMPT;
 			result->count++;
 			goto next_package;
 		}
@@ -865,13 +868,17 @@ int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
 			set_error(error, error_len, "cannot grow port target set");
 			return ret;
 		}
-		/* In ALLOWLIST, an app outside the selected exception set is denied
-		 * every port. Do not resolve global rules here: they describe the
-		 * selected app's visible set and must never become an allowlist for
-		 * unselected apps. */
+		/* In ALLOWLIST, an app outside the selected exception set is normally
+		 * denied every port. The experimental dynamic VPN mode narrows this to
+		 * VPN-owned ports only; global/app rules remain irrelevant here. */
 		memset(&result->targets[result->count], 0,
 		       sizeof(result->targets[result->count]));
 		result->targets[result->count].uid = pkg->uid;
+		if (vpnhide_dynamic_vpn_ports_enabled(root)) {
+			result->targets[result->count].mode = VH_PORT_POLICY_VPN_ONLY;
+			result->count++;
+			goto next_package;
+		}
 		/* Keep the full range as a compatibility fallback for an older
 		 * backend that does not know the explicit DENY_ALL mode yet. */
 		ret = set_full_range_port_rules(&result->targets[result->count]);

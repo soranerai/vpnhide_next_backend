@@ -12,6 +12,7 @@ static DEFINE_MUTEX(policy_apply_lock);
 
 struct vpnhide_owned_ports_snapshot {
   u32 bucket_count;
+  u32 vpn_bucket_count;
   u32 entry_count;
   unsigned long expires;
   struct rcu_head rcu;
@@ -80,11 +81,51 @@ static u32 owned_port_hash(const struct vpnhide_owned_port *owner) {
   return value;
 }
 
+static u32 vpn_port_hash(const struct vpnhide_owned_port *owner) {
+  u32 value = (u32)owner->port * 0x85ebca6bU;
+  unsigned int i;
+
+  value ^= (u32)owner->protocol * 0xc2b2ae35U;
+  value ^= (u32)owner->family * 0x27d4eb2fU;
+  for (i = 0; i < ARRAY_SIZE(owner->address); i++) {
+    value ^= owner->address[i] * 0x165667b1U;
+    value = rol32(value, 13);
+  }
+  value ^= value >> 16;
+  return value;
+}
+
 static bool owned_port_equal(const struct vpnhide_owned_port *left,
                              const struct vpnhide_owned_port *right) {
   return left->uid == right->uid && left->port == right->port &&
          left->protocol == right->protocol && left->family == right->family &&
+         left->flags == right->flags &&
          !memcmp(left->address, right->address, sizeof(left->address));
+}
+
+static bool vpn_port_equal(const struct vpnhide_owned_port *left,
+                           const struct vpnhide_owned_port *right) {
+  return (left->flags & VH_OWNED_PORT_VPN_SERVICE) &&
+         (right->flags & VH_OWNED_PORT_VPN_SERVICE) &&
+         left->port == right->port && left->protocol == right->protocol &&
+         left->family == right->family &&
+         !memcmp(left->address, right->address, sizeof(left->address));
+}
+
+static bool vpn_snapshot_contains(const struct vpnhide_owned_ports_snapshot *snapshot,
+                                  const struct vpnhide_owned_port *wanted) {
+  u32 slot = vpn_port_hash(wanted) & (snapshot->vpn_bucket_count - 1);
+
+  for (u32 probes = 0; probes < snapshot->vpn_bucket_count; probes++) {
+    const struct vpnhide_owned_port *entry =
+        &snapshot->buckets[snapshot->bucket_count + slot];
+    if (!entry->uid)
+      return false;
+    if (vpn_port_equal(entry, wanted))
+      return true;
+    slot = (slot + 1) & (snapshot->vpn_bucket_count - 1);
+  }
+  return false;
 }
 
 static bool owned_port_is_local(const struct vpnhide_owned_port *owner) {
@@ -213,6 +254,34 @@ out:
           pending_port_lookup_one(&wildcard));
 }
 
+bool vpnhide_vpn_service_owns_port(u16 port, u8 protocol, u8 family,
+                                   const u32 address[4]) {
+  struct vpnhide_owned_ports_snapshot *snapshot;
+  bool found = false;
+
+  rcu_read_lock();
+  snapshot = rcu_dereference(owned_ports_snapshot);
+  if (!snapshot || !snapshot->bucket_count ||
+      time_after_eq(jiffies, snapshot->expires))
+    goto out;
+  if (!snapshot->vpn_bucket_count)
+    goto out;
+  {
+    struct vpnhide_owned_port wanted = {
+        .port = port, .protocol = protocol, .family = family,
+        .flags = VH_OWNED_PORT_VPN_SERVICE};
+    memcpy(wanted.address, address, sizeof(wanted.address));
+    found = vpn_snapshot_contains(snapshot, &wanted);
+    if (!found && (address[0] || address[1] || address[2] || address[3])) {
+      memset(wanted.address, 0, sizeof(wanted.address));
+      found = vpn_snapshot_contains(snapshot, &wanted);
+    }
+  }
+out:
+  rcu_read_unlock();
+  return found;
+}
+
 void vpnhide_record_bound_socket(uid_t uid, struct sock *sk) {
   struct vpnhide_policy_snapshot *policy;
   struct vpnhide_pending_port *selected;
@@ -291,7 +360,7 @@ static int replace_owned_ports(const struct vpnhide_owned_ports_update *update) 
   struct vpnhide_owned_ports_snapshot *snapshot, *old;
   struct vpnhide_owned_port *entries = NULL;
   size_t size;
-  u32 buckets = 8, i;
+  u32 buckets = 8, vpn_buckets = 8, vpn_count = 0, i;
 
   if (update->reserved || update->count > VPNHIDE_OWNED_PORTS_MAX ||
       (update->count && !update->entries_ptr))
@@ -308,21 +377,47 @@ static int replace_owned_ports(const struct vpnhide_owned_ports_update *update) 
       return -EFAULT;
     }
   }
-  size = struct_size(snapshot, buckets, buckets);
+  for (i = 0; i < update->count; i++)
+    if (entries[i].flags & VH_OWNED_PORT_VPN_SERVICE)
+      vpn_count++;
+  while (vpn_buckets < max_t(u32, 8, vpn_count * 2))
+    vpn_buckets <<= 1;
+  size = sizeof(*snapshot) +
+         (size_t)(buckets + vpn_buckets) * sizeof(snapshot->buckets[0]);
   snapshot = kvzalloc(size, GFP_KERNEL);
   if (!snapshot) {
     kvfree(entries);
     return -ENOMEM;
   }
   snapshot->bucket_count = buckets;
+  snapshot->vpn_bucket_count = vpn_buckets;
   snapshot->expires = jiffies + 120 * HZ;
   for (i = 0; i < update->count; i++) {
     u32 slot, probes;
     if (!entries[i].uid || !entries[i].port ||
-        entries[i].protocol > VH_PROTO_UDP || !owned_port_is_local(&entries[i])) {
+        entries[i].protocol > VH_PROTO_UDP ||
+        (entries[i].flags & ~VH_OWNED_PORT_VPN_SERVICE) ||
+        !owned_port_is_local(&entries[i])) {
       kvfree(entries);
       kvfree(snapshot);
       return -EINVAL;
+    }
+    if (entries[i].flags & VH_OWNED_PORT_VPN_SERVICE) {
+      struct vpnhide_owned_port key = entries[i];
+      key.uid = 0;
+      slot = vpn_port_hash(&key) & (vpn_buckets - 1);
+      for (probes = 0; probes < vpn_buckets; probes++) {
+        struct vpnhide_owned_port *dst =
+            &snapshot->buckets[buckets + slot];
+        if (!dst->uid) {
+          *dst = entries[i];
+          break;
+        }
+        if (vpn_port_equal(dst, &entries[i]))
+          break;
+        slot = (slot + 1) & (vpn_buckets - 1);
+      }
+      continue;
     }
     slot = owned_port_hash(&entries[i]) & (buckets - 1);
     for (probes = 0; probes < buckets; probes++) {
@@ -947,7 +1042,9 @@ policy_snapshot_from_v3(const struct vpnhide_policy_payload_v3 *payload,
 
   for (i = 0; i < snapshot->port_target_count; i++) {
     struct vpnhide_port_target_v3 *target = &snapshot->port_targets[i];
-    if (target->uid == 0 || target->mode > VH_PORT_POLICY_DENY_ALL ||
+    if (target->uid == 0 ||
+        (target->mode & ~((unsigned char)0x0f | VH_PORT_POLICY_DYNAMIC_EXEMPT)) ||
+        (target->mode & 0x0f) > VH_PORT_POLICY_VPN_ONLY ||
         target->reserved[0] || target->reserved[1] || target->reserved[2] ||
         target->first_rule != next_rule ||
         target->rule_count > snapshot->port_rule_count - next_rule) {

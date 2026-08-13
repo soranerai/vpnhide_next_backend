@@ -874,9 +874,10 @@ static bool should_block_port(const struct vpnhide_policy_snapshot *snapshot,
                               const struct vpnhide_port_target_v3 *urules,
                               unsigned short port, unsigned char proto) {
   u32 i;
-  if (urules->mode == VH_PORT_POLICY_UNRESTRICTED)
+  unsigned char mode = urules->mode & 0x0f;
+  if (mode == VH_PORT_POLICY_UNRESTRICTED)
     return false;
-  if (urules->mode == VH_PORT_POLICY_DENY_ALL)
+  if (mode == VH_PORT_POLICY_DENY_ALL)
     return true;
   for (i = 0; i < urules->rule_count; i++) {
     const struct vpnhide_port_rule_v3 *r =
@@ -915,7 +916,10 @@ static bool direct_connect_should_block(struct socket *sock,
 
     if ((ipv4_is_loopback(sin->sin_addr.s_addr) ||
          sin->sin_addr.s_addr == htonl(INADDR_ANY)) &&
-        should_block_port(snapshot, urules, port, proto) &&
+        (should_block_port(snapshot, urules, port, proto) ||
+         ((snapshot->flags & VH_POLICY_FLAG_DYNAMIC_VPN_PORTS) &&
+          !(urules->mode & VH_PORT_POLICY_DYNAMIC_EXEMPT) &&
+          vpnhide_vpn_service_owns_port(port, proto, AF_INET, address))) &&
         !vpnhide_uid_owns_port(uid, port, proto, AF_INET, address))
       block = true;
     if (block) {
@@ -941,7 +945,11 @@ static bool direct_connect_should_block(struct socket *sock,
       address[0] = (__force u32)v4addr;
       address[1] = address[2] = address[3] = 0;
     }
-    if (local && should_block_port(snapshot, urules, port, proto) &&
+    if (local &&
+        (should_block_port(snapshot, urules, port, proto) ||
+         ((snapshot->flags & VH_POLICY_FLAG_DYNAMIC_VPN_PORTS) &&
+          !(urules->mode & VH_PORT_POLICY_DYNAMIC_EXEMPT) &&
+          vpnhide_vpn_service_owns_port(port, proto, family, address))) &&
         !vpnhide_uid_owns_port(uid, port, proto, family, address))
       block = true;
     if (block) {
@@ -1015,7 +1023,10 @@ static int socket_connect_entry(struct kretprobe_instance *ri,
           (sock->sk->sk_type == SOCK_STREAM) ? VH_PROTO_TCP : VH_PROTO_UDP;
       u32 address[4] = {(__force u32)sin->sin_addr.s_addr, 0, 0, 0};
 
-      if (should_block_port(snapshot, urules, port, proto) &&
+      if ((should_block_port(snapshot, urules, port, proto) ||
+           ((snapshot->flags & VH_POLICY_FLAG_DYNAMIC_VPN_PORTS) &&
+            !(urules->mode & VH_PORT_POLICY_DYNAMIC_EXEMPT) &&
+            vpnhide_vpn_service_owns_port(port, proto, AF_INET, address))) &&
           !vpnhide_uid_owns_port(uid, port, proto, AF_INET, address)) {
         data->should_block = true;
         data->port = port;
@@ -1059,7 +1070,10 @@ static int socket_connect_entry(struct kretprobe_instance *ri,
         address[1] = address[2] = address[3] = 0;
       }
 
-      if (should_block_port(snapshot, urules, port, proto) &&
+      if ((should_block_port(snapshot, urules, port, proto) ||
+           ((snapshot->flags & VH_POLICY_FLAG_DYNAMIC_VPN_PORTS) &&
+            !(urules->mode & VH_PORT_POLICY_DYNAMIC_EXEMPT) &&
+            vpnhide_vpn_service_owns_port(port, proto, family, address))) &&
           !vpnhide_uid_owns_port(uid, port, proto, family, address)) {
         data->should_block = true;
         data->port = port;
@@ -1194,7 +1208,7 @@ static int socket_bind_ret(struct kretprobe_instance *ri,
 
     if (regs_return_value(regs) == 0 && sk &&
         (sk->sk_family == AF_INET || sk->sk_family == AF_INET6) &&
-        sk->sk_type == SOCK_DGRAM)
+        (sk->sk_type == SOCK_DGRAM || sk->sk_type == SOCK_STREAM))
       vpnhide_record_bound_socket(data->uid, sk);
     if (data->put_needed)
       sockfd_put(data->sock);

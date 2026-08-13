@@ -237,6 +237,8 @@ bool is_target_uid_val(uid_t uid);
 bool is_target_uid(void);
 bool vpnhide_uid_owns_port(uid_t uid, u16 port, u8 protocol, u8 family,
                            const u32 address[4]);
+bool vpnhide_vpn_service_owns_port(u16 port, u8 protocol, u8 family,
+                                   const u32 address[4]);
 void vpnhide_record_bound_socket(uid_t uid, struct sock *sk);
 void vpnhide_notify_port_change(uid_t uid);
 int vpnhide_apply_policy(const struct vpnhide_policy_payload *payload,

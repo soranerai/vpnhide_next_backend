@@ -994,9 +994,98 @@ struct owned_port_list {
 	size_t capacity;
 };
 
+#define VPNHIDE_VPN_UID_MAX 4096
+
+struct vpn_uid_set {
+	uid_t items[VPNHIDE_VPN_UID_MAX];
+	size_t count;
+};
+
+static bool vpn_uid_set_contains(const struct vpn_uid_set *set, uid_t uid)
+{
+	if (!set)
+		return false;
+	for (size_t i = 0; i < set->count; i++)
+		if (set->items[i] == uid)
+			return true;
+	return false;
+}
+
+static void vpn_uid_set_add(struct vpn_uid_set *set, uid_t uid)
+{
+	if (!set || !uid || uid < 10000 || vpn_uid_set_contains(set, uid) ||
+	    set->count >= VPNHIDE_VPN_UID_MAX)
+		return;
+	set->items[set->count++] = uid;
+}
+
+static void flush_dump_service(struct vpn_uid_set *set, uid_t uid,
+				       bool *service_active, bool *has_action,
+				       bool *has_permission)
+{
+	if (*service_active && *has_action && *has_permission)
+		vpn_uid_set_add(set, uid);
+	*service_active = false;
+	*has_action = false;
+	*has_permission = false;
+}
+
+/* Require both parts of Android's VpnService manifest contract. A parse
+ * failure is fail-open: no UID is automatically classified as a VPN. */
+static int refresh_vpn_service_uids(struct vpn_uid_set *set)
+{
+	FILE *pipe;
+	char line[2048];
+	uid_t package_uid = 0;
+	bool service_active = false;
+	bool has_action = false;
+	bool has_permission = false;
+
+	if (!set)
+		return -1;
+	memset(set, 0, sizeof(*set));
+	pipe = popen("dumpsys package", "r");
+	if (!pipe)
+		return -1;
+	while (fgets(line, sizeof(line), pipe)) {
+		char *package_marker = strstr(line, "Package [");
+		char *uid_marker = strstr(line, "userId=");
+		bool new_service = strstr(line, "ServiceInfo{") != NULL;
+
+		if (package_marker) {
+			flush_dump_service(set, package_uid, &service_active,
+					   &has_action, &has_permission);
+			package_uid = 0;
+			uid_marker = strstr(line, "userId=");
+		}
+		if (uid_marker) {
+			char *end;
+			const char *value = uid_marker + strlen("userId=");
+			unsigned long parsed = strtoul(value, &end, 10);
+			if (end != value && parsed <= UINT_MAX)
+				package_uid = (uid_t)parsed;
+		}
+		if (new_service)
+			flush_dump_service(set, package_uid, &service_active,
+					   &has_action, &has_permission);
+		if (new_service)
+			service_active = true;
+		if (service_active && strstr(line, "android.net.VpnService"))
+			has_action = true;
+		if (service_active &&
+		    strstr(line, "android.permission.BIND_VPN_SERVICE"))
+			has_permission = true;
+	}
+	flush_dump_service(set, package_uid, &service_active, &has_action,
+			   &has_permission);
+	if (pclose(pipe) != 0)
+		return -1;
+	return 0;
+}
+
 static int append_owned_port(struct owned_port_list *list, uint32_t uid,
 			     uint16_t port, uint8_t protocol, uint8_t family,
-			     const uint32_t address[4])
+			     const uint32_t address[4], bool vpn_service)
 {
 	struct vpnhide_owned_port *grown;
 	if (uid < 10000 || port == 0)
@@ -1013,6 +1102,7 @@ static int append_owned_port(struct owned_port_list *list, uint32_t uid,
 	}
 	list->items[list->count++] = (struct vpnhide_owned_port) {
 		.uid = uid, .port = port, .protocol = protocol, .family = family,
+		.flags = vpn_service ? VH_OWNED_PORT_VPN_SERVICE : 0,
 	};
 	memcpy(list->items[list->count - 1].address, address,
 	       sizeof(list->items[list->count - 1].address));
@@ -1054,7 +1144,8 @@ static bool diag_local_endpoint(const struct inet_diag_msg *msg, uint8_t *family
 
 static int dump_owned_ports_family(int fd, int family, int protocol,
 				   uint32_t sequence,
-				   struct owned_port_list *list)
+				   struct owned_port_list *list,
+				   const struct vpn_uid_set *vpn_uids)
 {
 	struct {
 		struct nlmsghdr nlh;
@@ -1108,7 +1199,8 @@ static int dump_owned_ports_family(int fd, int family, int protocol,
 					      ntohs(msg->id.idiag_sport),
 					      protocol == IPPROTO_TCP ?
 						VH_PROTO_TCP : VH_PROTO_UDP,
-					      local_family, local_address) < 0)
+					      local_family, local_address,
+					      vpn_uid_set_contains(vpn_uids, msg->idiag_uid)) < 0)
 				return -1;
 		}
 	}
@@ -1125,10 +1217,12 @@ static int owned_port_compare(const void *left, const void *right)
 		return (int)a->protocol - (int)b->protocol;
 	if (a->family != b->family)
 		return (int)a->family - (int)b->family;
+	if (a->flags != b->flags)
+		return (int)a->flags - (int)b->flags;
 	return memcmp(a->address, b->address, sizeof(a->address));
 }
 
-static int refresh_owned_ports(int control_fd)
+static int refresh_owned_ports(int control_fd, const struct vpn_uid_set *vpn_uids)
 {
 	struct owned_port_list list = {0};
 	struct vpnhide_owned_ports_update update;
@@ -1138,10 +1232,14 @@ static int refresh_owned_ports(int control_fd)
 
 	if (diag_fd < 0)
 		return -1;
-	if (dump_owned_ports_family(diag_fd, AF_INET, IPPROTO_TCP, sequence++, &list) ||
-	    dump_owned_ports_family(diag_fd, AF_INET6, IPPROTO_TCP, sequence++, &list) ||
-	    dump_owned_ports_family(diag_fd, AF_INET, IPPROTO_UDP, sequence++, &list) ||
-	    dump_owned_ports_family(diag_fd, AF_INET6, IPPROTO_UDP, sequence++, &list))
+	if (dump_owned_ports_family(diag_fd, AF_INET, IPPROTO_TCP, sequence++, &list,
+					vpn_uids) ||
+	    dump_owned_ports_family(diag_fd, AF_INET6, IPPROTO_TCP, sequence++, &list,
+					vpn_uids) ||
+	    dump_owned_ports_family(diag_fd, AF_INET, IPPROTO_UDP, sequence++, &list,
+					vpn_uids) ||
+	    dump_owned_ports_family(diag_fd, AF_INET6, IPPROTO_UDP, sequence++, &list,
+					vpn_uids))
 		goto out;
 
 	qsort(list.items, list.count, sizeof(*list.items), owned_port_compare);
@@ -1197,6 +1295,7 @@ int main(int argc, char **argv)
 	char last_ipv6_linklocal[64];
 	unsigned int last_ipv4_mtu = UINT_MAX;
 	unsigned int last_ipv6_mtu = UINT_MAX;
+	struct vpn_uid_set vpn_uids;
 
 	setbuf(stdout, NULL);
 	setbuf(stderr, NULL);
@@ -1204,6 +1303,7 @@ int main(int argc, char **argv)
 	strcpy(last_ipv4, "none");
 	strcpy(last_ipv6, "none");
 	strcpy(last_ipv6_linklocal, "none");
+	memset(&vpn_uids, 0, sizeof(vpn_uids));
 
 	fd = open("/dev/vpnhide_ctrl", O_RDWR);
 	if (fd < 0) {
@@ -1271,7 +1371,12 @@ int main(int argc, char **argv)
 	if (diag_events_fd < 0)
 		fprintf(stderr, "vpnhide-daemon: socket destroy events unavailable: %s\n",
 			strerror(errno));
-	if (refresh_owned_ports(fd) < 0)
+	if (refresh_vpn_service_uids(&vpn_uids) < 0)
+		fprintf(stderr, "vpnhide-daemon: VPN service classification unavailable\n");
+	else
+		fprintf(stderr, "vpnhide-daemon: classified %zu VPN service UID(s)\n",
+			vpn_uids.count);
+	if (refresh_owned_ports(fd, &vpn_uids) < 0)
 		fprintf(stderr, "vpnhide-daemon: initial own-port scan failed: %s\n",
 			strerror(errno));
 
@@ -1427,6 +1532,8 @@ int main(int argc, char **argv)
 		}
 		if (pm_reload_due && get_time_ms() >= pm_reload_due) {
 			pm_reload_due = 0;
+			if (refresh_vpn_service_uids(&vpn_uids) < 0)
+				fprintf(stderr, "vpnhide-daemon: VPN service reclassification failed\n");
 			reload_policy(ctl, config, self_uid);
 			owned_ports_due = get_time_ms() + 100;
 		}
@@ -1434,7 +1541,7 @@ int main(int argc, char **argv)
 		    get_time_ms() >= next_owned_ports_reconcile) {
 			owned_ports_due = 0;
 			next_owned_ports_reconcile = get_time_ms() + 60000;
-			if (refresh_owned_ports(fd) < 0)
+			if (refresh_owned_ports(fd, &vpn_uids) < 0)
 				fprintf(stderr, "vpnhide-daemon: own-port refresh failed: %s\n",
 					strerror(errno));
 		}

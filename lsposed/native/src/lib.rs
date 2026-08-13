@@ -1234,7 +1234,10 @@ pub fn check_inet_diag() -> CheckOutput {
             CheckOutput::pass("not detected")
         } else {
             libc::close(fd);
-            CheckOutput::fail(format!("VPN detected (socket opened successfully, fd={})", fd))
+            CheckOutput::fail(format!(
+                "VPN detected (socket opened successfully, fd={})",
+                fd
+            ))
         }
     }
 }
@@ -2993,7 +2996,8 @@ pub fn check_ipv6_link_local_bruteforce() -> CheckOutput {
                         None
                     };
                     // ARPHRD_NONE = 65534, ARPHRD_PPP = 512
-                    let is_hw_tunnel = arphrd.is_some_and(|t| t == 65534 || t == 512) && !is_physical_non_vpn(name);
+                    let is_hw_tunnel = arphrd.is_some_and(|t| t == 65534 || t == 512)
+                        && !is_physical_non_vpn(name);
                     let arphrd_note = arphrd.map_or(String::new(), |t| format!(",arphrd={t}"));
                     if is_hw_tunnel || (is_vpn_iface(name) && is_interface_up(name)) {
                         named_vpn.push(format!("idx={i}({name}{arphrd_note})"));

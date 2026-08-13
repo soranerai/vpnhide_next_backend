@@ -436,7 +436,9 @@ def fix_getsockopt(lines):
     # statement of a fresh block, not a declaration slipped in after the
     # `if (fd_empty(f)) ...`/`if (unlikely(!sock)) ...` statements earlier
     # in the function -- kernel builds error on -Wdeclaration-after-statement.
-    call_text = "".join(l.strip() + " " for l in lines[start_idx : end_idx + 1]).strip()
+    call_text = "".join(
+        line.strip() + " " for line in lines[start_idx : end_idx + 1]
+    ).strip()
     call_text = call_text.replace(
         "return do_sock_getsockopt(", "do_sock_getsockopt(", 1
     )

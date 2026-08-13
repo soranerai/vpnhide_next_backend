@@ -24,6 +24,12 @@ struct vpnhide_policy_summary {
 	int ignored_selected_system_packages;
 };
 
+static inline int vpnhide_dynamic_vpn_ports_enabled(const JSON_Object *root)
+{
+	const JSON_Object *global = json_object_get_object(root, "globalConfig");
+	return global && json_object_get_boolean(global, "dynamicVpnPortBlocking") == 1;
+}
+
 struct vpnhide_uid_vector {
 	size_t count;
 	size_t capacity;

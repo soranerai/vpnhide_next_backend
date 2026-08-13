@@ -19,6 +19,10 @@
 #define VH_PORT_POLICY_RULES        0
 #define VH_PORT_POLICY_UNRESTRICTED 1
 #define VH_PORT_POLICY_DENY_ALL     2
+#define VH_PORT_POLICY_VPN_ONLY     3
+#define VH_PORT_POLICY_DYNAMIC_EXEMPT 0x80
+
+#define VH_POLICY_FLAG_DYNAMIC_VPN_PORTS (1u << 0)
 
 struct vpnhide_port_rule {
 	unsigned short start_port;
@@ -144,8 +148,12 @@ struct vpnhide_owned_port {
 	__u16 port;
 	__u8 protocol;
 	__u8 family;
+	__u8 flags;
+	__u8 reserved[3];
 	__u32 address[4]; /* network byte order; unused words are zero */
 };
+
+#define VH_OWNED_PORT_VPN_SERVICE (1u << 0)
 
 struct vpnhide_owned_ports_update {
 	__u32 count;

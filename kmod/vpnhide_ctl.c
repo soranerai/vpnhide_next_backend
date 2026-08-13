@@ -129,7 +129,8 @@ static int pack_policy_v3(const struct vpnhide_uid_vector *targets,
 			  const struct app_hook_mask_vector *masks,
 			  const struct vpnhide_iface_ioctl_data *ifaces,
 			  unsigned int active_mask, unsigned int java_mask,
-			  int debug_enabled, void **out, uint32_t *out_size)
+			  int debug_enabled, unsigned int flags,
+			  void **out, uint32_t *out_size)
 {
 	struct vpnhide_policy_payload_v3 *payload;
 	struct vpnhide_port_target_v3 *port_targets;
@@ -161,6 +162,7 @@ static int pack_policy_v3(const struct vpnhide_uid_vector *targets,
 	payload->active_hooks_mask = active_mask;
 	payload->java_hooks_mask = java_mask;
 	payload->debug_enabled = !!debug_enabled;
+	payload->flags = flags;
 	payload->iface_count = (uint32_t)ifaces->count;
 	memcpy(payload->iface_prefixes, ifaces->prefixes,
 	       sizeof(payload->iface_prefixes));
@@ -338,6 +340,7 @@ int main(int argc, char **argv)
 		int debug_logging = 0;
 		int have_global_config = 0;
 		int allowlist_mode = 0;
+		unsigned int policy_flags = 0;
 		if (argc > 3) {
 			self_uid = (uid_t)atoi(argv[3]);
 		}
@@ -365,6 +368,9 @@ int main(int argc, char **argv)
 					(!strcmp(list_mode, "ALLOWLIST") ||
 					 !strcmp(list_mode, "allowlist"));
 			}
+			if (json_object_get_boolean(global_config,
+						    "dynamicVpnPortBlocking") == 1)
+				policy_flags |= VH_POLICY_FLAG_DYNAMIC_VPN_PORTS;
 			have_global_config = 1;
 		}
 		kernel_mask |= VPNHIDE_PORT_HOOK_MASK;
@@ -478,6 +484,7 @@ int main(int argc, char **argv)
 				   have_global_config ? kernel_mask : 0xFFFFFFFFu,
 				   have_global_config ? java_mask : 0xFFFFFFFFu,
 				   have_global_config ? !!debug_logging : 0,
+				   policy_flags,
 				   &payload, &payload_size)) {
 			fprintf(stderr, "Cannot serialize variable-length policy\n");
 			free(app_hook_masks.items);

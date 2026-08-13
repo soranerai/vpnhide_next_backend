@@ -50,9 +50,11 @@ int main(void)
 	}
 
 	assert(pack_policy_v3(&kmod, &lsposed, &ports, &masks, &ifaces,
-			      0x1234U, 0x5678U, 1, &blob, &blob_size) == 0);
+			      0x1234U, 0x5678U, 1,
+			      VH_POLICY_FLAG_DYNAMIC_VPN_PORTS, &blob, &blob_size) == 0);
 	payload = blob;
 	assert(payload->total_size == blob_size);
+	assert(payload->flags == VH_POLICY_FLAG_DYNAMIC_VPN_PORTS);
 	assert(payload->kmod_uids.count == TEST_UID_COUNT);
 	assert(payload->lsposed_uids.count == TEST_UID_COUNT);
 	assert(payload->port_targets.count == TEST_UID_COUNT);
