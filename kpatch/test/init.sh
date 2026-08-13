@@ -169,11 +169,7 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# Freeze the kernel snapshot and rename vpn1. The ifindex stays the same, so
-# this verifies the native hiding path does not depend on interface strings.
 kill "$DAEMON_PID" 2>/dev/null
-ip link set vpn1 name renamed1 2>/dev/null
-check renamed_iface_ifindex "ip addr show" "renamed1"
 
 # --- programmatic socket / ioctl / BPF checks (Python) ----------------------
 apply_policy

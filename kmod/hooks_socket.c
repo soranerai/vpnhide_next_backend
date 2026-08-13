@@ -886,6 +886,8 @@ static bool should_block_port(const struct vpnhide_policy_snapshot *snapshot,
         return true;
       }
     }
+    if (r->start_port > port)
+      break;
   }
   return false;
 }

@@ -30,6 +30,55 @@ struct discovered_package {
 	int system_package;
 };
 
+struct uid_seen_set {
+	uid_t *slots;
+	size_t capacity;
+};
+
+static int uid_seen_set_init(struct uid_seen_set *set, size_t expected)
+{
+	size_t capacity = 16;
+
+	if (expected > SIZE_MAX / 2)
+		return -EOVERFLOW;
+	while (capacity < expected * 2) {
+		if (capacity > SIZE_MAX / 2)
+			return -EOVERFLOW;
+		capacity *= 2;
+	}
+	set->slots = calloc(capacity, sizeof(*set->slots));
+	if (!set->slots)
+		return -ENOMEM;
+	set->capacity = capacity;
+	return 0;
+}
+
+static void uid_seen_set_free(struct uid_seen_set *set)
+{
+	free(set->slots);
+	memset(set, 0, sizeof(*set));
+}
+
+/* Returns 1 when uid was already present, 0 when inserted. */
+static int uid_seen_set_add(struct uid_seen_set *set, uid_t uid)
+{
+	size_t slot;
+
+	if (!set->slots || !set->capacity)
+		return -EINVAL;
+	slot = ((uint32_t)uid * 2654435761U) & (set->capacity - 1);
+	for (size_t probe = 0; probe < set->capacity; probe++) {
+		uid_t *entry = &set->slots[(slot + probe) & (set->capacity - 1)];
+		if (!*entry) {
+			*entry = uid;
+			return 0;
+		}
+		if (*entry == uid)
+			return 1;
+	}
+	return -ENOSPC;
+}
+
 static void set_error(char *error, size_t error_len, const char *message)
 {
 	if (error && error_len > 0)
@@ -598,10 +647,11 @@ static int configured_package_is_protected(const JSON_Object *app,
 }
 
 static int resolve_layer(const JSON_Array *apps,
-				 const struct discovered_package *packages, int package_count,
-				 const char *field, uid_t self_uid,
-				 enum vpnhide_list_mode mode, struct vpnhide_uid_vector *result,
-				 struct vpnhide_policy_summary *summary, char *error,
+					 const struct discovered_package *packages, int package_count,
+					 const char *field, uid_t self_uid,
+					 enum vpnhide_list_mode mode, struct vpnhide_uid_vector *result,
+					 struct uid_seen_set *seen,
+					 struct vpnhide_policy_summary *summary, char *error,
 				 size_t error_len)
 {
 	int i;
@@ -634,6 +684,16 @@ static int resolve_layer(const JSON_Array *apps,
 			continue;
 		}
 
+		{
+			int seen_result = uid_seen_set_add(seen, pkg->uid);
+			if (seen_result < 0 || seen_result == 1) {
+				if (seen_result < 0)
+					set_error(error, error_len, "cannot grow effective target set");
+				if (seen_result < 0)
+					return seen_result;
+				continue;
+			}
+		}
 		if (add_uid_distinct(result, pkg->uid)) {
 			set_error(error, error_len, "cannot grow effective target set");
 			return -ENOMEM;
@@ -719,11 +779,25 @@ int vpnhide_resolve_targets(const JSON_Object *root, uid_t self_uid,
 	if (ret)
 		return ret;
 	summary->discovered_packages = package_count;
+	struct uid_seen_set kmod_seen = {0};
+	struct uid_seen_set lsposed_seen = {0};
+	ret = uid_seen_set_init(&kmod_seen, (size_t)package_count);
+	if (!ret)
+		ret = uid_seen_set_init(&lsposed_seen, (size_t)package_count);
+	if (ret) {
+		uid_seen_set_free(&kmod_seen);
+		uid_seen_set_free(&lsposed_seen);
+		free(packages);
+		set_error(error, error_len, "out of memory while indexing target UIDs");
+		return ret;
+	}
 	ret = resolve_layer(apps, packages, package_count, "kmod", self_uid,
-				    summary->mode, kmod, summary, error, error_len);
+				    summary->mode, kmod, &kmod_seen, summary, error, error_len);
 	if (!ret)
 		ret = resolve_layer(apps, packages, package_count, "lsposed", self_uid,
-				    summary->mode, lsposed, summary, error, error_len);
+				    summary->mode, lsposed, &lsposed_seen, summary, error, error_len);
+	uid_seen_set_free(&kmod_seen);
+	uid_seen_set_free(&lsposed_seen);
 	free(packages);
 	if (ret)
 		return ret;

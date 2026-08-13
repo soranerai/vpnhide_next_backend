@@ -93,6 +93,7 @@ struct vh_port_stats_total {
 
 static struct vh_port_stats_total *port_stats;
 static u64 port_stats_dropped;
+static DEFINE_SPINLOCK(port_stats_lock);
 
 static u32 port_stats_hash(uid_t uid, u16 port, u8 protocol)
 {
@@ -112,7 +113,7 @@ void record_port_intercept(uid_t uid, u16 port, u8 protocol)
 		return;
 
 	hash = port_stats_hash(uid, port, protocol);
-	spin_lock(&intercept_stats.lock);
+	spin_lock(&port_stats_lock);
 	for (probe = 0; probe < VPNHIDE_PORT_STATS_CAPACITY; probe++) {
 		u32 index = (hash + probe) & VPNHIDE_PORT_STATS_MASK;
 		struct vh_port_stats_total *entry = &port_stats[index];
@@ -121,7 +122,7 @@ void record_port_intercept(uid_t uid, u16 port, u8 protocol)
 		    entry->port == port && entry->protocol == protocol) {
 			entry->count++;
 			entry->last_seen = jiffies;
-			spin_unlock(&intercept_stats.lock);
+			spin_unlock(&port_stats_lock);
 			return;
 		}
 		if (entry->state == VPNHIDE_PORT_STAT_TOMBSTONE &&
@@ -136,7 +137,7 @@ void record_port_intercept(uid_t uid, u16 port, u8 protocol)
 			entry->count = 1;
 			entry->last_seen = jiffies;
 			entry->state = VPNHIDE_PORT_STAT_USED;
-			spin_unlock(&intercept_stats.lock);
+			spin_unlock(&port_stats_lock);
 			return;
 		}
 	}
@@ -148,11 +149,11 @@ void record_port_intercept(uid_t uid, u16 port, u8 protocol)
 		entry->count = 1;
 		entry->last_seen = jiffies;
 		entry->state = VPNHIDE_PORT_STAT_USED;
-		spin_unlock(&intercept_stats.lock);
+		spin_unlock(&port_stats_lock);
 		return;
 	}
 	port_stats_dropped++;
-	spin_unlock(&intercept_stats.lock);
+	spin_unlock(&port_stats_lock);
 }
 
 static u32 count_live_port_stats_locked(void)
@@ -705,14 +706,40 @@ bool lookup_app_kernel_mask(uid_t uid, unsigned int *out)
 
 bool is_hook_active(enum vpnhide_hook_idx index, uid_t uid)
 {
+	struct vpnhide_policy_snapshot *snapshot;
 	unsigned int bit = BIT(index);
-	unsigned int mask;
+	unsigned int mask = 0;
+	int lo, hi;
+	bool active = false;
 
-	/* Per-app mask fully overrides the global for that uid. */
-	if (lookup_app_kernel_mask(uid, &mask))
-		return !!(mask & bit);
+	/* Read the global mask and the optional per-app override from the same
+	 * immutable snapshot. The old implementation performed two separate RCU
+	 * lookups for the common no-override case. */
+	rcu_read_lock();
+	snapshot = rcu_dereference(global_policy_snapshot);
+	if (snapshot) {
+		mask = snapshot->active_hooks_mask;
+		lo = 0;
+		hi = (int)snapshot->app_hook_mask_count - 1;
+		while (lo <= hi) {
+			int mid = lo + ((hi - lo) >> 1);
+			const struct vpnhide_app_hook_mask_v3 *override =
+				&snapshot->app_hook_masks[mid];
 
-	return !!(vpnhide_active_hooks_mask() & bit);
+			if (override->uid == uid) {
+				if (override->has_kernel_override)
+					mask = override->kernel_mask;
+				break;
+			}
+			if (override->uid < uid)
+				lo = mid + 1;
+			else
+				hi = mid - 1;
+		}
+		active = !!(mask & bit);
+	}
+	rcu_read_unlock();
+	return active;
 }
 
 /* ------------------------------------------------------------------ */
@@ -851,7 +878,7 @@ void vpnhide_record_java_stat(uid_t uid, const char *hook, u64 count)
 static int intercept_stats_reconcile(const struct vpnhide_policy_snapshot *snapshot)
 {
 	struct vh_uid_stats_total *replacement = NULL, *old;
-	u32 i, j;
+	u32 i, j = 0;
 	if (snapshot->kmod_count) {
 		replacement = kvmalloc_array(snapshot->kmod_count,
 					     sizeof(*replacement), GFP_KERNEL | __GFP_ZERO);
@@ -862,13 +889,15 @@ static int intercept_stats_reconcile(const struct vpnhide_policy_snapshot *snaps
 	}
 
 	spin_lock(&intercept_stats.lock);
-	for (i = 0; i < snapshot->kmod_count; i++) {
-		for (j = 0; j < intercept_stats.count; j++) {
-			if (replacement[i].uid == intercept_stats.stats[j].uid) {
-				replacement[i] = intercept_stats.stats[j];
-				break;
-			}
-		}
+	/* Both arrays are sorted by UID. Preserve counters with a merge instead
+	 * of turning every policy reload into O(new_count * old_count). */
+	for (i = 0; i < snapshot->kmod_count && j < intercept_stats.count; i++) {
+		while (j < intercept_stats.count &&
+		       intercept_stats.stats[j].uid < replacement[i].uid)
+			j++;
+		if (j < intercept_stats.count &&
+		    intercept_stats.stats[j].uid == replacement[i].uid)
+			replacement[i] = intercept_stats.stats[j++];
 	}
 	old = intercept_stats.stats;
 	intercept_stats.stats = replacement;
@@ -1174,6 +1203,16 @@ static int policy_port_target_cmp(const void *a, const void *b)
 	return (pa->uid > pb->uid) - (pa->uid < pb->uid);
 }
 
+static int policy_port_rule_cmp(const void *a, const void *b)
+{
+	const struct vpnhide_port_rule_v3 *ra = a, *rb = b;
+	if (ra->start_port != rb->start_port)
+		return (int)ra->start_port - (int)rb->start_port;
+	if (ra->end_port != rb->end_port)
+		return (int)ra->end_port - (int)rb->end_port;
+	return (int)ra->protocol - (int)rb->protocol;
+}
+
 static int policy_app_mask_cmp(const void *a, const void *b)
 {
 	const struct vpnhide_app_hook_mask_v3 *ma = a, *mb = b;
@@ -1269,6 +1308,10 @@ policy_snapshot_from_v3(const struct vpnhide_policy_payload_v3 *payload,
 		    target->first_rule != next_rule ||
 		    target->rule_count > snapshot->port_rule_count - next_rule)
 			goto invalid;
+		if (target->rule_count > 1)
+			sort(snapshot->port_rules + target->first_rule,
+			     target->rule_count, sizeof(*snapshot->port_rules),
+			     policy_port_rule_cmp, NULL);
 		next_rule += target->rule_count;
 	}
 	if (next_rule != snapshot->port_rule_count)
@@ -1722,8 +1765,10 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 
 		spin_lock(&intercept_stats.lock);
 		uid_count = intercept_stats.count;
-		port_count = count_live_port_stats_locked();
 		spin_unlock(&intercept_stats.lock);
+		spin_lock(&port_stats_lock);
+		port_count = count_live_port_stats_locked();
+		spin_unlock(&port_stats_lock);
 		if (request.uid_capacity >= uid_count && uid_count) {
 			uid_out = kvmalloc_array(uid_count, sizeof(*uid_out), GFP_KERNEL);
 			if (!uid_out)
@@ -1741,12 +1786,9 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 
 		spin_lock(&intercept_stats.lock);
 		uid_count = intercept_stats.count;
-		port_count = count_live_port_stats_locked();
 		request.uid_count = uid_count;
-		request.port_count = port_count;
 		request.sequence = atomic64_inc_return(&intercept_stats_sequence);
 		request.monotonic_ns = ktime_get_ns();
-		request.dropped_port_entries = port_stats_dropped;
 		if (uid_out && request.uid_capacity >= uid_count &&
 		    uid_allocated >= uid_count) {
 			for (i = 0; i < uid_count; i++) {
@@ -1767,6 +1809,11 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 				uid_out[i].java_cs_count = intercept_stats.stats[i].java_cs_count;
 			}
 		}
+		spin_unlock(&intercept_stats.lock);
+		spin_lock(&port_stats_lock);
+		port_count = count_live_port_stats_locked();
+		request.port_count = port_count;
+		request.dropped_port_entries = port_stats_dropped;
 		if (port_out && request.port_capacity >= port_count &&
 		    port_allocated >= port_count) {
 			for (i = 0, out_index = 0; i < VPNHIDE_PORT_STATS_CAPACITY; i++) {
@@ -1781,7 +1828,7 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 				out_index++;
 			}
 		}
-		spin_unlock(&intercept_stats.lock);
+		spin_unlock(&port_stats_lock);
 
 		if (request.uid_capacity < uid_count || request.port_capacity < port_count ||
 		    uid_allocated < uid_count || port_allocated < port_count) {
@@ -1828,10 +1875,12 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 			intercept_stats.stats[i].uid = uid;
 		}
 		atomic64_set(&intercept_stats_sequence, 0);
+		spin_unlock(&intercept_stats.lock);
+		spin_lock(&port_stats_lock);
 		old_port_stats = port_stats;
 		port_stats = replacement_port_stats;
 		port_stats_dropped = 0;
-		spin_unlock(&intercept_stats.lock);
+		spin_unlock(&port_stats_lock);
 		kvfree(old_port_stats);
 		break;
 	}
