@@ -366,6 +366,8 @@ static bool should_block_port(uid_t uid, __be16 port_be,
 			block = true;
 			goto out;
 		}
+		if (rule->start_port > port)
+			break;
 	}
 out:
 	rcu_read_unlock();

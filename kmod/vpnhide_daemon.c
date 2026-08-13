@@ -491,9 +491,18 @@ static void initialize_session_id(int fd, struct daemon_stats_ring *ring)
 static const struct vpnhide_uid_stats *find_uid_stats(
 	const struct vpnhide_uid_stats *entries, uint32_t count, uid_t uid)
 {
-	for (uint32_t i = 0; i < count; i++)
-		if (entries[i].uid == uid)
-			return &entries[i];
+	uint32_t lo = 0, hi = count;
+
+	/* Kernel snapshots and the daemon baseline are UID-sorted. */
+	while (lo < hi) {
+		uint32_t mid = lo + (hi - lo) / 2;
+		if (entries[mid].uid < uid)
+			lo = mid + 1;
+		else
+			hi = mid;
+	}
+	if (lo < count && entries[lo].uid == uid)
+		return &entries[lo];
 	return NULL;
 }
 

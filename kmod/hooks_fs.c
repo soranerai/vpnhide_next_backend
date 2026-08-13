@@ -2,37 +2,57 @@
 
 /* --- eBPF Map Hijacking / Stats Hiding --- */
 
-static inline bool is_stats_or_uid_map(const char *name) {
+enum vh_bpf_map_kind {
+  VH_BPF_MAP_UNKNOWN = 0,
+  VH_BPF_MAP_KEYED_UID,
+  VH_BPF_MAP_IFACE,
+  VH_BPF_MAP_OTHER,
+};
+
+static inline enum vh_bpf_map_kind classify_bpf_map(const char *name) {
   if (!name || name[0] == '\0')
-    return false;
+    return VH_BPF_MAP_UNKNOWN;
 
   switch (name[0]) {
   case 'a':
-    return strncmp(name, "app_uid_stats", 13) == 0;
+    return strncmp(name, "app_uid_stats", 13) == 0 ?
+           VH_BPF_MAP_KEYED_UID : VH_BPF_MAP_UNKNOWN;
   case 's':
-    return strncmp(name, "stats_map_", 10) == 0;
+    return strncmp(name, "stats_map_", 10) == 0 ?
+           VH_BPF_MAP_KEYED_UID : VH_BPF_MAP_UNKNOWN;
   case 'i':
-    return strncmp(name, "iface_stats", 11) == 0;
+    return strncmp(name, "iface_stats", 11) == 0 ?
+           VH_BPF_MAP_IFACE : VH_BPF_MAP_UNKNOWN;
   case 'u':
-    return strncmp(name, "uid_stats", 9) == 0;
+    return strncmp(name, "uid_stats", 9) == 0 ?
+           VH_BPF_MAP_KEYED_UID : VH_BPF_MAP_UNKNOWN;
   case 't':
-    return strncmp(name, "tether_stats", 12) == 0;
+    return strncmp(name, "tether_stats", 12) == 0 ?
+           VH_BPF_MAP_IFACE : VH_BPF_MAP_UNKNOWN;
   case 'm':
-    return (strncmp(name, "map_netd_app_ui", 15) == 0 ||
-            strncmp(name, "map_netd_stats", 14) == 0 ||
-            strncmp(name, "map_netd_iface_", 15) == 0 ||
-            strncmp(name, "map_netd_uid_st", 15) == 0);
+    if (strncmp(name, "map_netd_stats", 14) == 0)
+      return VH_BPF_MAP_KEYED_UID;
+    if (strncmp(name, "map_netd_app_ui", 15) == 0 ||
+        strncmp(name, "map_netd_uid_st", 15) == 0)
+      return VH_BPF_MAP_OTHER;
+    if (strncmp(name, "map_netd_iface_", 15) == 0)
+      return VH_BPF_MAP_IFACE;
+    return VH_BPF_MAP_UNKNOWN;
   default:
-    return false;
+    return VH_BPF_MAP_UNKNOWN;
   }
 }
 
-static bool is_key_vpn_or_target_uid(struct bpf_map *map, void *key) {
+static inline bool is_stats_or_uid_map(const char *name) {
+  return classify_bpf_map(name) != VH_BPF_MAP_UNKNOWN;
+}
+
+static bool is_key_vpn_or_target_uid(struct bpf_map *map, void *key,
+                                     enum vh_bpf_map_kind kind) {
   if (!map || !key)
     return false;
 
-  if (strncmp(map->name, "stats_map_", 10) == 0 ||
-      strncmp(map->name, "map_netd_stats", 14) == 0) {
+  if (kind == VH_BPF_MAP_KEYED_UID) {
     struct vh_stats_key *sk = (struct vh_stats_key *)key;
 
     vpnhide_dbg("key_check stats_map '%s': uid=%u index=%u\n", map->name,
@@ -43,9 +63,7 @@ static bool is_key_vpn_or_target_uid(struct bpf_map *map, void *key) {
                   map->name, sk->uid, sk->ifaceIndex);
       return true;
     }
-  } else if (strncmp(map->name, "iface_stats", 11) == 0 ||
-             strncmp(map->name, "map_netd_iface_", 15) == 0 ||
-             strncmp(map->name, "tether_stats", 12) == 0) {
+  } else if (kind == VH_BPF_MAP_IFACE) {
     u32 ifaceIndex = *(u32 *)key;
 
     vpnhide_dbg("key_check iface/tether '%s': index=%u\n", map->name,
@@ -206,7 +224,8 @@ static void bpf_single_cover_update(struct bpf_map *map, void __user *usr_val,
 
 static void bpf_single_lookup_zero(struct bpf_map *map,
                                    const union bpf_attr *attr, u32 key_size,
-                                   u32 value_size) {
+                                   u32 value_size,
+                                   enum vh_bpf_map_kind kind) {
   u8 kbuf_stack[64];
   u8 vbuf_stack[256];
   void *kbuf = NULL;
@@ -239,7 +258,7 @@ static void bpf_single_lookup_zero(struct bpf_map *map,
   if (copy_from_user(kbuf, usr_key, key_size) != 0)
     goto out;
 
-  if (is_key_vpn_or_target_uid(map, kbuf)) {
+  if (is_key_vpn_or_target_uid(map, kbuf, kind)) {
     vpnhide_dbg("sys_bpf_ret: single zeroing for map '%s'\n", map->name);
     if (copy_to_user(usr_val, vbuf, value_size)) {
       vpnhide_dbg("sys_bpf_ret: single zeroing copy_to_user failed\n");
@@ -311,13 +330,13 @@ static void bpf_batch_zero_iface(struct bpf_map *map, void __user *usr_keys,
 static void bpf_batch_zero_generic(struct bpf_map *map, void __user *usr_keys,
                                    void __user *usr_vals, u32 count,
                                    u32 key_size, u32 value_size, void *kbuf,
-                                   void *vbuf) {
+                                   void *vbuf, enum vh_bpf_map_kind kind) {
   u32 i;
 
   for (i = 0; i < count; i++) {
     if (copy_from_user(kbuf, (char __user *)usr_keys + i * key_size,
                        key_size) == 0) {
-      if (is_key_vpn_or_target_uid(map, kbuf)) {
+      if (is_key_vpn_or_target_uid(map, kbuf, kind)) {
         memset(vbuf, 0, value_size);
         if (copy_to_user((char __user *)usr_vals + i * value_size, vbuf,
                          value_size)) {
@@ -330,7 +349,8 @@ static void bpf_batch_zero_generic(struct bpf_map *map, void __user *usr_keys,
 
 static void bpf_batch_lookup_zero(struct bpf_map *map,
                                   const struct sys_bpf_data *data, u32 key_size,
-                                  u32 value_size) {
+                                  u32 value_size,
+                                  enum vh_bpf_map_kind kind) {
   u32 count = 0;
 
   if (get_user(count, &data->uattr->batch.count) == 0 && count > 0) {
@@ -363,7 +383,7 @@ static void bpf_batch_lookup_zero(struct bpf_map *map,
                                value_size, kbuf, vbuf);
         } else {
           bpf_batch_zero_generic(map, usr_keys, usr_vals, count, key_size,
-                                 value_size, kbuf, vbuf);
+                                 value_size, kbuf, vbuf, kind);
         }
       }
       if (kbuf && kbuf != kbuf_stack)
@@ -379,6 +399,7 @@ static int sys_bpf_ret(struct kretprobe_instance *ri, struct pt_regs *regs) {
   int ret_val = regs_return_value(regs);
   struct bpf_map *map;
   struct fd f;
+  enum vh_bpf_map_kind kind;
 
   if (!data || !data->uattr)
     return 0;
@@ -397,7 +418,8 @@ static int sys_bpf_ret(struct kretprobe_instance *ri, struct pt_regs *regs) {
   if (!map)
     return 0;
 
-  if (is_stats_or_uid_map(map->name)) {
+  kind = classify_bpf_map(map->name);
+  if (kind != VH_BPF_MAP_UNKNOWN) {
     u32 key_size = map->key_size;
     u32 value_size = map->value_size;
 
@@ -407,11 +429,11 @@ static int sys_bpf_ret(struct kretprobe_instance *ri, struct pt_regs *regs) {
     if ((data->cmd == BPF_MAP_LOOKUP_ELEM ||
          data->cmd == BPF_MAP_LOOKUP_AND_DELETE_ELEM) &&
         ret_val == 0) {
-      bpf_single_lookup_zero(map, &data->attr, key_size, value_size);
+      bpf_single_lookup_zero(map, &data->attr, key_size, value_size, kind);
     }
     else if (data->cmd == BPF_MAP_LOOKUP_BATCH ||
              data->cmd == BPF_MAP_LOOKUP_AND_DELETE_BATCH) {
-      bpf_batch_lookup_zero(map, data, key_size, value_size);
+      bpf_batch_lookup_zero(map, data, key_size, value_size, kind);
     }
   }
 
@@ -551,7 +573,12 @@ static int sys_getdents64_ret(struct kretprobe_instance *ri,
           p + de->d_reclen > end)
         break;
 
-      if (vh_is_vpn_name_cached(de->d_name, strlen(de->d_name))) {
+      /* d_name is bounded by this directory record. Avoid an unbounded
+       * strlen() on every entry while retaining the existing cache API. */
+      size_t name_capacity = de->d_reclen -
+                             offsetof(struct vh_linux_dirent64, d_name);
+      size_t name_len = strnlen(de->d_name, name_capacity);
+      if (vh_is_vpn_name_cached(de->d_name, name_len)) {
         vpnhide_dbg("sys_getdents64_ret: filtering out entry '%s'\n",
                     de->d_name);
         record_kmod_intercept(from_kuid(&init_user_ns, current_uid()), 2);
