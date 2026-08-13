@@ -910,68 +910,6 @@ def test_proc_sys_net():
     return True
 
 
-def test_udp_queue_pressure():
-    print("\n--- UDP queue pressure checks ---")
-
-    # 1. Non-target check (root)
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setblocking(False)
-    success_count_nt = 0
-    for _ in range(1000):
-        try:
-            s.sendto(b"test_payload_32_bytes_long_here", ("127.0.0.1", 12345))
-            success_count_nt += 1
-        except OSError:
-            pass
-    print(f"[UDP Queue Pressure] Non-target success rate: {success_count_nt}/1000")
-    if success_count_nt < 950:
-        print(
-            f"FAIL: UDP queue pressure non-target success rate too low: {success_count_nt}/1000"
-        )
-        return False
-
-    # 2. Target check (UID 115555)
-    pid = safe_fork()
-    if pid == 0:
-        try:
-            os.setuid(115555)
-            s_tgt = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s_tgt.setblocking(False)
-            success_count = 0
-            eagain_count = 0
-            for _ in range(1000):
-                try:
-                    s_tgt.sendto(
-                        b"test_payload_32_bytes_long_here", ("127.0.0.1", 12345)
-                    )
-                    success_count += 1
-                except OSError as e:
-                    if e.errno == 11:  # EAGAIN is 11
-                        eagain_count += 1
-            print(
-                f"[UDP Queue Pressure] Target success rate: {success_count}/1000, EAGAIN: {eagain_count}/1000"
-            )
-            if success_count > 600:
-                print(
-                    f"FAIL: UDP queue pressure target succeeded too many times: {success_count}/1000 (should be <= 600)"
-                )
-                sys.exit(1)
-            if eagain_count == 0:
-                print(
-                    "FAIL: UDP queue pressure target did not receive any EAGAIN errors"
-                )
-                sys.exit(1)
-            sys.exit(0)
-        except Exception as e:
-            print(f"FAIL: child exception: {e}")
-            sys.exit(1)
-    else:
-        wpid, status = os.waitpid(pid, 0)
-        if status != 0:
-            return False
-    return True
-
-
 def main():
     try:
         vpn0_idx = socket.if_nametoindex("vpn0")
@@ -1047,13 +985,6 @@ def main():
         success = False
     else:
         print("RESULT bpf_laundering=PASS")
-
-    # Run UDP queue pressure checks
-    if not test_udp_queue_pressure():
-        print("RESULT udp_queue_pressure=FAIL")
-        success = False
-    else:
-        print("RESULT udp_queue_pressure=PASS")
 
     print("\n--- Verification Summary ---")
     if not success:

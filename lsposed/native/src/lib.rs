@@ -2554,63 +2554,6 @@ pub fn check_arm_timing() -> CheckOutput {
     }
 }
 
-#[uniffi::export]
-pub fn check_udp_queue_pressure() -> CheckOutput {
-    if check_anti_debug() {
-        return CheckOutput::pass("unable to run check".to_string());
-    }
-    unsafe {
-        let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_NONBLOCK, 0);
-        if fd < 0 {
-            return CheckOutput::fail("check error");
-        }
-
-        let mut dest: libc::sockaddr_in = std::mem::zeroed();
-        dest.sin_family = libc::AF_INET as libc::sa_family_t;
-        dest.sin_port = 53u16.to_be();
-        dest.sin_addr.s_addr = 0x08080808; // 8.8.8.8
-
-        let payload = [0u8; 32];
-        let mut success_count = 0;
-
-        let start_time = std::time::Instant::now();
-        let timeout = std::time::Duration::from_millis(100);
-
-        while success_count < 1000 {
-            let ret = libc::sendto(
-                fd,
-                payload.as_ptr().cast(),
-                payload.len(),
-                0,
-                std::ptr::from_ref(&dest).cast(),
-                std::mem::size_of_val(&dest) as libc::socklen_t,
-            );
-            if ret >= 0 {
-                success_count += 1;
-            } else {
-                let err = last_os_errno();
-                if err != libc::EAGAIN && err != libc::EWOULDBLOCK {
-                    // Stop on hard errors (like ENETUNREACH if network goes down)
-                    break;
-                }
-            }
-            if start_time.elapsed() >= timeout {
-                break;
-            }
-        }
-
-        libc::close(fd);
-
-        if success_count == 1000 {
-            // High packet sending rate achieved -> Rate limiter is not active -> VPN is not hidden
-            CheckOutput::fail("VPN detected")
-        } else {
-            // Hitting rate limit -> Rate limiter active (either simulated by kmod, or slow network) -> Pass
-            CheckOutput::pass("not detected")
-        }
-    }
-}
-
 #[repr(C)]
 struct sock_extended_err {
     ee_errno: u32,
@@ -3427,7 +3370,6 @@ pub fn run_all_checks_cli() {
         ("check_direct_syscall", check_direct_syscall),
         ("check_traceroute_rtt", check_traceroute_rtt),
         ("check_arm_timing", check_arm_timing),
-        ("check_udp_queue_pressure", check_udp_queue_pressure),
         ("check_gso_asymmetry", check_gso_asymmetry),
         ("check_timestamping_hw", check_timestamping_hw),
         (

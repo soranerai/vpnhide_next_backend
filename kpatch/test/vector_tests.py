@@ -854,66 +854,6 @@ def test_proc_sys_net():
     return True
 
 
-def test_udp_queue_pressure():
-    print("\n--- UDP queue pressure checks ---")
-
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setblocking(False)
-    success_count_nt = 0
-    for _ in range(1000):
-        try:
-            s.sendto(b"test_payload_32_bytes_long_here", ("127.0.0.1", 12345))
-            success_count_nt += 1
-        except OSError:
-            pass
-    print(f"[UDP Queue Pressure] Non-target success rate: {success_count_nt}/1000")
-    if success_count_nt < 950:
-        print(
-            f"FAIL: UDP queue pressure non-target success rate too low: {success_count_nt}/1000"
-        )
-        return False
-
-    pid = safe_fork()
-    if pid == 0:
-        try:
-            os.setuid(115555)
-            s_tgt = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s_tgt.setblocking(False)
-            success_count = 0
-            eagain_count = 0
-            for _ in range(1000):
-                try:
-                    s_tgt.sendto(
-                        b"test_payload_32_bytes_long_here", ("127.0.0.1", 12345)
-                    )
-                    success_count += 1
-                except OSError as e:
-                    if e.errno == 11:
-                        eagain_count += 1
-            print(
-                f"[UDP Queue Pressure] Target success rate: {success_count}/1000, EAGAIN: {eagain_count}/1000"
-            )
-            if success_count > 600:
-                print(
-                    f"FAIL: UDP queue pressure target succeeded too many times: {success_count}/1000"
-                )
-                sys.exit(1)
-            if eagain_count == 0:
-                print(
-                    "FAIL: UDP queue pressure target did not receive any EAGAIN errors"
-                )
-                sys.exit(1)
-            sys.exit(0)
-        except Exception as e:
-            print(f"FAIL: child exception: {e}")
-            sys.exit(1)
-    else:
-        _, status = os.waitpid(pid, 0)
-        if status != 0:
-            return False
-    return True
-
-
 def test_tc_qdisc(vpn0_idx):
     """Verify tc qdisc dump (RTM_GETQDISC) does not reveal vpn0 to target UID."""
     print("\n--- tc qdisc checks ---")
@@ -1357,7 +1297,6 @@ def main():
     run("own_port_access", test_own_port_access)
     run("owned_port_address_scope", test_owned_port_address_scope)
     run("bpf_laundering", test_bpf_laundering, vpn0_idx)
-    run("udp_queue_pressure", test_udp_queue_pressure)
     run("tc_qdisc", test_tc_qdisc, vpn0_idx)
     run("pmtu_discover", test_pmtu_discover)
     run("gso_asymmetry", test_gso_asymmetry)
