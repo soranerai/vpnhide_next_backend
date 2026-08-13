@@ -632,6 +632,7 @@ else:
 BPF_MAP_CREATE = 0
 BPF_MAP_LOOKUP_ELEM = 1
 BPF_MAP_UPDATE_ELEM = 2
+BPF_MAP_LOOKUP_BATCH = 24
 BPF_MAP_TYPE_HASH = 2
 
 
@@ -705,12 +706,12 @@ def bpf_syscall(cmd, attr, size):
     return ret
 
 
-def create_stats_map():
+def create_stats_map(max_entries=1000):
     attr = BpfAttr()
     attr.create.map_type = BPF_MAP_TYPE_HASH
     attr.create.key_size = 4
     attr.create.value_size = 32
-    attr.create.max_entries = 1000
+    attr.create.max_entries = max_entries
     attr.create.map_name = b"iface_stats"
     return bpf_syscall(BPF_MAP_CREATE, attr, ctypes.sizeof(attr))
 
@@ -741,11 +742,26 @@ def lookup_map_elem(map_fd, ifindex):
     return val
 
 
+def lookup_map_batch(map_fd, capacity=2):
+    keys = (ctypes.c_uint32 * capacity)()
+    vals = (VhStatsValue * capacity)()
+    out_batch = ctypes.c_uint64()
+    attr = BpfAttr()
+    attr.batch.out_batch = ctypes.addressof(out_batch)
+    attr.batch.keys = ctypes.addressof(keys)
+    attr.batch.values = ctypes.addressof(vals)
+    attr.batch.count = capacity
+    attr.batch.map_fd = map_fd
+    bpf_syscall(BPF_MAP_LOOKUP_BATCH, attr, ctypes.sizeof(attr))
+    return {keys[i]: vals[i] for i in range(attr.batch.count)}
+
+
 def test_bpf_laundering(vpn0_idx):
     print("\n--- BPF map laundering checks ---")
 
     try:
         eth0_idx = socket.if_nametoindex("eth0")
+        vpn1_idx = socket.if_nametoindex("vpn1")
     except Exception as e:
         print(f"FAIL: BPF test cannot find eth0: {e}")
         return False
@@ -759,6 +775,7 @@ def test_bpf_laundering(vpn0_idx):
 
     try:
         update_map_elem(map_fd, vpn0_idx, 1000, 2000)
+        update_map_elem(map_fd, vpn1_idx, 3000, 4000)
         update_map_elem(map_fd, eth0_idx, 5000, 6000)
     except Exception as e:
         print(f"FAIL: BPF map update: {e}")
@@ -768,12 +785,23 @@ def test_bpf_laundering(vpn0_idx):
         vpn_val = lookup_map_elem(map_fd, vpn0_idx)
         print(f"[BPF Non-Target] vpn0: rx={vpn_val.rxBytes}, tx={vpn_val.txBytes}")
         assert vpn_val.rxBytes == 0 and vpn_val.txBytes == 0, "VPN stats not zeroed!"
+        vpn1_val = lookup_map_elem(map_fd, vpn1_idx)
+        print(f"[BPF Non-Target] vpn1: rx={vpn1_val.rxBytes}, tx={vpn1_val.txBytes}")
+        assert vpn1_val.rxBytes == 0 and vpn1_val.txBytes == 0, "Second VPN stats not zeroed!"
         eth_val = lookup_map_elem(map_fd, eth0_idx)
         print(f"[BPF Non-Target] eth0: rx={eth_val.rxBytes}, tx={eth_val.txBytes}")
-        assert eth_val.rxBytes == 6000 and eth_val.txBytes == 8000, (
+        assert eth_val.rxBytes == 9000 and eth_val.txBytes == 12000, (
             "Cover interface stats not laundered!"
         )
         print("[BPF Non-Target] Single lookup checks passed")
+        batch = lookup_map_batch(map_fd)
+        assert len(batch) == 2
+        for ifindex, value in batch.items():
+            if ifindex in (vpn0_idx, vpn1_idx):
+                assert value.rxBytes == 0 and value.txBytes == 0
+            elif ifindex == eth0_idx:
+                assert value.rxBytes == 9000 and value.txBytes == 12000
+        print("[BPF Non-Target] Multi-interface batch laundering checks passed")
     except Exception as e:
         print(f"FAIL: BPF non-target lookup verification failed: {e}")
         return False
@@ -783,10 +811,12 @@ def test_bpf_laundering(vpn0_idx):
         try:
             os.setuid(115555)
             vpn_val = lookup_map_elem(map_fd, vpn0_idx)
+            vpn1_val = lookup_map_elem(map_fd, vpn1_idx)
             eth_val = lookup_map_elem(map_fd, eth0_idx)
             print(f"[BPF Target] vpn0: rx={vpn_val.rxBytes}, tx={vpn_val.txBytes}")
             print(f"[BPF Target] eth0: rx={eth_val.rxBytes}, tx={eth_val.txBytes}")
-            if vpn_val.rxBytes != 1000 or eth_val.rxBytes != 5000:
+            if (vpn_val.rxBytes != 1000 or vpn1_val.rxBytes != 3000 or
+                    eth_val.rxBytes != 5000):
                 print("FAIL: BPF target check expected raw values, got spoofed values")
                 sys.exit(1)
             print("[BPF Target] Target bypass checks passed")

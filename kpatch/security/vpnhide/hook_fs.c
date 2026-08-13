@@ -191,6 +191,32 @@ void vpnhide_bpf_lookup_batch(struct bpf_map *map,
 			memset(v, 0, value_size);
 	}
 
+	/* Interface maps expose one row per ifindex.  Keep the aggregate traffic
+	 * visible by moving every hidden VPN row onto the configured cover row,
+	 * exactly as the single-element lookup path does.  The sum is obtained
+	 * from the map itself rather than from the batch, because a batch can be a
+	 * partial page of a larger map. */
+	if (iface && value_size >= sizeof(struct vh_stats_value)) {
+		struct vh_stats_value vpn_sum = {0};
+		u32 cover_idx = (u32)atomic_read(&global_cover_ifindex);
+		int cover_pos = -1;
+
+		vh_collect_vpn_traffic_sum(map, &vpn_sum);
+		if (cover_idx &&
+		    (sv_rx_bytes(&vpn_sum) || sv_tx_bytes(&vpn_sum))) {
+			for (i = 0; i < count; i++) {
+				void *k = (char *)keys_buf + (size_t)i * key_size;
+				if (*(u32 *)k == cover_idx) {
+					cover_pos = (int)i;
+					break;
+				}
+			}
+		}
+		if (cover_pos >= 0)
+			sv_add((struct vh_stats_value *)((char *)vals_buf +
+					(size_t)cover_pos * value_size), &vpn_sum);
+	}
+
 	if (copy_to_user(u64_to_user_ptr(attr->batch.values),
 			 vals_buf, (size_t)count * value_size)) {
 		/* ignore copy error as we are in void post-hook and memory is already updated */
