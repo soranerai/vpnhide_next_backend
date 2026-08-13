@@ -3,7 +3,7 @@
 
 #include <linux/types.h>
 
-#define VPNHIDE_VERSION_CODE 20400
+#define VPNHIDE_VERSION_CODE 20500
 
 
 #define VPNHIDE_LEGACY_TARGET_UIDS 512
