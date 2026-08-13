@@ -6,7 +6,10 @@ and the same workload in both cases. It prints median wall-clock and process
 CPU time for:
 
 - `/proc` directory enumeration;
+- unrelated directory enumeration (path-prefix negative case);
 - `/proc/net/dev` reads;
+- single BPF map lookup;
+- BPF batch lookup;
 - `getsockopt` path;
 - loopback connect/port-policy path.
 

@@ -147,7 +147,12 @@ for KMI in "${KMIS[@]}"; do
                 echo "[container] Building baseline module from HEAD^..."
                 rm -rf /tmp/kmod-baseline
                 mkdir -p /tmp/kmod-baseline
-                git -C /repo archive HEAD^ kmod | tar -x -C /tmp/kmod-baseline
+                BASELINE_REF="${VPNHIDE_PERF_BASELINE_REF:-origin/main}"
+                if ! git -C /repo rev-parse --verify "$BASELINE_REF" >/dev/null 2>&1; then
+                    BASELINE_REF="HEAD^"
+                fi
+                echo "[container] Using performance baseline: $BASELINE_REF"
+                git -C /repo archive "$BASELINE_REF" kmod | tar -x -C /tmp/kmod-baseline
                 make -C /tmp/kmod-baseline/kmod KERNEL_SRC="$VPNHIDE_QEMU_KSRC" CLANG_DIR="$CLANG_BIN"
 
                 echo "[container] Running baseline/optimized QEMU performance comparison..."

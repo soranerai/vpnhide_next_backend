@@ -43,10 +43,6 @@ static inline enum vh_bpf_map_kind classify_bpf_map(const char *name) {
   }
 }
 
-static inline bool is_stats_or_uid_map(const char *name) {
-  return classify_bpf_map(name) != VH_BPF_MAP_UNKNOWN;
-}
-
 static bool is_key_vpn_or_target_uid(struct bpf_map *map, void *key,
                                      enum vh_bpf_map_kind kind) {
   if (!map || !key)
@@ -263,9 +259,7 @@ static void bpf_single_lookup_zero(struct bpf_map *map,
     if (copy_to_user(usr_val, vbuf, value_size)) {
       vpnhide_dbg("sys_bpf_ret: single zeroing copy_to_user failed\n");
     }
-  } else if (strncmp(map->name, "iface_stats", 11) == 0 ||
-             strncmp(map->name, "map_netd_iface_", 15) == 0 ||
-             strncmp(map->name, "tether_stats", 12) == 0) {
+  } else if (kind == VH_BPF_MAP_IFACE) {
     ifaceIndex = *(u32 *)kbuf;
     cover_idx = (u32)atomic_read(&global_cover_ifindex);
     if (cover_idx && ifaceIndex == cover_idx) {
@@ -282,71 +276,6 @@ out:
     kfree(vbuf);
 }
 
-static void bpf_batch_zero_iface(struct bpf_map *map, void __user *usr_keys,
-                                 void __user *usr_vals, u32 count, u32 key_size,
-                                 u32 value_size, void *kbuf, void *vbuf) {
-  struct vh_stats_value vpn_sum = {0};
-  u32 cover_idx = (u32)atomic_read(&global_cover_ifindex);
-  u32 cover_pos = UINT_MAX;
-  u32 i;
-
-  for (i = 0; i < count; i++) {
-    u32 ifindex;
-
-    if (copy_from_user(kbuf, (char __user *)usr_keys + i * key_size, key_size))
-      continue;
-    ifindex = *(u32 *)kbuf;
-
-    if (is_active_vpn_ifindex(ifindex)) {
-      if (copy_from_user(vbuf, (char __user *)usr_vals + i * value_size,
-                         value_size) == 0) {
-        struct vh_stats_value *sv = (struct vh_stats_value *)vbuf;
-        sv_add(&vpn_sum, sv);
-      }
-      memset(vbuf, 0, value_size);
-      if (copy_to_user((char __user *)usr_vals + i * value_size, vbuf,
-                       value_size)) {
-        vpnhide_dbg("sys_bpf_ret: batch zeroing copy_to_user failed\n");
-      }
-    } else if (cover_idx && ifindex == cover_idx) {
-      cover_pos = i;
-    }
-  }
-
-  if (cover_pos != UINT_MAX &&
-      (sv_rx_bytes(&vpn_sum) || sv_tx_bytes(&vpn_sum))) {
-    if (copy_from_user(vbuf, (char __user *)usr_vals + cover_pos * value_size,
-                       value_size) == 0) {
-      struct vh_stats_value *sv = (struct vh_stats_value *)vbuf;
-      sv_add(sv, &vpn_sum);
-      if (copy_to_user((char __user *)usr_vals + cover_pos * value_size, vbuf,
-                       value_size)) {
-        vpnhide_dbg("sys_bpf_ret: batch cover update copy_to_user failed\n");
-      }
-    }
-  }
-}
-
-static void bpf_batch_zero_generic(struct bpf_map *map, void __user *usr_keys,
-                                   void __user *usr_vals, u32 count,
-                                   u32 key_size, u32 value_size, void *kbuf,
-                                   void *vbuf, enum vh_bpf_map_kind kind) {
-  u32 i;
-
-  for (i = 0; i < count; i++) {
-    if (copy_from_user(kbuf, (char __user *)usr_keys + i * key_size,
-                       key_size) == 0) {
-      if (is_key_vpn_or_target_uid(map, kbuf, kind)) {
-        memset(vbuf, 0, value_size);
-        if (copy_to_user((char __user *)usr_vals + i * value_size, vbuf,
-                         value_size)) {
-          vpnhide_dbg("sys_bpf_ret: batch zeroing copy_to_user failed\n");
-        }
-      }
-    }
-  }
-}
-
 static void bpf_batch_lookup_zero(struct bpf_map *map,
                                   const struct sys_bpf_data *data, u32 key_size,
                                   u32 value_size,
@@ -358,38 +287,69 @@ static void bpf_batch_lookup_zero(struct bpf_map *map,
     void __user *usr_vals =
         (void __user *)(unsigned long)data->attr.batch.values;
 
-    if (usr_keys && usr_vals) {
-      u8 kbuf_stack[64];
-      u8 vbuf_stack[256];
-      void *kbuf = NULL;
-      void *vbuf = NULL;
+    if (!usr_keys || !usr_vals || count > 4096 || !key_size || !value_size)
+      return;
 
-      if (key_size <= sizeof(kbuf_stack)) {
-        kbuf = kbuf_stack;
-      } else {
-        kbuf = kmalloc(key_size, GFP_KERNEL);
-      }
+    {
+      size_t keys_size = (size_t)count * key_size;
+      u8 keys_stack[64];
+      u8 value_stack[256];
+      void *keys = keys_size <= sizeof(keys_stack) ? keys_stack :
+                   kvmalloc(keys_size, GFP_ATOMIC);
+      void *value = value_size <= sizeof(value_stack) ? value_stack :
+                    kmalloc(value_size, GFP_ATOMIC);
+      struct vh_stats_value vpn_sum = {0};
+      u32 cover_idx = (u32)atomic_read(&global_cover_ifindex);
+      u32 cover_pos = UINT_MAX;
+      u32 i;
 
-      if (value_size <= sizeof(vbuf_stack)) {
-        vbuf = vbuf_stack;
-      } else {
-        vbuf = kmalloc(value_size, GFP_KERNEL);
-      }
+      if (!keys || !value)
+        goto out_bulk;
+      if (copy_from_user(keys, usr_keys, keys_size))
+        goto out_bulk;
 
-      if (kbuf && vbuf) {
-        if (strncmp(map->name, "iface_stats", 11) == 0 ||
-            strncmp(map->name, "map_netd_iface_stats", 20) == 0) {
-          bpf_batch_zero_iface(map, usr_keys, usr_vals, count, key_size,
-                               value_size, kbuf, vbuf);
-        } else {
-          bpf_batch_zero_generic(map, usr_keys, usr_vals, count, key_size,
-                                 value_size, kbuf, vbuf, kind);
+      for (i = 0; i < count; i++) {
+        void *key = (char *)keys + (size_t)i * key_size;
+        void __user *user_value = (char __user *)usr_vals +
+                                  (size_t)i * value_size;
+
+        if (kind == VH_BPF_MAP_IFACE) {
+          u32 ifindex = *(u32 *)key;
+          if (is_active_vpn_ifindex(ifindex)) {
+            if (!copy_from_user(value, user_value, value_size)) {
+              if (value_size >= sizeof(struct vh_stats_value))
+                sv_add(&vpn_sum, (struct vh_stats_value *)value);
+              memset(value, 0, value_size);
+              if (copy_to_user(user_value, value, value_size))
+                vpnhide_dbg("sys_bpf_ret: batch value copy failed\n");
+            }
+          } else if (cover_idx && ifindex == cover_idx) {
+            cover_pos = i;
+          }
+        } else if (is_key_vpn_or_target_uid(map, key, kind)) {
+          memset(value, 0, value_size);
+          if (copy_to_user(user_value, value, value_size))
+            vpnhide_dbg("sys_bpf_ret: batch zero copy failed\n");
         }
       }
-      if (kbuf && kbuf != kbuf_stack)
-        kfree(kbuf);
-      if (vbuf && vbuf != vbuf_stack)
-        kfree(vbuf);
+
+      if (cover_pos != UINT_MAX &&
+          (sv_rx_bytes(&vpn_sum) || sv_tx_bytes(&vpn_sum)) &&
+          value_size >= sizeof(struct vh_stats_value)) {
+        void __user *cover_value = (char __user *)usr_vals +
+                                   (size_t)cover_pos * value_size;
+        if (!copy_from_user(value, cover_value, value_size)) {
+          sv_add((struct vh_stats_value *)value, &vpn_sum);
+          if (copy_to_user(cover_value, value, value_size))
+            vpnhide_dbg("sys_bpf_ret: batch cover copy failed\n");
+        }
+      }
+
+out_bulk:
+      if (keys != keys_stack)
+        kvfree(keys);
+      if (value != value_stack)
+        kfree(value);
     }
   }
 }
@@ -451,10 +411,18 @@ struct kretprobe sys_bpf_krp = {
 
 /* --- Filesystem/procfs hooks --- */
 
-static const char *const vh_guarded_dir_prefixes[] = {
-    "/proc/sys/net/ipv4/conf",  "/proc/sys/net/ipv6/conf",
-    "/proc/sys/net/ipv4/neigh", "/proc/sys/net/ipv6/neigh",
-    "/proc/net/dev_snmp6",      "/sys/class/net",
+struct vh_guarded_prefix {
+  const char *value;
+  u16 length;
+};
+
+static const struct vh_guarded_prefix vh_guarded_dir_prefixes[] = {
+    {"/proc/sys/net/ipv4/conf", sizeof("/proc/sys/net/ipv4/conf") - 1},
+    {"/proc/sys/net/ipv6/conf", sizeof("/proc/sys/net/ipv6/conf") - 1},
+    {"/proc/sys/net/ipv4/neigh", sizeof("/proc/sys/net/ipv4/neigh") - 1},
+    {"/proc/sys/net/ipv6/neigh", sizeof("/proc/sys/net/ipv6/neigh") - 1},
+    {"/proc/net/dev_snmp6", sizeof("/proc/net/dev_snmp6") - 1},
+    {"/sys/class/net", sizeof("/sys/class/net") - 1},
 };
 
 static bool vh_is_path_guarded(struct file *file, char *buf, int buflen) {
@@ -469,8 +437,8 @@ static bool vh_is_path_guarded(struct file *file, char *buf, int buflen) {
     return false;
 
   for (i = 0; i < ARRAY_SIZE(vh_guarded_dir_prefixes); i++) {
-    size_t len = strlen(vh_guarded_dir_prefixes[i]);
-    if (strncmp(path_ptr, vh_guarded_dir_prefixes[i], len) == 0) {
+    size_t len = vh_guarded_dir_prefixes[i].length;
+    if (strncmp(path_ptr, vh_guarded_dir_prefixes[i].value, len) == 0) {
       if (path_ptr[len] == '\0' || path_ptr[len] == '/')
         return true;
     }
@@ -669,8 +637,8 @@ static bool vh_is_resolved_path_guarded_vpn(const char *path) {
     return false;
 
   for (i = 0; i < ARRAY_SIZE(vh_guarded_dir_prefixes); i++) {
-    size_t prefix_len = strlen(vh_guarded_dir_prefixes[i]);
-    if (strncmp(path, vh_guarded_dir_prefixes[i], prefix_len) == 0) {
+    size_t prefix_len = vh_guarded_dir_prefixes[i].length;
+    if (strncmp(path, vh_guarded_dir_prefixes[i].value, prefix_len) == 0) {
       if (path[prefix_len] == '/') {
         last_slash = strrchr(path, '/');
         if (last_slash) {
