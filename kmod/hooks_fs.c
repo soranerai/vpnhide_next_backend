@@ -839,6 +839,7 @@ static int proc_sys_lookup_entry(struct kretprobe_instance *ri,
                                  struct pt_regs *regs) {
   struct proc_sys_lookup_data *data = (void *)ri->data;
   struct dentry *dentry;
+  struct qstr *dname;
   const unsigned char *name;
   unsigned int name_len;
 
@@ -854,20 +855,23 @@ static int proc_sys_lookup_entry(struct kretprobe_instance *ri,
   if (!dentry)
     return 1;
 
-  name = dentry->d_name.name;
-  name_len = dentry->d_name.len;
+  /* Android 17 exposes dentry->d_name as const; the hook temporarily
+   * replaces the qstr while proc_sys_lookup runs, then restores it. */
+  dname = (struct qstr *)&dentry->d_name;
+  name = dname->name;
+  name_len = dname->len;
   if (!name || name_len == 0 || name_len >= IFNAMSIZ)
     return 1;
 
   if (vh_is_vpn_name_cached((const char *)name, (size_t)name_len)) {
     data->dentry = dentry;
-    data->orig_name = dentry->d_name.name;
-    data->orig_len = dentry->d_name.len;
+    data->orig_name = dname->name;
+    data->orig_len = dname->len;
     data->modified = true;
 
-    dentry->d_name.name =
+    dname->name =
         (const unsigned char *)"__vpnhide_nonexistent_sysctl_void";
-    dentry->d_name.len = 33;
+    dname->len = 33;
 
     vpnhide_dbg("proc_sys_lookup: mangled VPN iface '%.*s' to void\n",
                 (int)name_len, name);
@@ -881,8 +885,9 @@ static int proc_sys_lookup_ret(struct kretprobe_instance *ri,
                                struct pt_regs *regs) {
   struct proc_sys_lookup_data *data = (void *)ri->data;
   if (data->modified && data->dentry) {
-    data->dentry->d_name.name = data->orig_name;
-    data->dentry->d_name.len = data->orig_len;
+    struct qstr *dname = (struct qstr *)&data->dentry->d_name;
+    dname->name = data->orig_name;
+    dname->len = data->orig_len;
     record_kmod_intercept(from_kuid(&init_user_ns, current_uid()), 2);
   }
   return 0;

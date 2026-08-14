@@ -444,7 +444,7 @@ bool is_hook_active(enum vpnhide_hook_idx index, uid_t uid) {
   return active;
 }
 
-void free_spoof_ip_rcu(struct rcu_head *head) {
+static void free_spoof_ip_rcu(struct rcu_head *head) {
   struct vpnhide_spoof_ip_rcu *p =
       container_of(head, struct vpnhide_spoof_ip_rcu, rcu);
   kfree(p);
@@ -511,7 +511,7 @@ u32 fnv1a_name(const char *s, int maxlen) {
   return hash;
 }
 
-void free_vpn_name_cache_rcu(struct rcu_head *head) {
+static void free_vpn_name_cache_rcu(struct rcu_head *head) {
   struct vh_vpn_name_cache *p =
       container_of(head, struct vh_vpn_name_cache, rcu);
   kfree(p);
@@ -804,7 +804,7 @@ void record_kmod_intercept(uid_t uid, int type) {
   spin_unlock_irqrestore(&kmod_stats_lock, flags);
 }
 
-void vpnhide_kmod_record_java_stat(uid_t uid, const char *hook, u64 count) {
+static void vpnhide_kmod_record_java_stat(uid_t uid, const char *hook, u64 count) {
   unsigned long flags;
   int i, lo = 0, hi;
   spin_lock_irqsave(&kmod_stats_lock, flags);
