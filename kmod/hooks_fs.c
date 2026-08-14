@@ -537,15 +537,18 @@ static int sys_getdents64_ret(struct kretprobe_instance *ri,
 
     while (p < end) {
       struct vh_linux_dirent64 *de = (struct vh_linux_dirent64 *)p;
+      size_t name_capacity;
+      size_t name_len;
+
       if (de->d_reclen < sizeof(struct vh_linux_dirent64) ||
           p + de->d_reclen > end)
         break;
 
       /* d_name is bounded by this directory record. Avoid an unbounded
        * strlen() on every entry while retaining the existing cache API. */
-      size_t name_capacity = de->d_reclen -
-                             offsetof(struct vh_linux_dirent64, d_name);
-      size_t name_len = strnlen(de->d_name, name_capacity);
+      name_capacity = de->d_reclen -
+                      offsetof(struct vh_linux_dirent64, d_name);
+      name_len = strnlen(de->d_name, name_capacity);
       if (vh_is_vpn_name_cached(de->d_name, name_len)) {
         vpnhide_dbg("sys_getdents64_ret: filtering out entry '%s'\n",
                     de->d_name);
