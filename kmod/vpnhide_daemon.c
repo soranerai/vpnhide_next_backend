@@ -60,6 +60,28 @@ static bool is_interface_operstate_up(const char *ifname)
 	return strcmp(buf, "up") == 0 || strcmp(buf, "unknown") == 0;
 }
 
+static unsigned short interface_arphrd(const char *ifname)
+{
+	struct ifreq ifr;
+	int sock;
+	unsigned short arphrd = 0;
+
+	if (!ifname || !ifname[0])
+		return 0;
+
+	sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sock < 0)
+		return 0;
+
+	memset(&ifr, 0, sizeof(ifr));
+	strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+	if (ioctl(sock, SIOCGIFHWADDR, &ifr) == 0)
+		arphrd = (unsigned short)ifr.ifr_hwaddr.sa_family;
+
+	close(sock);
+	return arphrd;
+}
+
 #include <time.h>
 
 static int test_interface_egress(const char *ifname, int af, char *out_ip,
@@ -204,15 +226,13 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6,
 	int iface_count = 0;
 
 	for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
-		if (!(ifa->ifa_flags & IFF_UP))
-			continue;
-
 		if (ifa->ifa_flags & IFF_LOOPBACK)
 			continue;
 
 		char *name = ifa->ifa_name;
+		unsigned short arphrd = interface_arphrd(name);
 		bool is_vpn = vpnhide_daemon_is_vpn_interface(
-			name, (ifa->ifa_flags & IFF_POINTOPOINT) != 0,
+			name, (ifa->ifa_flags & IFF_POINTOPOINT) != 0, arphrd,
 			daemon_is_vpn_ifname(name, &prefixes));
 
 		if (is_vpn) {
@@ -235,6 +255,15 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6,
 			}
 			continue;
 		}
+
+		/*
+		 * Keep active VPN interfaces in the snapshot even while they are
+		 * DOWN or transitioning.  NetworkInterface enumeration exposes
+		 * such netdevs too, while cover-interface selection must only use
+		 * an operational uplink.
+		 */
+		if (!(ifa->ifa_flags & IFF_UP))
+			continue;
 
 		if (ifa->ifa_addr == NULL)
 			continue;

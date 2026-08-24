@@ -1,6 +1,7 @@
 #ifndef VPNHIDE_DAEMON_IFACE_H
 #define VPNHIDE_DAEMON_IFACE_H
 
+#include <linux/if_arp.h>
 #include <stdbool.h>
 #include <string.h>
 
@@ -42,9 +43,15 @@ static inline bool vpnhide_daemon_is_cellular_uplink(const char *ifname)
 
 static inline bool
 vpnhide_daemon_is_vpn_interface(const char *ifname, bool is_point_to_point,
-				 bool name_matches_vpn)
+				 unsigned short arphrd, bool name_matches_vpn)
 {
 	if (name_matches_vpn)
+		return true;
+
+	/* ARPHRD_NONE covers TUN/WireGuard; PPP covers PPP-based VPNs. */
+	/* Cellular raw-IP interfaces may report a tunnel-like ARPHRD too. */
+	if (!vpnhide_daemon_is_cellular_uplink(ifname) &&
+	    (arphrd == ARPHRD_NONE || arphrd == ARPHRD_PPP))
 		return true;
 
 	return is_point_to_point &&
