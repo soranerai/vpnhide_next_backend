@@ -6,4 +6,4 @@ Keep point-to-point mobile uplinks eligible as cover interfaces while still dete
 
 ## Русский
 
-Не исключать мобильные point-to-point uplink-интерфейсы из выбора cover-интерфейса, сохраняя обнаружение VPN-туннелей
+Мобильные point-to-point uplink-интерфейсы теперь остаются доступными для выбора cover-интерфейса при сохранении обнаружения VPN-туннелей
