@@ -3,9 +3,8 @@
 # apply.sh — apply VPNHide in-tree patches to a GKI kernel source tree
 #
 # Usage: apply.sh <kernel_common_dir> <version>
-#   version: android12-5.4  | android12-5.10 | android13-5.15 |
-#            android14-6.1 |
-#            android15-6.6  | android16-6.12
+#   version: android12-5.10 | android13-5.15 | android14-6.1 |
+#            android15-6.6  | android16-6.12 | android17-6.18
 # =============================================================================
 set -euo pipefail
 
@@ -95,13 +94,22 @@ fi
 # to avoid C90/C99 declaration-after-statement and fuzz matching offset issues.
 ADDRCONF="$KERNEL_DIR/net/ipv6/addrconf.c"
 if [ -f "$ADDRCONF" ]; then
-    if ! grep -q "vpnhide_should_hide_dev(ifa->idev->dev)" "$ADDRCONF"; then
+    if ! grep -q "vpnhide_should_hide_dev(ifa->idev->dev)" "$ADDRCONF" && [[ "$VERSION" != "android17-6.18" ]]; then
         log "Applying sed fixup: inet6_fill_ifaddr vpnhide hook in $ADDRCONF..."
         sed -i '/u32 preferred, valid;/a\\n#ifdef CONFIG_VPNHIDE\n\tif (ifa->idev \&\& ifa->idev->dev \&\&\n\t    unlikely(vpnhide_should_hide_dev(ifa->idev->dev)))\n\t\treturn 0;\n#endif' "$ADDRCONF" \
             || die "sed fixup failed for $ADDRCONF"
     else
         log "inet6_fill_ifaddr vpnhide hook already present, skipping sed fixup."
     fi
+fi
+
+# 6.18 keeps additional local declarations between preferred/valid and the
+# first nlmsg_put(); insert after that declaration block to avoid
+# declaration-after-statement build errors.
+if [[ "$VERSION" == "android17-6.18" && -f "$ADDRCONF" ]]; then
+    log "Applying 6.18 inet6_fill_ifaddr hook in $ADDRCONF..."
+    python3 "$SCRIPT_DIR/fix_addrconf_hook.py" "$ADDRCONF" \
+        || die "6.18 inet6_fill_ifaddr hook failed for $ADDRCONF"
 fi
 
 # Apply getsockopt/setsockopt/bind/connect/getname hooks to net/socket.c
@@ -135,7 +143,7 @@ if [ -f "$SOCKET_C" ]; then
     if [[ "$VERSION" == "android15-6.6" || "$VERSION" == "android16-6.12" ]]; then
         EXTRA_FLAGS+=("--setsockopt")
     fi
-    if [[ "$VERSION" == "android16-6.12" ]]; then
+    if [[ "$VERSION" == "android16-6.12" || "$VERSION" == "android17-6.18" ]]; then
         EXTRA_FLAGS+=("--bind-getname")
     fi
     if [[ "$VERSION" == "android12-5.4" || "$VERSION" == "upstream-4.19" ]]; then

@@ -865,13 +865,13 @@ static int proc_sys_lookup_entry(struct kretprobe_instance *ri,
 
   if (vh_is_vpn_name_cached((const char *)name, (size_t)name_len)) {
     data->dentry = dentry;
-    data->orig_name = dname->name;
-    data->orig_len = dname->len;
+    data->orig_name = vh_dentry_name(dentry);
+    data->orig_len = vh_dentry_len(dentry);
     data->modified = true;
 
-    dname->name =
+    vh_dentry_name(dentry) =
         (const unsigned char *)"__vpnhide_nonexistent_sysctl_void";
-    dname->len = 33;
+    vh_dentry_len(dentry) = 33;
 
     vpnhide_dbg("proc_sys_lookup: mangled VPN iface '%.*s' to void\n",
                 (int)name_len, name);
@@ -885,9 +885,8 @@ static int proc_sys_lookup_ret(struct kretprobe_instance *ri,
                                struct pt_regs *regs) {
   struct proc_sys_lookup_data *data = (void *)ri->data;
   if (data->modified && data->dentry) {
-    struct qstr *dname = (struct qstr *)&data->dentry->d_name;
-    dname->name = data->orig_name;
-    dname->len = data->orig_len;
+    vh_dentry_name(data->dentry) = data->orig_name;
+    vh_dentry_len(data->dentry) = data->orig_len;
     record_kmod_intercept(from_kuid(&init_user_ns, current_uid()), 2);
   }
   return 0;

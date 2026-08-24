@@ -1,0 +1,25 @@
+diff --git a/net/core/net-procfs.c b/net/core/net-procfs.c
+index fa6d3969734a..fbf89333e238 100644
+--- a/net/core/net-procfs.c
++++ b/net/core/net-procfs.c
+@@ -1,5 +1,9 @@
+ // SPDX-License-Identifier: GPL-2.0
+ #include <linux/netdevice.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ #include <linux/proc_fs.h>
+ #include <linux/seq_file.h>
+ #include <net/wext.h>
+@@ -71,6 +75,10 @@ static void dev_seq_printf_stats(struct seq_file *seq, struct net_device *dev)
+  */
+ static int dev_seq_show(struct seq_file *seq, void *v)
+ {
++#ifdef CONFIG_VPNHIDE
++	if (v != SEQ_START_TOKEN && vpnhide_should_hide_dev((struct net_device *)v))
++		return 0;
++#endif
+ 	if (v == SEQ_START_TOKEN)
+ 		seq_puts(seq, "Inter-|   Receive                            "
+ 			      "                    |  Transmit\n"

@@ -52,6 +52,17 @@
 #define vh_fd_file(f) ((f).file)
 #endif
 
+/* Since 6.18 dentry->d_name is const outside fs/dcache.c.  The writable union
+ * member must be selected for this compatibility hook; older kernels expose
+ * d_name directly. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+#define vh_dentry_name(d) ((d)->__d_name.name)
+#define vh_dentry_len(d) ((d)->__d_name.len)
+#else
+#define vh_dentry_name(d) ((d)->d_name.name)
+#define vh_dentry_len(d) ((d)->d_name.len)
+#endif
+
 #ifndef BPF_FS_MAGIC
 #define BPF_FS_MAGIC 0xcafe4a4b
 #endif

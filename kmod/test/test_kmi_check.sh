@@ -24,6 +24,7 @@ assert_detected android14-5.15 '5.15.153-android14-11-gabcdef'
 assert_detected android14-6.1 '6.1.75-android14-11-gabcdef'
 assert_detected android15-6.6 '6.6.30-android15-Wild'
 assert_detected android16-6.12 '6.12.23-android16-4-gabcdef'
+assert_detected android17-6.18 '6.18.1-android17-gabcdef'
 
 # Custom kernel releases without explicit androidXX in uname -r
 assert_detected android14-6.1 '6.1.145+blue-spark'

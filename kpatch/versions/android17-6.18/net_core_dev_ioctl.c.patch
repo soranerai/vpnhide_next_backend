@@ -1,0 +1,51 @@
+diff --git a/net/core/dev_ioctl.c b/net/core/dev_ioctl.c
+index 473c437b6b53..252e115fc90e 100644
+--- a/net/core/dev_ioctl.c
++++ b/net/core/dev_ioctl.c
+@@ -10,6 +10,10 @@
+ #include <linux/if_bridge.h>
+ #include <net/dsa_stubs.h>
+ #include <net/wext.h>
++#ifdef CONFIG_VPNHIDE
++#include "../../security/vpnhide/vpnhide.h"
++#endif
++
+ 
+ #include "dev.h"
+ 
+@@ -27,5 +31,11 @@ static int dev_ifname(struct net *net, struct ifreq *ifr)
+ {
++	int _ret;
+ 	ifr->ifr_name[IFNAMSIZ-1] = 0;
+-	return netdev_get_name(net, ifr->ifr_name, ifr->ifr_ifindex);
++	_ret = netdev_get_name(net, ifr->ifr_name, ifr->ifr_ifindex);
++#ifdef CONFIG_VPNHIDE
++	if (_ret == 0 && vpnhide_should_hide_ifname(ifr->ifr_name))
++		return -ENODEV;
++#endif
++	return _ret;
+ }
+ 
+@@ -66,6 +70,11 @@ int dev_ifconf(struct net *net, struct ifconf __user *uifc)
+ 	/* Loop over the interfaces, and write an info block for each. */
+ 	rtnl_lock();
+ 	for_each_netdev(net, dev) {
++
++#ifdef CONFIG_VPNHIDE
++		if (vpnhide_should_hide_dev(dev))
++			continue;
++#endif
+ 		if (!pos)
+ 			done = inet_gifconf(dev, NULL, 0, size);
+ 		else
+@@ -142,6 +151,10 @@ static int dev_ifsioc_locked(struct net *net, struct ifreq *ifr, unsigned int cm
+ 
+ 	if (!dev)
+ 		return -ENODEV;
++#ifdef CONFIG_VPNHIDE
++	if (vpnhide_should_hide_dev(dev))
++		return -ENODEV;
++#endif
+ 
+ 	switch (cmd) {
+ 	case SIOCGIFFLAGS:	/* Get interface flags */
