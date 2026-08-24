@@ -23,7 +23,9 @@ The resulting archive is written to the repository root:
 vpnhide-kmod-<kmi>.zip
 ```
 
-Supported variants are: `android12-5.10`, `android13-5.10`, `android13-5.15`, `android14-5.15`, `android14-6.1`, `android15-6.6`, and `android16-6.12`.
+Supported variants are: `android12-5.4`, `android12-5.10`, `android13-5.10`, `android13-5.15`, `android14-5.15`, `android14-6.1`, `android15-6.6`, and `android16-6.12`.
+
+The in-tree kpatch compatibility profiles additionally cover Android common 5.4 and upstream 4.19.325 (`kpatch/versions/android12-5.4`, `kpatch/versions/upstream-4.19`). Legacy checks are intentionally bounded to one compiler job; use `VPNHIDE_BUILD_JOBS=1` and run one KMI at a time on WSL2.
 
 If the kernel sources and LLVM are already available locally, the container can be skipped:
 

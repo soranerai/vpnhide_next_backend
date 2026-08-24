@@ -7,11 +7,12 @@
 # after applying kpatch patches.  This avoids a full clone+build (saves ~20-40 min).
 #
 # Usage:  kpatch/test/run-local-container.sh [kmi ...]
-#         (no args = all GKI2 KMIs in the matrix)
+#         (no args = one KMI at a time; builds/tests are always serialized)
 set -euo pipefail
 
 KMIS_DEFAULT=(
-    "android12-5.10"
+	"android12-5.4"
+	"android12-5.10"
     "android13-5.10"
     "android13-5.15"
     "android14-5.15"
@@ -89,10 +90,16 @@ for KMI in "${KMIS[@]}"; do
     fi
 done
 
-echo "[kpatch] Starting parallel kpatch builds+tests for: ${KMIS[*]}"
+# Kernel builds and QEMU instances are intentionally serialized.  A previous
+# parallel-container run exhausted WSL2 memory and destabilized the host; do
+# not make higher parallelism an accidental environment-variable setting.
+MAX_PARALLEL=1
+echo "[kpatch] Starting kpatch builds+tests (max parallel=$MAX_PARALLEL): ${KMIS[*]}"
+BUILD_JOBS="${VPNHIDE_BUILD_JOBS:-1}"
 
 pids=()
 log_files=()
+failed=0
 
 for KMI in "${KMIS[@]}"; do
     IMAGE_NAME="ghcr.io/soranerai/vpnhide_next/ddk-qemu:$KMI"
@@ -109,6 +116,7 @@ for KMI in "${KMIS[@]}"; do
         -e KMI="$KMI" \
         -e VPNHIDE_QEMU_TIMEOUT="${VPNHIDE_QEMU_TIMEOUT:-300}" \
         -e VPNHIDE_KEEP_WORKDIR="${VPNHIDE_KEEP_WORKDIR:-0}" \
+        -e VPNHIDE_BUILD_JOBS="$BUILD_JOBS" \
         "$IMAGE_NAME" \
         bash -euo pipefail -c '
             CLANG_BIN="$(ls -d /opt/ddk/clang/*/bin | head -1)"
@@ -118,6 +126,8 @@ for KMI in "${KMIS[@]}"; do
             # Map the KMI to a version patchset directory. The kernel version
             # (suffix) selects the patchset, not the android generation.
             case "$KMI" in
+				upstream-4.19) PATCHVER=upstream-4.19 ;;
+				*-5.4)   PATCHVER=android12-5.4  ;;
                 *-5.10)  PATCHVER=android12-5.10 ;;
                 *-5.15)  PATCHVER=android13-5.15 ;;
                 *-6.1)   PATCHVER=android14-6.1  ;;
@@ -147,7 +157,7 @@ for KMI in "${KMIS[@]}"; do
             }
 
             echo "[kpatch/$KMI] Incremental build (only changed files)…"
-            make ARCH=arm64 LLVM=1 -j"$(nproc)" Image
+            make ARCH=arm64 LLVM=1 -j"${VPNHIDE_BUILD_JOBS:-1}" Image
 
             NEW_IMAGE="$KSRC/arch/arm64/boot/Image"
             echo "[kpatch/$KMI] Image ready: $NEW_IMAGE"
@@ -159,11 +169,24 @@ for KMI in "${KMIS[@]}"; do
         ' > "$LOG_FILE" 2>&1 &
 
     pids+=($!)
+
+    # WSL-safe: never keep several kernel linkers/QEMU instances alive at once.
+    if [ "$MAX_PARALLEL" -le 1 ]; then
+        if ! wait "${pids[0]}"; then
+            echo ""
+            echo "=== [kpatch] [$KMI] FAILED ==="
+            cat "$LOG_FILE"
+            failed=$((failed + 1))
+        else
+            echo "[kpatch] [$KMI] PASSED"
+        fi
+        pids=()
+        log_files=()
+    fi
 done
 
 # ---- wait for all containers ------------------------------------------------
 echo "[kpatch] Waiting for all tests to finish…"
-failed=0
 
 while [ ${#pids[@]} -gt 0 ]; do
     new_pids=()

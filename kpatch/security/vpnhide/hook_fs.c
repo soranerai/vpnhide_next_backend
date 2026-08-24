@@ -127,6 +127,7 @@ void vpnhide_bpf_lookup_elem(struct bpf_map *map, void *key, void *value)
 }
 EXPORT_SYMBOL_GPL(vpnhide_bpf_lookup_elem);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
 /* Zero all VPN entries in a batch lookup result. Keys/values are laid out
  * back-to-back using the map's own key_size/value_size — NOT
  * sizeof(struct vh_stats_key/value) which only applies to "wide" maps and
@@ -226,6 +227,7 @@ out:
 	kvfree(vals_buf);
 }
 EXPORT_SYMBOL_GPL(vpnhide_bpf_lookup_batch);
+#endif
 
 /* ------------------------------------------------------------------ */
 /* getdents64 — filter VPN interface names from directory listings     */
@@ -235,10 +237,9 @@ bool vpnhide_getdents64(unsigned int fd,
 			struct linux_dirent64 __user *dirent,
 			unsigned int count, int *retval)
 {
-	struct linux_dirent64 *kbuf, *cur, *prev;
+	struct linux_dirent64 *kbuf, *cur;
 	uid_t uid;
 	int nbytes = *retval;
-	long bytes_left;
 
 	if (nbytes <= 0)
 		return false;
@@ -259,13 +260,19 @@ bool vpnhide_getdents64(unsigned int fd,
 		return false;
 	}
 
-	bytes_left = nbytes;
-	prev = NULL;
 	cur  = kbuf;
 
 	while ((char *)cur < (char *)kbuf + nbytes) {
+		long offset = (char *)cur - (char *)kbuf;
+		unsigned short reclen = cur->d_reclen;
 		struct linux_dirent64 *next =
-			(struct linux_dirent64 *)((char *)cur + cur->d_reclen);
+			(struct linux_dirent64 *)((char *)cur + reclen);
+
+		/* The buffer came from getdents, but keep the filter bounded even
+		 * if a filesystem supplies a malformed record. */
+		if (reclen < offsetof(struct linux_dirent64, d_name) + 1 ||
+		    reclen > nbytes - offset)
+			break;
 
 		if (vh_is_vpn_name_cached(cur->d_name,
 					  strnlen(cur->d_name, NAME_MAX))) {
@@ -274,12 +281,10 @@ bool vpnhide_getdents64(unsigned int fd,
 				    (char *)next;
 			if (tail > 0)
 				memmove(cur, next, tail);
-			nbytes    -= cur->d_reclen;
-			bytes_left = nbytes - ((char *)cur - (char *)kbuf);
+			nbytes    -= reclen;
 			/* don't advance cur — it now points to next entry */
 			record_kmod_intercept(uid, HOOK_GETDENTS64);
 		} else {
-			prev = cur;
 			cur  = next;
 		}
 	}

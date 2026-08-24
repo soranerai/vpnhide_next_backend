@@ -35,7 +35,7 @@
 /* ------------------------------------------------------------------ */
 
 int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
-			    sockptr_t optval, unsigned int optlen)
+				    VPNHIDE_SOCKPTR_T optval, unsigned int optlen)
 {
 	struct sock *sk;
 	uid_t uid;
@@ -58,7 +58,7 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 
 			if (optlen == 0)
 				break;
-			if (copy_from_sockptr(devname, optval,
+			if (VPNHIDE_COPY_FROM_SOCKPTR(devname, optval,
 					      min_t(unsigned int, optlen,
 						    IFNAMSIZ - 1)))
 				break;
@@ -73,7 +73,7 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 
 			if (optlen != sizeof(ifindex))
 				break;
-			if (copy_from_sockptr(&ifindex, optval,
+			if (VPNHIDE_COPY_FROM_SOCKPTR(&ifindex, optval,
 					      sizeof(ifindex)))
 				break;
 			if (ifindex && is_active_vpn_ifindex(ifindex)) {
@@ -99,7 +99,7 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 
 			if (optlen != sizeof(flags))
 				break;
-			if (copy_from_sockptr(&flags, optval, sizeof(flags)))
+			if (VPNHIDE_COPY_FROM_SOCKPTR(&flags, optval, sizeof(flags)))
 				break;
 			flags &= ~(SOF_TIMESTAMPING_TX_HARDWARE |
 				   SOF_TIMESTAMPING_RX_HARDWARE |
@@ -883,7 +883,7 @@ bool vpnhide_setsockopt(int fd, int level, int optname,
 		return false;
 	}
 	r = vpnhide_setsockopt_sock(sock, level, optname,
-				    USER_SOCKPTR(user_optval), optlen);
+				    VPNHIDE_USER_SOCKPTR(user_optval), optlen);
 	fdput(f);
 	if (r) {
 		*ret = r;

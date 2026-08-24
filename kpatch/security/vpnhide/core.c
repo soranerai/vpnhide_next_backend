@@ -75,6 +75,15 @@ static struct {
 static DEFINE_MUTEX(policy_apply_lock);
 static atomic64_t intercept_stats_sequence = ATOMIC64_INIT(0);
 
+/* Legacy kernels run these updates from the daemon's ioctl context.  Wait
+ * synchronously before freeing the small, frequently replaced snapshots;
+ * this avoids putting their allocators on the old RCU softirq callback path. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 5, 0)
+#define VPNHIDE_FREE_AFTER_RCU(ptr) do { synchronize_rcu(); kfree(ptr); } while (0)
+#else
+#define VPNHIDE_FREE_AFTER_RCU(ptr) kfree_rcu((ptr), rcu)
+#endif
+
 #define VPNHIDE_PORT_STATS_CAPACITY 65536U
 #define VPNHIDE_PORT_STATS_MASK (VPNHIDE_PORT_STATS_CAPACITY - 1)
 #define VPNHIDE_PORT_STATS_TTL (6UL * 60 * 60 * HZ)
@@ -507,7 +516,11 @@ static int replace_owned_ports(const struct vpnhide_owned_ports_update *update)
 	rcu_assign_pointer(owned_ports_snapshot, snapshot);
 	spin_unlock(&owned_ports_lock);
 	if (old)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 5, 0)
 		kvfree_rcu(old, rcu);
+#else
+		VPNHIDE_FREE_AFTER_RCU(old);
+#endif
 	return 0;
 }
 
@@ -587,7 +600,7 @@ void vh_rebuild_name_cache(const struct vpnhide_vpn_ifindexes *idata)
 	spin_unlock(&g_vpn_name_cache_lock);
 
 	if (old)
-		kfree_rcu(old, rcu);
+		VPNHIDE_FREE_AFTER_RCU(old);
 }
 
 bool vpnhide_should_hide_ifname(const char *ifname)
@@ -957,7 +970,7 @@ int update_spoof_ip(const struct vpnhide_spoof_ip *sip)
 	spin_unlock(&spoof_ip_lock);
 
 	if (old)
-		kfree_rcu(old, rcu);
+		VPNHIDE_FREE_AFTER_RCU(old);
 	return 0;
 }
 
@@ -1190,12 +1203,14 @@ static ssize_t vpnhide_dev_write(struct file *file, const char __user *buf,
 /* IOCTL dispatch                                                      */
 /* ------------------------------------------------------------------ */
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 5, 0)
 static void vh_free_policy_snapshot_rcu(struct rcu_head *head)
 {
 	struct vpnhide_policy_snapshot *snapshot =
 		container_of(head, struct vpnhide_policy_snapshot, rcu);
 	kvfree(snapshot);
 }
+#endif
 
 static int policy_port_target_cmp(const void *a, const void *b)
 {
@@ -1381,8 +1396,14 @@ static int publish_policy_snapshot(struct vpnhide_policy_snapshot *snapshot,
 	spin_unlock(&policy_snapshot_lock);
 	vpnhide_udp_rates_prune(snapshot);
 	mutex_unlock(&policy_apply_lock);
-	if (old)
+	if (old) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 5, 0)
+		synchronize_rcu();
+		kvfree(old);
+#else
 		call_rcu(&old->rcu, vh_free_policy_snapshot_rcu);
+#endif
+	}
 	atomic_inc(&vpnhide_config_generation);
 	wake_up_all(&vpnhide_config_wait);
 	return 0;
@@ -1618,7 +1639,8 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 				lockdep_is_held(&active_vpns_lock));
 		rcu_assign_pointer(global_active_vpns, nav);
 		spin_unlock(&active_vpns_lock);
-		if (old) kfree_rcu(old, rcu);
+		if (old)
+			VPNHIDE_FREE_AFTER_RCU(old);
 
 		vh_rebuild_name_cache(&idata);
 		atomic_inc(&vpnhide_config_generation);

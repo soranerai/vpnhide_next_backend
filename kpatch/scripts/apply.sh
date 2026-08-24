@@ -3,7 +3,8 @@
 # apply.sh — apply VPNHide in-tree patches to a GKI kernel source tree
 #
 # Usage: apply.sh <kernel_common_dir> <version>
-#   version: android12-5.10 | android13-5.15 | android14-6.1 |
+#   version: android12-5.4  | android12-5.10 | android13-5.15 |
+#            android14-6.1 |
 #            android15-6.6  | android16-6.12
 # =============================================================================
 set -euo pipefail
@@ -46,7 +47,11 @@ cp "$HEADER" "$KERNEL_DIR/include/linux/vpnhide.h"
 PATCH_COUNT=0
 for p in $(ls "$PATCHES_DIR"/*.patch 2>/dev/null | sort); do
     log "Applying $(basename "$p")..."
-    patch -p1 --forward --fuzz=3 --no-backup-if-mismatch -d "$KERNEL_DIR" < "$p" \
+	FUZZ=3
+	if [[ "$VERSION" == "android12-5.4" || "$VERSION" == "upstream-4.19" ]]; then
+		FUZZ=0
+	fi
+	patch -p1 --forward --fuzz="$FUZZ" --no-backup-if-mismatch -d "$KERNEL_DIR" < "$p" \
         || die "patch failed: $p"
     PATCH_COUNT=$(( PATCH_COUNT + 1 ))
 done
@@ -120,15 +125,25 @@ fi
 SOCKET_C="$KERNEL_DIR/net/socket.c"
 if [ -f "$SOCKET_C" ]; then
     log "Applying socket vpnhide hooks in $SOCKET_C..."
-    EXTRA_FLAGS=("--connect")
+    EXTRA_FLAGS=()
+    # Legacy patchsets contain exact socket call-site edits.  The modern
+    # injector assumes post-5.10 syscall shapes and can silently place a hook
+    # in the wrong function on 5.4/4.19.
+    if [[ "$VERSION" != "android12-5.4" && "$VERSION" != "upstream-4.19" ]]; then
+        EXTRA_FLAGS+=("--connect")
+    fi
     if [[ "$VERSION" == "android15-6.6" || "$VERSION" == "android16-6.12" ]]; then
         EXTRA_FLAGS+=("--setsockopt")
     fi
     if [[ "$VERSION" == "android16-6.12" ]]; then
         EXTRA_FLAGS+=("--bind-getname")
     fi
-    "$SCRIPT_DIR/fix_socket_hooks.py" "$SOCKET_C" "${EXTRA_FLAGS[@]}" \
-        || die "socket hook injection failed for $SOCKET_C"
+    if [[ "$VERSION" == "android12-5.4" || "$VERSION" == "upstream-4.19" ]]; then
+        log "Legacy socket hooks are already present in the exact patch; skipping injector."
+    else
+        "$SCRIPT_DIR/fix_socket_hooks.py" "$SOCKET_C" "${EXTRA_FLAGS[@]}" \
+            || die "socket hook injection failed for $SOCKET_C"
+    fi
 fi
 
 # Rewrite packet-info immediately before put_cmsg(). This keeps the ancillary
@@ -138,4 +153,3 @@ log "Applying ancillary packet-info hooks..."
 	|| die "ancillary packet-info hook injection failed"
 
 log "Done. Applied $PATCH_COUNT patches for $VERSION."
-

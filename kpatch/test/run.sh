@@ -17,12 +17,13 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 CACHE="$HERE/.cache/$KMI"
 
 IMAGE="${VPNHIDE_QEMU_IMAGE:-$CACHE/Image}"
+QEMU_BIN="${VPNHIDE_QEMU_BIN:-qemu-system-aarch64}"
 
 ALPINE_VER="3.21.2"
 ALPINE_TAR="${VPNHIDE_QEMU_ROOTFS:-$CACHE/../alpine-minirootfs-$ALPINE_VER-aarch64.tar.gz}"
 ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-$ALPINE_VER-aarch64.tar.gz"
 
-command -v qemu-system-aarch64 >/dev/null || { echo "ERROR: qemu-system-aarch64 not installed"; exit 2; }
+command -v "$QEMU_BIN" >/dev/null || { echo "ERROR: $QEMU_BIN not installed"; exit 2; }
 [ -f "$IMAGE" ] || {
     echo "ERROR: kernel Image missing: $IMAGE"
     echo "  run: $HERE/build-kernel.sh $KMI"
@@ -62,6 +63,28 @@ RFS="$WORK/rootfs"
 mkdir -p "$RFS"
 tar xzf "$ALPINE_TAR" -C "$RFS"
 
+# Install optional ARM64 Alpine packages on the host side.  Network access
+# from the guest is deliberately not required: this makes iproute2/tc and
+# python3 available even when QEMU user networking or DNS is unavailable.
+EXTRA_APK_DIR="${VPNHIDE_QEMU_APK_DIR:-}"
+if [ -n "$EXTRA_APK_DIR" ]; then
+    [ -d "$EXTRA_APK_DIR" ] || {
+        echo "ERROR: VPNHIDE_QEMU_APK_DIR is not a directory: $EXTRA_APK_DIR"
+        exit 2
+    }
+    found_apk=0
+    for apk in "$EXTRA_APK_DIR"/*.apk; do
+        [ -f "$apk" ] || continue
+        echo "[run/kpatch] adding $(basename "$apk") to initramfs"
+        tar --warning=no-unknown-keyword -xzf "$apk" -C "$RFS"
+        found_apk=1
+    done
+    [ "$found_apk" -eq 1 ] || {
+        echo "ERROR: no .apk files found in VPNHIDE_QEMU_APK_DIR=$EXTRA_APK_DIR"
+        exit 2
+    }
+fi
+
 cp "$CTL_BIN"    "$RFS/vpnhide-ctl"
 cp "$DAEMON_BIN" "$RFS/vpnhide-daemon"
 # vector_tests.py: prefer local copy, fall back to kmod's
@@ -76,13 +99,15 @@ chmod +x "$RFS/init" "$RFS/vpnhide-ctl" "$RFS/vpnhide-daemon" "$RFS/vector_tests
 
 LOG="$WORK/serial.log"
 BOOT_TIMEOUT="${VPNHIDE_QEMU_TIMEOUT:-300}"
+QEMU_MEM="${VPNHIDE_QEMU_MEM:-512M}"
+QEMU_SMP="${VPNHIDE_QEMU_SMP:-1}"
 echo "[run/kpatch] $KMI: booting $(basename "$IMAGE") in QEMU (TCG, no KVM)…"
-timeout "$BOOT_TIMEOUT" qemu-system-aarch64 \
-    -machine virt -cpu max -accel tcg,thread=multi,tb-size=1024 \
-    -smp 4 -m 2G \
+timeout "$BOOT_TIMEOUT" "$QEMU_BIN" \
+    -machine virt,gic-version=3 -cpu cortex-a57 -accel tcg,thread=multi,tb-size=1024 \
+    -smp "$QEMU_SMP" -m "$QEMU_MEM" \
     -kernel "$IMAGE" -initrd "$WORK/initramfs.cpio.gz" \
-    -append "console=ttyAMA0 panic=-1 rdinit=/init" \
-    -netdev user,id=n0 -device virtio-net-pci,netdev=n0,romfile= \
+    -append "earlycon=pl011,mmio32,0x09000000 console=ttyAMA0 panic=-1 rdinit=/init" \
+    -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
     -display none -no-reboot -serial "file:$LOG" >/dev/null 2>&1 || true
 
 echo "------------------------- test output -------------------------"
