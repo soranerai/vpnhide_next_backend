@@ -650,7 +650,11 @@ index ddc352adc..e6f21f398 100644
 +			}
  		}
  		fput_light(sock->file, fput_needed);
- 	}
+	}
+@@ -1690,0 +1694,3 @@ int __sys_listen(int fd, int backlog)
++#ifdef CONFIG_VPNHIDE
++		vpnhide_listen_post(sock, err);
++#endif
 @@ -1822,6 +1833,23 @@ int __sys_connect(int fd, struct sockaddr __user *uservaddr, int addrlen)
  	struct sockaddr_storage address;
  	int err, fput_needed;

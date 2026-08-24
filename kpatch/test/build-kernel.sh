@@ -13,6 +13,7 @@ set -euo pipefail
 
 KMI="${1:?usage: build-kernel.sh <kmi>  (e.g. android14-6.1)}"
 BUILD_JOBS="${VPNHIDE_BUILD_JOBS:-1}"
+BUILD_MEMORY="${VPNHIDE_BUILD_MEMORY:-6g}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 CACHE="$HERE/.cache/$KMI"
@@ -22,9 +23,10 @@ DDK_IMAGE_TAG="20260313"
 DDK="ghcr.io/ylarod/ddk-min:${KMI}-${DDK_IMAGE_TAG}"
 
 mkdir -p "$CACHE"
-echo "[build-kernel/kpatch] $KMI: bounded build (jobs=$BUILD_JOBS)"
+echo "[build-kernel/kpatch] $KMI: bounded build (jobs=$BUILD_JOBS memory=$BUILD_MEMORY)"
 
 docker run --rm \
+	--memory "$BUILD_MEMORY" --memory-swap "$BUILD_MEMORY" \
 	-v "$REPO:/repo:ro" -v "$CACHE:/out" -v "$FRAG:/qemu.config:ro" \
 	-e KMI="$KMI" -e VPNHIDE_BUILD_JOBS="$BUILD_JOBS" "$DDK" bash -euo pipefail -c '
 	CLANG_BIN="$(ls -d /opt/ddk/clang/*/bin | head -1)"
@@ -61,11 +63,17 @@ docker run --rm \
 	# Keep legacy/QEMU builds bounded and deterministic.  These options are
 	# unnecessary for the vector harness and can multiply memory usage.
 	scripts/config --disable LTO || true
+	scripts/config --disable LTO_CLANG || true
+	scripts/config --disable THINLTO || true
 	scripts/config --enable LTO_NONE || true
 for sym in CFI_CLANG CFI_CLANG_SHADOW DEBUG_INFO_BTF IKHEADERS KVM KVM_ARM_HOST KVM_ARM_VGIC_V3; do
 	scripts/config --disable "$sym" || true
 done
 	make ARCH=arm64 LLVM=1 olddefconfig
+	if grep -Eq "^CONFIG_(LTO_CLANG|THINLTO)=y" .config; then
+		echo "ERROR: legacy QEMU build still has LLVM LTO enabled"
+		exit 1
+	fi
 
 	# Verify CONFIG_VPNHIDE=y was accepted
 	if ! grep -q "^CONFIG_VPNHIDE=y" .config; then

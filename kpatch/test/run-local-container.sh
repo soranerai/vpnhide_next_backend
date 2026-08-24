@@ -96,6 +96,7 @@ done
 MAX_PARALLEL=1
 echo "[kpatch] Starting kpatch builds+tests (max parallel=$MAX_PARALLEL): ${KMIS[*]}"
 BUILD_JOBS="${VPNHIDE_BUILD_JOBS:-1}"
+BUILD_MEMORY="${VPNHIDE_BUILD_MEMORY:-6g}"
 
 pids=()
 log_files=()
@@ -111,6 +112,7 @@ for KMI in "${KMIS[@]}"; do
     # Run as root inside the container (no --userns=keep-id) so we can write
     # to /opt/qemu/linux which is owned by root in the image.
     "$DOCKER_CMD" run --rm \
+        --memory "$BUILD_MEMORY" --memory-swap "$BUILD_MEMORY" \
         -v "$REPO:/repo:Z" \
         -w /repo \
         -e KMI="$KMI" \
@@ -148,8 +150,14 @@ for KMI in "${KMIS[@]}"; do
             echo "CONFIG_VPNHIDE=y" >> .config
             # Disable LTO for test builds — full LLVM LTO needs 8+ GB RAM and OOM-kills the linker.
             sed -i "/CONFIG_LTO/d" .config
+            sed -i "/CONFIG_THINLTO/d" .config
             echo "CONFIG_LTO_NONE=y" >> .config
             make ARCH=arm64 LLVM=1 olddefconfig
+
+            if grep -Eq "^CONFIG_(LTO_CLANG|THINLTO)=y" .config; then
+                echo "ERROR: legacy QEMU build still has LLVM LTO enabled"
+                exit 1
+            fi
 
             grep -q "^CONFIG_VPNHIDE=y" .config || {
                 echo "ERROR: CONFIG_VPNHIDE=y not in .config after olddefconfig — Kconfig not wired?"

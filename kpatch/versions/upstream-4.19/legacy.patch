@@ -227,6 +227,11 @@ index 9209623ab..d86ef1c35 100644
  #include <net/pkt_sched.h>
  #include <net/fib_rules.h>
  #include <net/rtnetlink.h>
+@@ -1598,0 +1602,4 @@ static int rtnl_fill_ifinfo(struct sk_buff *skb,
++#ifdef CONFIG_VPNHIDE
++	if (dev && vpnhide_should_hide_dev(dev))
++		return 0;
++#endif
 diff --git a/net/ipv4/devinet.c b/net/ipv4/devinet.c
 index e4fea3adb..d8b1adbef 100644
 --- a/net/ipv4/devinet.c
@@ -498,6 +503,13 @@ index 844a5ee7f..d4879d8ed 100644
  
  static struct kmem_cache *fib6_node_kmem __read_mostly;
  
+@@ -2300,0 +2303,6 @@ static int ipv6_route_seq_show(struct seq_file *seq, void *v)
++#ifdef CONFIG_VPNHIDE
++	if (dev && vpnhide_should_hide_dev(dev)) {
++		iter->w.leaf = NULL;
++		return 0;
++	}
++#endif
 diff --git a/net/ipv6/route.c b/net/ipv6/route.c
 index e6e401990..fe7f5d068 100644
 --- a/net/ipv6/route.c
@@ -617,6 +629,10 @@ index 49ac98cfd..5e5c58ccd 100644
  		}
  		fput_light(sock->file, fput_needed);
  	}
+@@ -1659,0 +1664,3 @@ int __sys_listen(int fd, int backlog)
++#ifdef CONFIG_VPNHIDE
++		vpnhide_listen_post(sock, err);
++#endif
 @@ -1791,6 +1801,23 @@ int __sys_connect(int fd, struct sockaddr __user *uservaddr, int addrlen)
  	struct sockaddr_storage address;
  	int err, fput_needed;
