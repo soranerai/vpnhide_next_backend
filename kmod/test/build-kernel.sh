@@ -14,6 +14,8 @@
 set -euo pipefail
 
 KMI="${1:?usage: build-kernel.sh <kmi>  (e.g. android14-6.1)}"
+BUILD_JOBS="${VPNHIDE_BUILD_JOBS:-32}"
+BUILD_MEMORY="${VPNHIDE_BUILD_MEMORY:-11g}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 CACHE="$HERE/.cache/$KMI"
@@ -24,12 +26,25 @@ FRAG="$HERE/qemu.config"
 DDK_IMAGE_TAG="20260313"
 DDK="ghcr.io/ylarod/ddk-min:${KMI}-${DDK_IMAGE_TAG}"
 
-mkdir -p "$CACHE"
-echo "[build-kernel] $KMI: cloning kernel/common + building Image (this is slow)…"
+CONTAINER_CMD="${VPNHIDE_CONTAINER_RUNTIME:-}"
+if [ -z "$CONTAINER_CMD" ]; then
+	if command -v podman >/dev/null 2>&1; then
+		CONTAINER_CMD="podman"
+	elif command -v docker >/dev/null 2>&1; then
+		CONTAINER_CMD="docker"
+	else
+		echo "ERROR: neither podman nor docker found"
+		exit 1
+	fi
+fi
 
-docker run --rm \
+mkdir -p "$CACHE"
+echo "[build-kernel] $KMI: bounded build (jobs=$BUILD_JOBS memory=$BUILD_MEMORY)"
+
+"$CONTAINER_CMD" run --rm \
+	--memory "$BUILD_MEMORY" --memory-swap "$BUILD_MEMORY" \
 	-v "$REPO:/repo:ro" -v "$CACHE:/out" -v "$FRAG:/qemu.config:ro" \
-	-e KMI="$KMI" "$DDK" bash -euo pipefail -c '
+	-e KMI="$KMI" -e VPNHIDE_BUILD_JOBS="$BUILD_JOBS" "$DDK" bash -euo pipefail -c '
 	CLANG_BIN="$(ls -d /opt/ddk/clang/*/bin | head -1)"
 	export PATH="$CLANG_BIN:$PATH"
 
@@ -40,7 +55,7 @@ docker run --rm \
 	make ARCH=arm64 LLVM=1 gki_defconfig
 	./scripts/kconfig/merge_config.sh -m .config /qemu.config
 	make ARCH=arm64 LLVM=1 olddefconfig
-	make ARCH=arm64 LLVM=1 -j"$(nproc)" Image
+	make ARCH=arm64 LLVM=1 -j"${VPNHIDE_BUILD_JOBS:-1}" Image
 	make ARCH=arm64 LLVM=1 modules_prepare
 	cp arch/arm64/boot/Image /out/Image
 	# external-module builds need Module.symvers (symbol CRCs); make Image only
@@ -53,7 +68,8 @@ docker run --rm \
 	# separately-built kernel and panics on some KMIs (CFI / kretprobe on 6.12).
 	cp -r /repo/kmod /tmp/kmod-build
 	make -C /tmp/kmod-build KERNEL_SRC=/tmp/linux CLANG_DIR="$CLANG_BIN" clean || true
-	make -C /tmp/kmod-build KERNEL_SRC=/tmp/linux CLANG_DIR="$CLANG_BIN"
+	make -C /tmp/kmod-build KERNEL_SRC=/tmp/linux CLANG_DIR="$CLANG_BIN" \
+		-j"${VPNHIDE_BUILD_JOBS:-1}"
 	cp /tmp/kmod-build/vpnhide_kmod.ko /out/vpnhide_kmod.ko
 '
 

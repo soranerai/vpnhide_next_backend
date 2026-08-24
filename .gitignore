@@ -34,6 +34,7 @@ kmod/*.lds
 kmod/test_iface_lists
 kmod/vpnhide-ctl-host
 kmod/vpnhide-daemon-host
+kpatch/test/.cache/
 kmod/*.log
 kmod/*log.txt
 

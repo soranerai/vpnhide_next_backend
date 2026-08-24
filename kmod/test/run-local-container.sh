@@ -110,24 +110,28 @@ for KMI in "${KMIS[@]}"; do
     fi
 done
 
-echo "[local-container] Starting parallel testing for: ${KMIS[*]}"
+BUILD_JOBS="${VPNHIDE_BUILD_JOBS:-32}"
+BUILD_MEMORY="${VPNHIDE_BUILD_MEMORY:-11g}"
+echo "[local-container] Starting bounded sequential tests (jobs=$BUILD_JOBS memory=$BUILD_MEMORY): ${KMIS[*]}"
 
-pids=()
-log_files=()
+failed=0
 
-# 4. Launch all container tests in parallel
+# 4. Build and test one KMI at a time. Multiple concurrent kernel-module
+# linkers and QEMU guests can exhaust WSL2 memory even when each one is small.
 for KMI in "${KMIS[@]}"; do
     IMAGE_NAME="ghcr.io/soranerai/vpnhide_next/ddk-qemu:$KMI"
     LOG_FILE="/tmp/vpnhide-test-$KMI.log"
-    log_files+=("$LOG_FILE")
-    
     echo "[local-container] [$KMI] Starting container run (logging to $LOG_FILE)..."
-    
-    # Run container in background
-    "$DOCKER_CMD" run --rm $USERNS_ARG \
+
+    if "$DOCKER_CMD" run --rm $USERNS_ARG \
+        --memory "$BUILD_MEMORY" --memory-swap "$BUILD_MEMORY" \
         -v "$REPO:/repo:Z" \
         -w /repo \
         -e KMI="$KMI" \
+        -e VPNHIDE_BUILD_JOBS="$BUILD_JOBS" \
+        -e VPNHIDE_QEMU_MEM="${VPNHIDE_QEMU_MEM:-512M}" \
+        -e VPNHIDE_QEMU_SMP="${VPNHIDE_QEMU_SMP:-1}" \
+        -e VPNHIDE_QEMU_TIMEOUT="${VPNHIDE_QEMU_TIMEOUT:-300}" \
         -e VPNHIDE_TEST_MODE="${VPNHIDE_TEST_MODE:-normal}" \
         -e VPNHIDE_PERF_ITERATIONS="${VPNHIDE_PERF_ITERATIONS:-20000}" \
         -e VPNHIDE_PERF_REPEATS="${VPNHIDE_PERF_REPEATS:-5}" \
@@ -141,7 +145,8 @@ for KMI in "${KMIS[@]}"; do
             cp -r /repo/kmod/* /tmp/kmod-build/
             
             echo "[container] Building optimized kernel module..."
-            make -C /tmp/kmod-build KERNEL_SRC="$VPNHIDE_QEMU_KSRC" CLANG_DIR="$CLANG_BIN"
+            make -C /tmp/kmod-build KERNEL_SRC="$VPNHIDE_QEMU_KSRC" \
+                CLANG_DIR="$CLANG_BIN" -j"${VPNHIDE_BUILD_JOBS:-1}"
 
             if [ "${VPNHIDE_TEST_MODE:-normal}" = "perf" ]; then
                 echo "[container] Building baseline module from HEAD^..."
@@ -153,7 +158,8 @@ for KMI in "${KMIS[@]}"; do
                 fi
                 echo "[container] Using performance baseline: $BASELINE_REF"
                 git -C /repo archive "$BASELINE_REF" kmod | tar -x -C /tmp/kmod-baseline
-                make -C /tmp/kmod-baseline/kmod KERNEL_SRC="$VPNHIDE_QEMU_KSRC" CLANG_DIR="$CLANG_BIN"
+                make -C /tmp/kmod-baseline/kmod KERNEL_SRC="$VPNHIDE_QEMU_KSRC" \
+                    CLANG_DIR="$CLANG_BIN" -j"${VPNHIDE_BUILD_JOBS:-1}"
 
                 echo "[container] Running baseline/optimized QEMU performance comparison..."
                 VPNHIDE_PERF_BASELINE_IMAGE="$VPNHIDE_QEMU_KSRC/arch/arm64/boot/Image" \
@@ -166,40 +172,15 @@ for KMI in "${KMIS[@]}"; do
                 echo "[container] Running QEMU test runner..."
                 VPNHIDE_QEMU_KO="/tmp/kmod-build/vpnhide_kmod.ko" /repo/kmod/test/run.sh "$KMI"
             fi
-        ' > "$LOG_FILE" 2>&1 &
-        
-    pids+=($!)
-done
-
-# 5. Wait for all background processes and report results immediately as they finish
-echo "[local-container] Waiting for all tests to finish..."
-failed=0
-
-while [ ${#pids[@]} -gt 0 ]; do
-    for i in "${!pids[@]}"; do
-        pid="${pids[i]}"
-        KMI="${KMIS[i]}"
-        log_file="${log_files[i]}"
-        
-        # Check if process is still running
-        if ! kill -0 "$pid" 2>/dev/null; then
-            # Process finished; retrieve its exit code
-            wait "$pid"
-            exit_code=$?
-            
-            if [ $exit_code -ne 0 ]; then
-                echo -e "\n=== [local-container] [$KMI] FAILED (exit code: $exit_code) ==="
-                cat "$log_file"
-                failed=$((failed + 1))
-            else
-                echo "[local-container] [$KMI] PASSED"
-            fi
-            
-            # Remove from tracking lists
-            unset "pids[i]"
-        fi
-    done
-    sleep 2
+        ' > "$LOG_FILE" 2>&1; then
+        echo "[local-container] [$KMI] PASSED"
+    else
+        rc=$?
+        echo ""
+        echo "=== [local-container] [$KMI] FAILED (exit code: $rc) ==="
+        cat "$LOG_FILE"
+        failed=$((failed + 1))
+    fi
 done
 
 if [ $failed -eq 0 ]; then

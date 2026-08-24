@@ -25,7 +25,7 @@ vpnhide-kmod-<kmi>.zip
 
 Supported variants are: `android12-5.4`, `android12-5.10`, `android13-5.10`, `android13-5.15`, `android14-5.15`, `android14-6.1`, `android15-6.6`, and `android16-6.12`.
 
-The in-tree kpatch compatibility profiles additionally cover Android common 5.4 and upstream 4.19.325 (`kpatch/versions/android12-5.4`, `kpatch/versions/upstream-4.19`). Legacy checks are intentionally bounded to one compiler job; use `VPNHIDE_BUILD_JOBS=1` and run one KMI at a time on WSL2.
+The in-tree kpatch compatibility profiles additionally cover Android common 5.4 and upstream 4.19.325 (`kpatch/versions/android12-5.4`, `kpatch/versions/upstream-4.19`). Local QEMU matrices always run one build/container at a time. Test containers default to 32 compiler jobs with an 11 GiB hard memory limit; override these with `VPNHIDE_BUILD_JOBS` and `VPNHIDE_BUILD_MEMORY` for smaller hosts.
 
 If the kernel sources and LLVM are already available locally, the container can be skipped:
 
@@ -69,6 +69,13 @@ For a quick QEMU build and runtime check:
 ```bash
 ./kpatch/test/build-kernel.sh android14-6.1
 ./kpatch/test/run.sh android14-6.1
+```
+
+To run the complete matrix sequentially, including clean builds for the
+legacy 4.19 and 5.4 profiles:
+
+```bash
+./kpatch/test/run-local-container.sh
 ```
 
 The test build uses the DDK container and stores the result at `kpatch/test/.cache/<kmi>/Image`. It is intended for validation and does not replace the vendor/GKI build workflow used for a production Android kernel.

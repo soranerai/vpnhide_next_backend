@@ -503,7 +503,7 @@ index 844a5ee7f..d4879d8ed 100644
  
  static struct kmem_cache *fib6_node_kmem __read_mostly;
  
-@@ -2300,0 +2303,6 @@ static int ipv6_route_seq_show(struct seq_file *seq, void *v)
+@@ -2299,0 +2302,6 @@ static int ipv6_route_seq_show(struct seq_file *seq, void *v)
 +#ifdef CONFIG_VPNHIDE
 +	if (dev && vpnhide_should_hide_dev(dev)) {
 +		iter->w.leaf = NULL;

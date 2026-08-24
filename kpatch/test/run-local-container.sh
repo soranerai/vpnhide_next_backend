@@ -11,6 +11,7 @@
 set -euo pipefail
 
 KMIS_DEFAULT=(
+	"upstream-4.19"
 	"android12-5.4"
 	"android12-5.10"
     "android13-5.10"
@@ -77,6 +78,12 @@ USERNS_ARG=""
 # ---- ensure images exist ----------------------------------------------------
 echo "[kpatch] Checking container images…"
 for KMI in "${KMIS[@]}"; do
+	case "$KMI" in
+		upstream-4.19|*-5.4)
+			echo "  [$KMI] clean-build profile (no ddk-qemu source image required)"
+			continue
+			;;
+	esac
     IMAGE_NAME="ghcr.io/soranerai/vpnhide_next/ddk-qemu:$KMI"
     ALT_IMAGE="ghcr.io/okhsunrog/vpnhide/ddk-qemu:$KMI"
     if "$DOCKER_CMD" image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
@@ -91,22 +98,41 @@ for KMI in "${KMIS[@]}"; do
 done
 
 # Kernel builds and QEMU instances are intentionally serialized.  A previous
-# parallel-container run exhausted WSL2 memory and destabilized the host; do
-# not make higher parallelism an accidental environment-variable setting.
+# parallel-container run exhausted WSL2 memory and destabilized the host; keep
+# container concurrency fixed at one even when compiler job count is higher.
 MAX_PARALLEL=1
 echo "[kpatch] Starting kpatch builds+tests (max parallel=$MAX_PARALLEL): ${KMIS[*]}"
-BUILD_JOBS="${VPNHIDE_BUILD_JOBS:-1}"
-BUILD_MEMORY="${VPNHIDE_BUILD_MEMORY:-6g}"
+BUILD_JOBS="${VPNHIDE_BUILD_JOBS:-32}"
+BUILD_MEMORY="${VPNHIDE_BUILD_MEMORY:-11g}"
 
 pids=()
 log_files=()
 failed=0
 
 for KMI in "${KMIS[@]}"; do
-    IMAGE_NAME="ghcr.io/soranerai/vpnhide_next/ddk-qemu:$KMI"
     LOG_FILE="/tmp/vpnhide-kpatch-test-$KMI.log"
-    log_files+=("$LOG_FILE")
 
+    case "$KMI" in
+        upstream-4.19|*-5.4)
+            echo "[kpatch] [$KMI] starting bounded clean build + host QEMU (log: $LOG_FILE)…"
+            if VPNHIDE_BUILD_JOBS="$BUILD_JOBS" \
+                VPNHIDE_BUILD_MEMORY="$BUILD_MEMORY" \
+                "$HERE/build-kernel.sh" "$KMI" > "$LOG_FILE" 2>&1 && \
+                "$HERE/run.sh" "$KMI" >> "$LOG_FILE" 2>&1; then
+                echo "[kpatch] [$KMI] PASSED"
+            else
+                rc=$?
+                echo ""
+                echo "=== [kpatch] [$KMI] FAILED (exit $rc) ==="
+                cat "$LOG_FILE"
+                failed=$((failed + 1))
+            fi
+            continue
+            ;;
+    esac
+
+    IMAGE_NAME="ghcr.io/soranerai/vpnhide_next/ddk-qemu:$KMI"
+    log_files+=("$LOG_FILE")
     echo "[kpatch] [$KMI] starting container (log: $LOG_FILE)…"
 
     # Run as root inside the container (no --userns=keep-id) so we can write
@@ -152,6 +178,7 @@ for KMI in "${KMIS[@]}"; do
             sed -i "/CONFIG_LTO/d" .config
             sed -i "/CONFIG_THINLTO/d" .config
             echo "CONFIG_LTO_NONE=y" >> .config
+            scripts/config --disable UAPI_HEADER_TEST || true
             make ARCH=arm64 LLVM=1 olddefconfig
 
             if grep -Eq "^CONFIG_(LTO_CLANG|THINLTO)=y" .config; then
