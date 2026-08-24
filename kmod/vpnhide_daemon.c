@@ -181,11 +181,12 @@ daemon_is_vpn_ifname(const char *name,
 	return false;
 }
 
-static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6,
+static bool update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6,
 			    char *last_ipv6_linklocal,
 			    unsigned int *last_ipv4_mtu,
 			    unsigned int *last_ipv6_mtu)
 {
+	bool publish_ok = true;
 	struct ifaddrs *ifaddr = NULL;
 	struct ifaddrs *ifa = NULL;
 	char best_ifname[IFNAMSIZ];
@@ -210,7 +211,7 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6,
 	if (getifaddrs(&ifaddr) == -1) {
 		fprintf(stderr, "vpnhide-daemon: getifaddrs failed: %s\n",
 			strerror(errno));
-		return;
+		return false;
 	}
 
 	/* Helper structures to aggregate interface info */
@@ -398,6 +399,10 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6,
 			strcpy(last_ipv6_linklocal, new_ipv6_linklocal);
 			*last_ipv4_mtu = new_ipv4_mtu;
 			*last_ipv6_mtu = new_ipv6_mtu;
+		} else {
+			fprintf(stderr, "vpnhide-daemon: failed to publish spoof IP: %s\n",
+				strerror(errno));
+			publish_ok = false;
 		}
 	}
 
@@ -407,25 +412,46 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6,
 		struct vpnhide_cover_iface ci;
 		ci.ifindex = if_nametoindex(best_ifname);
 		if (ci.ifindex > 0) {
-			ioctl(fd, VH_SET_COVER_IFACE, &ci);
+			if (ioctl(fd, VH_SET_COVER_IFACE, &ci) < 0) {
+				fprintf(stderr, "vpnhide-daemon: failed to publish cover iface: %s\n",
+					strerror(errno));
+				publish_ok = false;
+			}
 			char buf[64];
 			int len = snprintf(buf, sizeof(buf), "cover_iface:%s\n", best_ifname);
 			if (len > 0) {
 				if (write(fd, buf, len) < 0) {
-					/* The control fd may disappear during module removal. */
+					fprintf(stderr, "vpnhide-daemon: failed to publish cover name: %s\n",
+						strerror(errno));
+					publish_ok = false;
 				}
 			}
+		} else {
+			fprintf(stderr, "vpnhide-daemon: cover iface disappeared before publish\n");
+			publish_ok = false;
 		}
 	} else {
 		struct vpnhide_cover_iface ci = { .ifindex = 0 };
-		ioctl(fd, VH_SET_COVER_IFACE, &ci);
+		if (ioctl(fd, VH_SET_COVER_IFACE, &ci) < 0) {
+			fprintf(stderr, "vpnhide-daemon: failed to clear cover iface: %s\n",
+				strerror(errno));
+			publish_ok = false;
+		}
 		if (write(fd, "cover_iface:none\n", 17) < 0) {
-			/* The control fd may disappear during module removal. */
+			fprintf(stderr, "vpnhide-daemon: failed to clear cover name: %s\n",
+				strerror(errno));
+			publish_ok = false;
 		}
 	}
 
 	/* Send the list of active VPNs to the kernel module */
-	ioctl(fd, VH_SET_VPN_IFINDEXES, &active_vpns);
+	if (ioctl(fd, VH_SET_VPN_IFINDEXES, &active_vpns) < 0) {
+		fprintf(stderr, "vpnhide-daemon: failed to publish VPN interfaces: %s\n",
+			strerror(errno));
+		publish_ok = false;
+	}
+
+	return publish_ok;
 }
 
 static unsigned long long get_time_ms(void)
@@ -1503,12 +1529,13 @@ int main(int argc, char **argv)
 		}
 
 		if (trigger_update) {
-			update_spoof_ip(fd, last_ipv4, last_ipv6,
+			bool publish_ok = update_spoof_ip(fd, last_ipv4, last_ipv6,
 					last_ipv6_linklocal,
 					&last_ipv4_mtu, &last_ipv6_mtu);
-
 			if (periodic_iface_rescan)
 				next_iface_rescan = get_time_ms() + IFACE_RESCAN_INTERVAL_MS;
+			if (!publish_ok)
+				next_iface_rescan = get_time_ms() + 1000;
 
 			if (netlink_event) {
 				// Netlink event occurred, schedule follow-ups
