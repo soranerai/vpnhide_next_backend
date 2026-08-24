@@ -208,6 +208,8 @@ static void update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6,
 	strcpy(new_ipv6_linklocal, "none");
 
 	if (getifaddrs(&ifaddr) == -1) {
+		fprintf(stderr, "vpnhide-daemon: getifaddrs failed: %s\n",
+			strerror(errno));
 		return;
 	}
 
@@ -439,6 +441,8 @@ static unsigned long long get_wall_time_ms(void)
 	clock_gettime(CLOCK_REALTIME, &ts);
 	return (unsigned long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
+
+#define IFACE_RESCAN_INTERVAL_MS 10000ULL
 
 #define STATS_RESOLUTION_SEC 60
 #define STATS_RETENTION_SEC (6 * 60 * 60)
@@ -1322,6 +1326,8 @@ int main(int argc, char **argv)
 	sample_stats(fd, &stats_ring);
 
 	unsigned long long next_update_time = 0;
+	unsigned long long next_iface_rescan =
+		get_time_ms() + IFACE_RESCAN_INTERVAL_MS;
 	bool update_pending = false;
 	int retry_count = 0;
 	unsigned long long pm_reload_due = 0;
@@ -1341,6 +1347,13 @@ int main(int argc, char **argv)
 			} else {
 				poll_timeout = (int)(next_update_time - now);
 			}
+		}
+		{
+			unsigned long long now = get_time_ms();
+			int iface_timeout = now >= next_iface_rescan ? 0 :
+				(int)(next_iface_rescan - now);
+			if (poll_timeout < 0 || iface_timeout < poll_timeout)
+				poll_timeout = iface_timeout;
 		}
 		if (pm_reload_due) {
 			unsigned long long now = get_time_ms();
@@ -1378,7 +1391,7 @@ int main(int argc, char **argv)
 		int port_event_index = -1, diag_events_index = -1;
 		memset(pfds, 0, sizeof(pfds));
 		pfds[0].fd = nl_fd;
-		pfds[0].events = POLLIN;
+		pfds[0].events = POLLIN | POLLERR | POLLHUP | POLLNVAL;
 		if (config_fd >= 0) {
 			config_index = nfds;
 			pfds[nfds].fd = config_fd;
@@ -1414,8 +1427,10 @@ int main(int argc, char **argv)
 
 		bool trigger_update = false;
 		bool netlink_event = false;
+		bool periodic_iface_rescan = false;
 
-		if (ret > 0 && (pfds[0].revents & POLLIN)) {
+		if (ret > 0 &&
+		    (pfds[0].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL))) {
 			char buf[4096];
 			// Consume all pending data on netlink socket to clear the POLLIN state
 			while (recv(nl_fd, buf, sizeof(buf), MSG_DONTWAIT) > 0)
@@ -1423,6 +1438,11 @@ int main(int argc, char **argv)
 			usleep(200000); // 200ms debounce
 			trigger_update = true;
 			netlink_event = true;
+		}
+		if (get_time_ms() >= next_iface_rescan) {
+			periodic_iface_rescan = true;
+			trigger_update = true;
+			next_iface_rescan = get_time_ms() + IFACE_RESCAN_INTERVAL_MS;
 		}
 		if (config_index >= 0 && ret > 0 &&
 		    (pfds[config_index].revents & POLLIN)) {
@@ -1486,6 +1506,9 @@ int main(int argc, char **argv)
 			update_spoof_ip(fd, last_ipv4, last_ipv6,
 					last_ipv6_linklocal,
 					&last_ipv4_mtu, &last_ipv6_mtu);
+
+			if (periodic_iface_rescan)
+				next_iface_rescan = get_time_ms() + IFACE_RESCAN_INTERVAL_MS;
 
 			if (netlink_event) {
 				// Netlink event occurred, schedule follow-ups
