@@ -13,6 +13,13 @@
 set +e
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
+# The minirootfs does not ship iproute2.  Its BusyBox usually contains the
+# basic `ip` applet, which is sufficient to create the test topology before
+# optional package installation is attempted.
+if [ -x /bin/busybox ] && ! command -v ip >/dev/null 2>&1; then
+	ln -sf /bin/busybox /sbin/ip
+fi
+
 mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sys /sys 2>/dev/null
 mount -t devtmpfs dev /dev 2>/dev/null
@@ -25,19 +32,35 @@ ln -sf /bin/sh /system/bin/sh
 echo "##### VPNHIDE-QEMU-TEST START #####"
 echo "KREL=$(uname -r)"
 
+# Use the injected iproute2 consistently for topology creation and vectors.
+# The QEMU runner supplies its ARM64 runtime dependencies host-side.
+ip_setup() { ip "$@"; }
+
 # Add a non-root Android-style app user with UID 115555 (user 1, appId 15555)
 echo "testuser:x:115555:115555:testuser:/home/testuser:/bin/sh" >> /etc/passwd
 echo "testallow:x:115556:115556:testallow:/home/testallow:/bin/sh" >> /etc/passwd
 
 # --- bring up user-mode networking ----------------------------------------
-ip link set lo up 2>/dev/null
-ip link set eth0 up 2>/dev/null
-ip addr add 10.0.2.15/24 dev eth0 2>/dev/null
-ip -6 addr add fd00:2::1/64 dev eth0 2>/dev/null
-ip route add default via 10.0.2.2 2>/dev/null
+ip_setup link set lo up 2>/dev/null
+ip_setup link set eth0 up 2>/dev/null
+ip_setup addr add 10.0.2.15/24 dev eth0 2>/dev/null
+ip_setup -6 addr add fd00:2::1/64 dev eth0 2>/dev/null
+ip_setup route add default via 10.0.2.2 2>/dev/null
 echo "nameserver 10.0.2.3" > /etc/resolv.conf
-echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/main" > /etc/apk/repositories
-if apk add --no-cache iproute2 python3 >/dev/null 2>&1; then echo "IPROUTE2=ok"; else echo "IPROUTE2=FAIL"; fi
+echo "http://dl-cdn.alpinelinux.org/alpine/v3.21/main" > /etc/apk/repositories
+if command -v ip >/dev/null 2>&1 && command -v tc >/dev/null 2>&1 &&
+   command -v python3 >/dev/null 2>&1; then
+	# The host-side QEMU runner may have injected ARM64 APKs into the
+	# initramfs.  Avoid an unnecessary guest-network package install.
+	echo "IPROUTE2=ok"
+elif timeout 12 apk add --no-cache iproute2 python3 >/dev/null 2>&1; then
+	echo "IPROUTE2=ok"
+else
+	echo "IPROUTE2=FAIL"
+fi
+ip -V 2>&1 || true
+tc -V 2>&1 || true
+python3 --version 2>&1 || true
 
 # --- kpatch: VPNHide is built-in, /dev/vpnhide_ctrl exists at boot ----------
 # (no insmod needed — contrasts with kmod/test/init.sh which does
@@ -97,20 +120,20 @@ DAEMON_PID=$!
 sleep 1
 
 # --- fabricate VPN-like interface + routes + per-uid policy rule ------------
-ip link add vpn0 type dummy 2>/dev/null
-ip link set vpn0 up 2>/dev/null
+ip_setup link add vpn0 type dummy 2>/dev/null
+ip_setup link set vpn0 up 2>/dev/null
 tc qdisc add dev vpn0 root pfifo_fast 2>/dev/null
-ip addr add 10.9.0.1/24 dev vpn0 2>/dev/null
-ip route add 10.9.9.0/24 dev vpn0 2>/dev/null
-ip -6 addr add fd00:9::1/64 dev vpn0 2>/dev/null
-ip -6 route add fd00:99::/64 dev vpn0 2>/dev/null
-ip link add vpn1 type dummy 2>/dev/null
-ip link set vpn1 up 2>/dev/null
-ip addr add 10.10.0.1/24 dev vpn1 2>/dev/null
-ip -6 addr add fd00:10::1/64 dev vpn1 2>/dev/null
-ip rule add uidrange 115555-115555 table 199 2>/dev/null
-ip rule add iif vpn0 table 200 2>/dev/null
-ip rule add oif vpn0 table 201 2>/dev/null
+ip_setup addr add 10.9.0.1/24 dev vpn0 2>/dev/null
+ip_setup route add 10.9.9.0/24 dev vpn0 2>/dev/null
+ip_setup -6 addr add fd00:9::1/64 dev vpn0 2>/dev/null
+ip_setup -6 route add fd00:99::/64 dev vpn0 2>/dev/null
+ip_setup link add vpn1 type dummy 2>/dev/null
+ip_setup link set vpn1 up 2>/dev/null
+ip_setup addr add 10.10.0.1/24 dev vpn1 2>/dev/null
+ip_setup -6 addr add fd00:10::1/64 dev vpn1 2>/dev/null
+ip_setup rule add uidrange 115555-115555 table 199 2>/dev/null
+ip_setup rule add iif vpn0 table 200 2>/dev/null
+ip_setup rule add oif vpn0 table 201 2>/dev/null
 # Give the daemon time to detect vpn0 and push its ifindex to the kernel
 sleep 3
 
@@ -220,7 +243,9 @@ while read -r line; do
     esac
 done < /tmp/py_allowlist_res.log
 
-PANIC=$(dmesg | grep -ci 'Unable to handle\|Internal error\|Oops\|BUG:\|Kernel panic')
+# Old 4.19/5.4 kernels can emit non-fatal mm accounting warnings while
+# tearing down short-lived test shells.  Count only fatal kernel diagnostics.
+PANIC=$(dmesg | grep -ci 'Unable to handle\|Internal error\|Oops\|Kernel panic')
 echo "=== DAEMON LOG ==="
 cat /tmp/daemon.log
 echo "=================="

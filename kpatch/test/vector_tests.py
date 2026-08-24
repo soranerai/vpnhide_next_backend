@@ -132,11 +132,19 @@ def test_setsockopt(vpn0_idx):
         return False
 
     s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    has_bindtoifindex = True
     try:
         s2.setsockopt(socket.SOL_SOCKET, SO_BINDTOIFINDEX, struct.pack("i", vpn0_idx))
         print(
             f"[setsockopt] Non-target setsockopt(SO_BINDTOIFINDEX, {vpn0_idx}) succeeded as expected"
         )
+    except OSError as e:
+        if e.errno == errno.ENOPROTOOPT:
+            has_bindtoifindex = False
+            print("[setsockopt] SO_BINDTOIFINDEX unavailable on this kernel")
+        else:
+            print(f"FAIL: setsockopt SO_BINDTOIFINDEX non-target: {e}")
+            return False
     except Exception as e:
         print(f"FAIL: setsockopt SO_BINDTOIFINDEX non-target: {e}")
         return False
@@ -162,23 +170,24 @@ def test_setsockopt(vpn0_idx):
                     f"[setsockopt] Target setsockopt(SO_BINDTODEVICE, 'vpn0') failed as expected: errno {e.errno}"
                 )
 
-            try:
-                s_tgt.setsockopt(
-                    socket.SOL_SOCKET, SO_BINDTOIFINDEX, struct.pack("i", vpn0_idx)
-                )
-                print(
-                    "FAIL: setsockopt SO_BINDTOIFINDEX target succeeded but should have failed"
-                )
-                sys.exit(1)
-            except OSError as e:
-                if e.errno != 19:
+            if has_bindtoifindex:
+                try:
+                    s_tgt.setsockopt(
+                        socket.SOL_SOCKET, SO_BINDTOIFINDEX, struct.pack("i", vpn0_idx)
+                    )
                     print(
-                        f"FAIL: setsockopt SO_BINDTOIFINDEX target expected errno 19, got {e.errno}"
+                        "FAIL: setsockopt SO_BINDTOIFINDEX target succeeded but should have failed"
                     )
                     sys.exit(1)
-                print(
-                    f"[setsockopt] Target setsockopt(SO_BINDTOIFINDEX, {vpn0_idx}) failed as expected: errno {e.errno}"
-                )
+                except OSError as e:
+                    if e.errno != 19:
+                        print(
+                            f"FAIL: setsockopt SO_BINDTOIFINDEX target expected errno 19, got {e.errno}"
+                        )
+                        sys.exit(1)
+                    print(
+                        f"[setsockopt] Target setsockopt(SO_BINDTOIFINDEX, {vpn0_idx}) failed as expected: errno {e.errno}"
+                    )
 
             sys.exit(0)
         except Exception as e:
@@ -198,7 +207,14 @@ def test_getsockopt(vpn0_idx):
     s_dev.setsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE, b"vpn0\x00")
 
     s_idx = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s_idx.setsockopt(socket.SOL_SOCKET, SO_BINDTOIFINDEX, struct.pack("i", vpn0_idx))
+    has_bindtoifindex = True
+    try:
+        s_idx.setsockopt(socket.SOL_SOCKET, SO_BINDTOIFINDEX, struct.pack("i", vpn0_idx))
+    except OSError as error:
+        if error.errno != errno.ENOPROTOOPT:
+            raise
+        has_bindtoifindex = False
+        print("[getsockopt] SO_BINDTOIFINDEX unavailable on this kernel")
 
     pid = safe_fork()
     if pid == 0:
@@ -215,16 +231,17 @@ def test_getsockopt(vpn0_idx):
                 )
                 sys.exit(1)
 
-            val_idx = s_idx.getsockopt(socket.SOL_SOCKET, SO_BINDTOIFINDEX, 4)
-            idx = struct.unpack("i", val_idx)[0]
-            print(
-                f"[getsockopt] Target getsockopt(SO_BINDTOIFINDEX) returned: {idx} (expected: 0)"
-            )
-            if idx != 0:
+            if has_bindtoifindex:
+                val_idx = s_idx.getsockopt(socket.SOL_SOCKET, SO_BINDTOIFINDEX, 4)
+                idx = struct.unpack("i", val_idx)[0]
                 print(
-                    f"FAIL: getsockopt SO_BINDTOIFINDEX target: expected 0, got {idx}"
+                    f"[getsockopt] Target getsockopt(SO_BINDTOIFINDEX) returned: {idx} (expected: 0)"
                 )
-                sys.exit(1)
+                if idx != 0:
+                    print(
+                        f"FAIL: getsockopt SO_BINDTOIFINDEX target: expected 0, got {idx}"
+                    )
+                    sys.exit(1)
 
             sys.exit(0)
         except Exception as e:
@@ -794,14 +811,26 @@ def test_bpf_laundering(vpn0_idx):
             "Cover interface stats not laundered!"
         )
         print("[BPF Non-Target] Single lookup checks passed")
-        batch = lookup_map_batch(map_fd)
-        assert len(batch) == 2
-        for ifindex, value in batch.items():
-            if ifindex in (vpn0_idx, vpn1_idx):
-                assert value.rxBytes == 0 and value.txBytes == 0
-            elif ifindex == eth0_idx:
-                assert value.rxBytes == 9000 and value.txBytes == 12000
-        print("[BPF Non-Target] Multi-interface batch laundering checks passed")
+        try:
+            batch = lookup_map_batch(map_fd)
+        except OSError as error:
+            if error.errno not in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
+                raise
+            # BPF_MAP_LOOKUP_BATCH was added after the oldest supported
+            # kernels.  If the command itself is unavailable, it cannot be
+            # used to bypass the single-element laundering hook.
+            print(
+                "[BPF Non-Target] Batch lookup unavailable on this kernel; "
+                "single-element fallback verified"
+            )
+        else:
+            assert len(batch) == 2
+            for ifindex, value in batch.items():
+                if ifindex in (vpn0_idx, vpn1_idx):
+                    assert value.rxBytes == 0 and value.txBytes == 0
+                elif ifindex == eth0_idx:
+                    assert value.rxBytes == 9000 and value.txBytes == 12000
+            print("[BPF Non-Target] Multi-interface batch laundering checks passed")
     except Exception as e:
         print(f"FAIL: BPF non-target lookup verification failed: {e}")
         return False

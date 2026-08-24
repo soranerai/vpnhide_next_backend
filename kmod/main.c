@@ -338,11 +338,13 @@ static int replace_owned_ports(const struct vpnhide_owned_ports_update *update) 
     }
   }
   kvfree(entries);
+  mutex_lock(&policy_apply_lock);
   spin_lock(&owned_ports_lock);
   old = rcu_dereference_protected(owned_ports_snapshot,
                                   lockdep_is_held(&owned_ports_lock));
   rcu_assign_pointer(owned_ports_snapshot, snapshot);
   spin_unlock(&owned_ports_lock);
+  mutex_unlock(&policy_apply_lock);
   if (old)
     kvfree_rcu(old, rcu);
   return 0;
@@ -1053,6 +1055,7 @@ static int publish_policy_snapshot(struct vpnhide_policy_snapshot *snapshot,
                                    u64 expected_generation)
 {
   struct vpnhide_policy_snapshot *old;
+  struct vpnhide_owned_ports_snapshot *old_owned;
   int ret = 0;
 
   mutex_lock(&policy_apply_lock);
@@ -1073,8 +1076,19 @@ static int publish_policy_snapshot(struct vpnhide_policy_snapshot *snapshot,
                                   lockdep_is_held(&policy_snapshot_lock));
   rcu_assign_pointer(global_policy_snapshot, snapshot);
   spin_unlock(&policy_snapshot_lock);
+  /* Port ownership is policy-derived and must not cross generations. */
+  spin_lock(&pending_ports_lock);
+  memset(pending_ports, 0, sizeof(pending_ports));
+  spin_unlock(&pending_ports_lock);
+  spin_lock(&owned_ports_lock);
+  old_owned = rcu_dereference_protected(owned_ports_snapshot,
+                                        lockdep_is_held(&owned_ports_lock));
+  rcu_assign_pointer(owned_ports_snapshot, NULL);
+  spin_unlock(&owned_ports_lock);
   vpnhide_udp_rates_prune(snapshot);
   mutex_unlock(&policy_apply_lock);
+  if (old_owned)
+    kvfree_rcu(old_owned, rcu);
   if (old)
     call_rcu(&old->rcu, free_policy_snapshot_rcu);
   atomic_inc(&vpnhide_config_generation);

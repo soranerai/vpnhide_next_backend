@@ -27,10 +27,6 @@
 #define vh_fd_file(f) ((f).file)
 #endif
 
-#ifndef BPF_FS_MAGIC
-#define BPF_FS_MAGIC 0xcafe4a4b
-#endif
-
 #ifndef IP_MTU_DISCOVER
 #define IP_MTU_DISCOVER 10
 #endif
@@ -51,6 +47,9 @@
 #endif
 #ifndef SO_TIMESTAMPING
 #define SO_TIMESTAMPING 37
+#endif
+#ifndef SO_BINDTOIFINDEX
+#define SO_BINDTOIFINDEX 62
 #endif
 #ifndef SOF_TIMESTAMPING_TX_HARDWARE
 #define SOF_TIMESTAMPING_TX_HARDWARE (1 << 0)

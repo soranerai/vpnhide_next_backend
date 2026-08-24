@@ -64,13 +64,16 @@ chmod +x "$RFS/init" "$RFS/vpnhide-ctl" "$RFS/vpnhide-daemon" "$RFS/vector_tests
 ( cd "$RFS" && find . | cpio -o -H newc 2>/dev/null | gzip > "$WORK/initramfs.cpio.gz" )
 
 LOG="$WORK/serial.log"
+BOOT_TIMEOUT="${VPNHIDE_QEMU_TIMEOUT:-300}"
+QEMU_MEM="${VPNHIDE_QEMU_MEM:-512M}"
+QEMU_SMP="${VPNHIDE_QEMU_SMP:-1}"
 echo "[run] $KMI: booting $(basename "$IMAGE") in QEMU (TCG, no KVM)…"
 # romfile= disables the virtio-net PCI option ROM (iPXE) so we don't need the
 # ipxe-qemu package — only matters for PXE boot, which we never do; networking
 # (for apk in the VM) still works.
-timeout 300 qemu-system-aarch64 \
+timeout "$BOOT_TIMEOUT" qemu-system-aarch64 \
 	-machine virt -cpu max -accel tcg,thread=multi,tb-size=1024 \
-	-smp 4 -m 2G \
+	-smp "$QEMU_SMP" -m "$QEMU_MEM" \
 	-kernel "$IMAGE" -initrd "$WORK/initramfs.cpio.gz" \
 	-append "console=ttyAMA0 panic=-1 rdinit=/init" \
 	-netdev user,id=n0 -device virtio-net-pci,netdev=n0,romfile= \
