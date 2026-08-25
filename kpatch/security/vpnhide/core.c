@@ -864,7 +864,7 @@ increment:
 	spin_unlock(&intercept_stats.lock);
 }
 
-void vpnhide_record_java_stat(uid_t uid, const char *hook, u64 count)
+static void vpnhide_record_java_stat(uid_t uid, const char *hook, u64 count)
 {
 	int i, lo = 0, hi;
 	spin_lock(&intercept_stats.lock);

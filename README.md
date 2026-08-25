@@ -23,7 +23,17 @@ The resulting archive is written to the repository root:
 vpnhide-kmod-<kmi>.zip
 ```
 
-Supported variants are: `android12-5.4`, `android12-5.10`, `android13-5.10`, `android13-5.15`, `android14-5.15`, `android14-6.1`, `android15-6.6`, and `android16-6.12`.
+Supported variants are: `android12-5.10`, `android13-5.10`, `android13-5.15`, `android14-5.15`, `android14-6.1`, `android15-6.6`, `android16-6.12`, and `android17-6.18`.
+
+To clone Google `kernel/common`, apply the matching kpatch profile, build the GKI kernel metadata, and package a fresh 6.18 kmod in one step:
+
+```bash
+./scripts/build-gki-kmod.sh
+```
+
+The script accepts an optional KMI and job count, for example
+`./scripts/build-gki-kmod.sh android17-6.18 16`. It uses a disposable `/tmp`
+build tree; set `VPNHIDE_KEEP_BUILD=1` to keep it for debugging.
 
 The in-tree kpatch compatibility profiles additionally cover Android common 5.4 and upstream 4.19.325 (`kpatch/versions/android12-5.4`, `kpatch/versions/upstream-4.19`). Local QEMU matrices always run one build/container at a time. Test containers default to 32 compiler jobs with an 11 GiB hard memory limit; override these with `VPNHIDE_BUILD_JOBS` and `VPNHIDE_BUILD_MEMORY` for smaller hosts.
 
@@ -94,7 +104,17 @@ The test build uses the DDK container and stores the result at `kpatch/test/.cac
 ./kmod/build.py --all
 ```
 
-Архив `vpnhide-kmod-<kmi>.zip` появится в корне репозитория. Поддерживаются KMI: `android12-5.10`, `android13-5.10`, `android13-5.15`, `android14-5.15`, `android14-6.1`, `android15-6.6`, `android16-6.12`.
+Архив `vpnhide-kmod-<kmi>.zip` появится в корне репозитория. Поддерживаются KMI: `android12-5.10`, `android13-5.10`, `android13-5.15`, `android14-5.15`, `android14-6.1`, `android15-6.6`, `android16-6.12`, `android17-6.18`.
+
+Полная сборка kmod GKI 6.18 прямо из Google kernel/common:
+
+```bash
+./scripts/build-gki-kmod.sh
+```
+
+Скрипт сам клонирует исходники, применяет патчи, собирает kernel metadata и
+создаёт `vpnhide-kmod-android17-6.18.zip`. Для отладки можно сохранить дерево
+сборки: `VPNHIDE_KEEP_BUILD=1 ./scripts/build-gki-kmod.sh`.
 
 Для локальной сборки с уже установленными исходниками ядра и LLVM:
 

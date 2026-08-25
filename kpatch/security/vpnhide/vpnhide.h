@@ -20,6 +20,8 @@
 
 #include "vpnhide_uapi.h"
 
+bool vpnhide_skip_fib_rule(struct sk_buff *skb, struct fib_rule *rule);
+
 #define MODNAME        "vpnhide_ctrl"
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 #define vh_fd_file(f) fd_file(f)
