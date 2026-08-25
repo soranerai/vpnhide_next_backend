@@ -1530,11 +1530,12 @@ static ssize_t vpnhide_dev_read(struct file *file, char __user *buf,
       rcu_read_lock();
       snapshot = rcu_dereference(global_policy_snapshot);
       offset += scnprintf(reader->buf + offset, reader_capacity - offset,
-                          "lsposed_match_mode: %u\n",
-                          snapshot ? snapshot->lsposed_match_mode :
-                                     VPNHIDE_MATCH_INCLUDE);
+                          "lsposed_list_mode: %s\n",
+                          snapshot && snapshot->lsposed_match_mode ==
+                                          VPNHIDE_MATCH_EXCLUDE ?
+                              "SHOW" : "HIDE");
       offset +=
-          scnprintf(reader->buf + offset, reader_capacity - offset, "lsposed_targets:");
+          scnprintf(reader->buf + offset, reader_capacity - offset, "lsposed_uids:");
       if (snapshot) {
         for (i = 0; i < snapshot->lsposed_count; i++) {
           offset += scnprintf(reader->buf + offset, reader_capacity - offset, " %u",

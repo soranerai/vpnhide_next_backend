@@ -319,7 +319,7 @@ int vpnhide_resolve_targets(const JSON_Object *root,
 	}
 	summary->configured_entries = (int)count;
 	summary->kmod_targets = kmod->count;
-	summary->lsposed_targets = lsposed->count;
+	summary->lsposed_entries = lsposed->count;
 	return 0;
 }
 

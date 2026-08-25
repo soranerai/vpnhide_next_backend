@@ -210,6 +210,16 @@ done < /tmp/py_res.log
 # testallow is selected and must retain visibility; testuser is unselected
 # and must receive the same hiding treatment as the blacklist target.
 apply_allowlist
+_al_status=$(timeout 2 cat /dev/vpnhide_ctrl 2>/dev/null || true)
+if printf '%s\n' "$_al_status" | grep -q '^lsposed_list_mode: SHOW$' &&
+   printf '%s\n' "$_al_status" | grep -Eq '^lsposed_uids:.*(^| )115556( |$)' &&
+   ! printf '%s\n' "$_al_status" | grep -Eq '^lsposed_uids:.*(^| )115555( |$)'; then
+    echo "RESULT allowlist_lsposed_show_list=PASS"
+    PASS=$((PASS + 1))
+else
+    echo "RESULT allowlist_lsposed_show_list=FAIL"
+    FAIL=$((FAIL + 1))
+fi
 _al_nt=$(ip addr show 2>/dev/null | grep -c -- "vpn0")
 _al_keep=$(su testallow -c "ip addr show" 2>/dev/null | grep -c -- "vpn0")
 _al_target=$(su testuser -c "ip addr show" 2>/dev/null | grep -c -- "vpn0")

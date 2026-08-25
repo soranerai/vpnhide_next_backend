@@ -40,7 +40,7 @@ grep -q '^mode=ALLOWLIST$' <<<"$OUTPUT"
 grep -q '^match_mode=EXCLUDE$' <<<"$OUTPUT"
 grep -q '^configured_entries=1$' <<<"$OUTPUT"
 grep -q '^kmod_targets=1$' <<<"$OUTPUT"
-grep -q '^lsposed_targets=1$' <<<"$OUTPUT"
+grep -q '^lsposed_entries=1$' <<<"$OUTPUT"
 grep -q '^port_targets=1$' <<<"$OUTPUT"
 
 # Application-selected system packages with application-range UIDs are
@@ -51,7 +51,7 @@ for fixture in policy_blacklist_system_explicit.json \
 	OUTPUT="$($OUT validate "$HERE/$fixture" 10003)"
 	grep -q '^match_mode=INCLUDE$' <<<"$OUTPUT"
 	grep -q '^kmod_targets=1$' <<<"$OUTPUT"
-	grep -q '^lsposed_targets=1$' <<<"$OUTPUT"
+	grep -q '^lsposed_entries=1$' <<<"$OUTPUT"
 	grep -q '^port_targets=1$' <<<"$OUTPUT"
 done
 
@@ -59,12 +59,12 @@ done
 OUTPUT="$($OUT validate "$HERE/policy_blacklist_system_core_explicit.json" 10003)"
 grep -q '^rejected_core_uids=1$' <<<"$OUTPUT"
 grep -q '^kmod_targets=0$' <<<"$OUTPUT"
-grep -q '^lsposed_targets=0$' <<<"$OUTPUT"
+grep -q '^lsposed_entries=0$' <<<"$OUTPUT"
 grep -q '^port_targets=0$' <<<"$OUTPUT"
 
 OUTPUT="$($OUT preview "$HERE/policy_allowlist_system_explicit.json" 10003)"
 grep -q '^kmod_targets=1$' <<<"$OUTPUT"
-grep -q '^lsposed_targets=2$' <<<"$OUTPUT"
+grep -q '^lsposed_entries=2$' <<<"$OUTPUT"
 grep -q '^port_targets=1$' <<<"$OUTPUT"
 
 # In ALLOWLIST, listed port entries override the kernel's implicit deny-all
@@ -90,7 +90,7 @@ OUTPUT="$($OUT validate "$HERE/policy_blacklist.json" 10003)"
 grep -q '^mode=BLACKLIST$' <<<"$OUTPUT"
 grep -q '^match_mode=INCLUDE$' <<<"$OUTPUT"
 grep -q '^kmod_targets=1$' <<<"$OUTPUT"
-grep -q '^lsposed_targets=0$' <<<"$OUTPUT"
+grep -q '^lsposed_entries=0$' <<<"$OUTPUT"
 
 OUTPUT="$($OUT preview "$HERE/policy_blacklist_explicit.json" 10003)"
 grep -q '^port_targets=1$' <<<"$OUTPUT"
@@ -99,7 +99,7 @@ grep -q '^port_target\[0\]\.rule\[0\]=8081-8081/2$' <<<"$OUTPUT"
 
 OUTPUT="$($OUT preview "$HERE/policy_blacklist_mass_local.json" 10003)"
 grep -q '^kmod_targets=1$' <<<"$OUTPUT"
-grep -q '^lsposed_targets=1$' <<<"$OUTPUT"
+grep -q '^lsposed_entries=1$' <<<"$OUTPUT"
 grep -q '^port_target\[0\]\.rule\[0\]=8080-8080/0$' <<<"$OUTPUT"
 grep -q '^port_target\[0\]\.rule\[1\]=20000-65535/2$' <<<"$OUTPUT"
 
@@ -128,7 +128,7 @@ grep -q '^port_target\[0\]\.rule\[16\]=17-17/0$' <<<"$OUTPUT"
 OUTPUT="$("$OUT" validate "$DYNAMIC_JSON")"
 grep -q '^configured_entries=4096$' <<<"$OUTPUT"
 grep -q '^kmod_targets=4096$' <<<"$OUTPUT"
-grep -q '^lsposed_targets=4096$' <<<"$OUTPUT"
+grep -q '^lsposed_entries=4096$' <<<"$OUTPUT"
 grep -q '^port_targets=4096$' <<<"$OUTPUT"
 
 if rg -n 'VPNHIDE_PM_COMMAND|pm list packages|discover_packages' \

@@ -293,7 +293,7 @@ int main(int argc, char **argv)
 		printf("match_mode=%s\n",
 		       summary.mode == VPNHIDE_LIST_ALLOWLIST ? "EXCLUDE" : "INCLUDE");
 		printf("kmod_targets=%d\n", summary.kmod_targets);
-		printf("lsposed_targets=%d\n", summary.lsposed_targets);
+		printf("lsposed_entries=%d\n", summary.lsposed_entries);
 		printf("port_targets=%d\n", summary.port_targets);
 		if (strcmp(argv[1], "preview") == 0) {
 			for (size_t i = 0; i < ports.count; i++) {
@@ -449,7 +449,7 @@ int main(int argc, char **argv)
 
 		fprintf(stderr, "Applying %s policy: kmod=%d lsposed=%d rejected_core=%d\n",
 			vpnhide_list_mode_name(policy_summary.mode),
-			policy_summary.kmod_targets, policy_summary.lsposed_targets,
+			policy_summary.kmod_targets, policy_summary.lsposed_entries,
 			policy_summary.rejected_core_uids);
 
 		sort_uids(targets.items, targets.count);

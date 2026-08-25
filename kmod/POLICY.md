@@ -53,8 +53,21 @@ vpnhide-ctl preview /path/to/vpnhide_config.json
 ```
 
 The preview reports `match_mode=INCLUDE` or `match_mode=EXCLUDE`. Its target
-counts are serialized list counts; in allowlist mode they are exception
-counts, not the number of effective kernel targets.
+counts are serialized list counts; `lsposed_entries` is likewise an entry
+count, not an expanded target count.
+
+The framework status stream uses an explicit presentation contract:
+
+```text
+lsposed_list_mode: SHOW
+lsposed_uids: 10001 10004
+```
+
+`SHOW` is emitted for allowlist policy, and `lsposed_uids` contains only UIDs
+that may see VPN state. LSPosed hides VPN state from every other eligible UID.
+`HIDE` is emitted for blacklist policy, and the same field contains only UIDs
+from which VPN state must be hidden. The neutral `lsposed_uids` name avoids
+misreporting allowlist exceptions as expanded targets.
 
 ABI v4 stores three match modes plus UID sets, port targets, flattened port
 rules, and per-app hook masks in variable-length sections. The complete

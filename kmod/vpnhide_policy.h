@@ -17,7 +17,7 @@ enum vpnhide_list_mode {
 	int configured_entries;
 	int rejected_core_uids;
 	int kmod_targets;
-	int lsposed_targets;
+	int lsposed_entries;
 	int port_targets;
 };
 
