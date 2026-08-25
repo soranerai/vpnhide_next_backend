@@ -36,10 +36,11 @@ per-layer list semantics with `apps[].systemPolicyExplicit: true`. In
 `BLACKLIST`, enabled fields become targets. In `ALLOWLIST`, disabled fields
 become targets. A missing marker always retains the legacy protected default,
 which keeps old configurations and newly installed system packages safe. The
-package name, user and current UID must match; a stale UID hint cannot opt in a
-different package. UID protection uses the appId component (`uid % 100000`)
-for secondary users, and core appIds below 10000 remain ineligible even with
-an explicit marker.
+package name and user identify the persisted policy. The resolver verifies that
+identity against the current Package Manager result and uses the UID from that
+result; a stale UID hint is not used to target a different package. UID
+protection uses the appId component (`uid % 100000`) for secondary users, and
+core appIds below 10000 remain ineligible even with an explicit marker.
 
 Use the userspace preview before applying a policy:
 

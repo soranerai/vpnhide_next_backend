@@ -73,6 +73,12 @@ grep -q '^lsposed_targets=3$' <<<"$OUTPUT"
 grep -q '^port_targets=5$' <<<"$OUTPUT"
 grep -q '^port_target\[[0-9]\]\.uid=10004$' <<<"$OUTPUT"
 
+# Explicit system policy is keyed by package + user. A stale persisted UID
+# must not make the current PM UID disappear from the effective target set.
+OUTPUT="$($OUT preview "$HERE/policy_allowlist_system_stale_uid.json" 10003)"
+grep -q '^kmod_targets=5$' <<<"$OUTPUT"
+grep -q '^lsposed_targets=4$' <<<"$OUTPUT"
+
 # ALLOWLIST without any active port rules: the selected exception is explicit
 # unrestricted, while unselected eligible UIDs are explicit deny-all.
 OUTPUT="$($OUT preview "$HERE/policy_allowlist.json" 10003)"

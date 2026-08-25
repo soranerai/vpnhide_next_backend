@@ -1,0 +1,16 @@
+{
+  "globalConfig": {
+    "listMode": "ALLOWLIST"
+  },
+  "apps": [
+    {
+      "packageName": "com.android.target",
+      "userId": 0,
+      "uid": 19999,
+      "kmod": false,
+      "lsposed": true,
+      "portHiding": false,
+      "systemPolicyExplicit": true
+    }
+  ]
+}

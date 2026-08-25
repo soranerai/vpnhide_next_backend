@@ -554,6 +554,7 @@ static int system_policy_is_explicit(const JSON_Array *apps, const char *package
 				     int user_id, uid_t uid)
 {
 	size_t i, count;
+	(void)uid;
 
 	if (!apps)
 		return 0;
@@ -562,15 +563,16 @@ static int system_policy_is_explicit(const JSON_Array *apps, const char *package
 		JSON_Object *app = json_array_get_object(apps, i);
 		const char *name;
 		int configured_user;
-		uid_t configured_uid;
 
 		if (!app)
 			continue;
 		name = json_object_get_string(app, "packageName");
 		configured_user = (int)json_object_get_number(app, "userId");
-		configured_uid = (uid_t)json_object_get_number(app, "uid");
-		if (name && !strcmp(name, package) && configured_user == user_id &&
-		    configured_uid == uid)
+		/* packageName + userId is the persisted application identity.  The
+		 * UID is deliberately not part of this lookup: Android can assign a
+		 * new UID after reinstall/update, while the current PM record is the
+		 * authoritative UID used by the caller. */
+		if (name && !strcmp(name, package) && configured_user == user_id)
 			return json_object_get_boolean(app, "systemPolicyExplicit") == 1;
 	}
 	return 0;
@@ -581,6 +583,7 @@ static int selected_for_explicit_system_layer(
 		const char *field)
 {
 	size_t i, count;
+	(void)uid;
 
 	if (!apps)
 		return 0;
@@ -589,15 +592,12 @@ static int selected_for_explicit_system_layer(
 		JSON_Object *app = json_array_get_object(apps, i);
 		const char *name;
 		int configured_user;
-		uid_t configured_uid;
 
 		if (!app)
 			continue;
 		name = json_object_get_string(app, "packageName");
 		configured_user = (int)json_object_get_number(app, "userId");
-		configured_uid = (uid_t)json_object_get_number(app, "uid");
-		if (name && !strcmp(name, package) && configured_user == user_id &&
-		    configured_uid == uid)
+		if (name && !strcmp(name, package) && configured_user == user_id)
 			return json_object_get_boolean(app, field) == 1;
 	}
 	return 0;
