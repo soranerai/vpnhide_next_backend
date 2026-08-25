@@ -202,10 +202,14 @@ def native_build_one(
     env["KDIR"] = kdir
     env["CLANG_DIR"] = clang_dir
     # Android 17's standalone tree needs the full-kernel export list for
-    # external modpost. Older Ylarod DDK trees already feed their own symbol
-    # list to Kbuild; adding it again causes duplicate-export failures.
+    # external modpost if Module.symvers is not already in the tree.
+    # Passing both causes modpost to fail with duplicate-export errors.
     symvers = Path(kdir) / "vmlinux.symvers"
-    if kmi == "android17-6.18" and symvers.is_file():
+    if (
+        kmi == "android17-6.18"
+        and symvers.is_file()
+        and not (Path(kdir) / "Module.symvers").is_file()
+    ):
         env["KBUILD_EXTRA_SYMBOLS"] = str(symvers)
 
     # `make strip` does the actual kernel-module build. Let make decide
