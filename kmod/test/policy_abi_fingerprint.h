@@ -36,16 +36,23 @@ _Static_assert(offsetof(struct vpnhide_policy_payload_v3, port_rules) == 560,
 	       "v3 port rule section offset must remain stable");
 _Static_assert(offsetof(struct vpnhide_policy_payload_v3, app_hook_masks) == 568,
 	       "v3 app mask section offset must remain stable");
+_Static_assert(sizeof(struct vpnhide_policy_payload_v4) == 592,
+	       "v4 policy header must be fixed-width");
+_Static_assert(offsetof(struct vpnhide_policy_payload_v4, kmod_uids) == 552,
+	       "v4 section directory offset must remain stable");
+_Static_assert(offsetof(struct vpnhide_policy_payload_v4, app_hook_masks) == 584,
+	       "v4 app mask section offset must remain stable");
 
 static void print_policy_abi_fingerprint(void)
 {
-	printf("version=%u v2=%u v3=%u max=%u legacy=%u/%u "
-	       "sizes=%zu/%zu/%zu/%zu/%zu/%zu/%zu/%zu/%zu "
+	printf("version=%u v2=%u v3=%u v4=%u max=%u legacy=%u/%u "
+	       "sizes=%zu/%zu/%zu/%zu/%zu/%zu/%zu/%zu/%zu/%zu "
 	       "offsets=%zu/%zu/%zu/%zu/%zu/%zu/%zu/%zu/%zu "
 	       "ioctls=%lu/%lu/%lu\n",
 	       VPNHIDE_POLICY_ABI_VERSION,
 	       VPNHIDE_POLICY_ABI_VERSION_V2,
 	       VPNHIDE_POLICY_ABI_VERSION_V3,
+	       VPNHIDE_POLICY_ABI_VERSION_V4,
 	       VPNHIDE_POLICY_MAX_BYTES,
 	       VPNHIDE_LEGACY_TARGET_UIDS,
 	       VPNHIDE_LEGACY_PORT_RULES_PER_UID,
@@ -57,6 +64,7 @@ static void print_policy_abi_fingerprint(void)
 	       sizeof(struct vpnhide_port_target_v3),
 	       sizeof(struct vpnhide_app_hook_mask_v3),
 	       sizeof(struct vpnhide_policy_payload_v3),
+	       sizeof(struct vpnhide_policy_payload_v4),
 	       sizeof(struct vpnhide_policy_ioctl),
 	       offsetof(struct vpnhide_policy_ioctl, abi_version),
 	       offsetof(struct vpnhide_policy_ioctl, payload_size),

@@ -611,31 +611,40 @@ bool is_active_vpn_ifname(const char *name) {
   return found;
 }
 
-bool is_target_uid_val(uid_t uid) {
-  struct vpnhide_policy_snapshot *snapshot;
+bool vpnhide_uid_matches_mode(const uid_t *uids, u32 count, u32 mode,
+                              uid_t uid) {
   bool found = false;
   int lo, hi;
 
-  if (uid == 0 || uid == 1000)
+  if (uid == 0 || uid == 1000 || (uid % 100000) < 10000)
     return false;
-
-  rcu_read_lock();
-  snapshot = rcu_dereference(global_policy_snapshot);
-  if (snapshot && snapshot->kmod_count) {
+  if (count) {
     lo = 0;
-    hi = (int)snapshot->kmod_count - 1;
+    hi = (int)count - 1;
     while (lo <= hi) {
       int mid = lo + ((hi - lo) >> 1);
-      if (snapshot->kmod_uids[mid] == uid) {
+      if (uids[mid] == uid) {
         found = true;
         break;
       }
-      if (snapshot->kmod_uids[mid] < uid)
+      if (uids[mid] < uid)
         lo = mid + 1;
       else
         hi = mid - 1;
     }
   }
+  return mode == VPNHIDE_MATCH_EXCLUDE ? !found : found;
+}
+
+bool is_target_uid_val(uid_t uid) {
+  struct vpnhide_policy_snapshot *snapshot;
+  bool found = false;
+  rcu_read_lock();
+  snapshot = rcu_dereference(global_policy_snapshot);
+  if (snapshot)
+    found = vpnhide_uid_matches_mode(snapshot->kmod_uids,
+                                     snapshot->kmod_count,
+                                     snapshot->kmod_match_mode, uid);
   rcu_read_unlock();
   return found;
 }
@@ -666,6 +675,8 @@ struct kmod_uid_stats_total {
 
 static struct kmod_uid_stats_total *kmod_stats;
 static u32 kmod_stats_count;
+static u32 kmod_stats_capacity;
+#define VPNHIDE_UID_STATS_CAPACITY 4096U
 DEFINE_SPINLOCK(kmod_stats_lock);
 static atomic64_t kmod_stats_sequence = ATOMIC64_INIT(0);
 static u64 kmod_stats_session_id;
@@ -772,7 +783,7 @@ void record_kmod_intercept(uid_t uid, int type) {
   int lo, hi;
   unsigned long flags;
 
-  if (uid == 0 || uid == 1000)
+  if (uid == 0 || uid == 1000 || (uid % 100000) < 10000)
     return;
 
   spin_lock_irqsave(&kmod_stats_lock, flags);
@@ -803,6 +814,29 @@ void record_kmod_intercept(uid_t uid, int type) {
     else
       hi = i - 1;
   }
+  if (kmod_stats_count >= kmod_stats_capacity) {
+    spin_unlock_irqrestore(&kmod_stats_lock, flags);
+    return;
+  }
+  memmove(&kmod_stats[lo + 1], &kmod_stats[lo],
+          (kmod_stats_count - lo) * sizeof(*kmod_stats));
+  memset(&kmod_stats[lo], 0, sizeof(*kmod_stats));
+  kmod_stats[lo].uid = uid;
+  kmod_stats_count++;
+  if (type == 0)
+    kmod_stats[lo].ioctl_count++;
+  else if (type == 1)
+    kmod_stats[lo].netlink_count++;
+  else if (type == 2)
+    kmod_stats[lo].proc_count++;
+  else if (type == 3)
+    kmod_stats[lo].sockopt_count++;
+  else if (type == 4)
+    kmod_stats[lo].connect_count++;
+  else if (type == 5)
+    kmod_stats[lo].getname_count++;
+  else if (type == 6)
+    kmod_stats[lo].port_count++;
   spin_unlock_irqrestore(&kmod_stats_lock, flags);
 }
 
@@ -829,36 +863,127 @@ static void vpnhide_kmod_record_java_stat(uid_t uid, const char *hook, u64 count
     else
       hi = i - 1;
   }
+  if (uid != 0 && uid != 1000 && (uid % 100000) >= 10000 &&
+      kmod_stats_count < kmod_stats_capacity) {
+    i = lo;
+    memmove(&kmod_stats[i + 1], &kmod_stats[i],
+            (kmod_stats_count - i) * sizeof(*kmod_stats));
+    memset(&kmod_stats[i], 0, sizeof(*kmod_stats));
+    kmod_stats[i].uid = uid;
+    kmod_stats_count++;
+    if (strcmp(hook, "PackageManager") == 0) kmod_stats[i].java_pm_count += count;
+    else if (strcmp(hook, "UserManager") == 0) kmod_stats[i].java_um_count += count;
+    else if (strcmp(hook, "NetworkCapabilities") == 0) kmod_stats[i].java_nc_count += count;
+    else if (strcmp(hook, "NetworkInfo") == 0) kmod_stats[i].java_ni_count += count;
+    else if (strcmp(hook, "Network") == 0) kmod_stats[i].java_net_count += count;
+    else if (strcmp(hook, "LinkProperties") == 0) kmod_stats[i].java_lp_count += count;
+    else if (strcmp(hook, "ConnectivityService") == 0) kmod_stats[i].java_cs_count += count;
+  }
   spin_unlock_irqrestore(&kmod_stats_lock, flags);
 }
 
 
+static bool policy_has_inverted_stats_layer(
+    const struct vpnhide_policy_snapshot *snapshot) {
+  return snapshot->kmod_match_mode == VPNHIDE_MATCH_EXCLUDE ||
+         snapshot->lsposed_match_mode == VPNHIDE_MATCH_EXCLUDE ||
+         snapshot->port_match_mode == VPNHIDE_MATCH_EXCLUDE;
+}
+
+static bool policy_uid_has_stats(const struct vpnhide_policy_snapshot *snapshot,
+                                 uid_t uid) {
+  int lo = 0, hi = (int)snapshot->port_target_count - 1;
+
+  if (vpnhide_uid_matches_mode(snapshot->kmod_uids, snapshot->kmod_count,
+                               snapshot->kmod_match_mode, uid) ||
+      vpnhide_uid_matches_mode(snapshot->lsposed_uids, snapshot->lsposed_count,
+                               snapshot->lsposed_match_mode, uid))
+    return true;
+  while (lo <= hi) {
+    int mid = lo + ((hi - lo) >> 1);
+    const struct vpnhide_port_target_v3 *target =
+        &snapshot->port_targets[mid];
+    if (target->uid == uid)
+      return target->mode != VH_PORT_POLICY_UNRESTRICTED;
+    if (target->uid < uid)
+      lo = mid + 1;
+    else
+      hi = mid - 1;
+  }
+  return snapshot->port_match_mode == VPNHIDE_MATCH_EXCLUDE &&
+         vpnhide_uid_matches_mode(NULL, 0, VPNHIDE_MATCH_EXCLUDE, uid);
+}
+
 static int kmod_stats_reconcile(const struct vpnhide_policy_snapshot *snapshot) {
   struct kmod_uid_stats_total *replacement = NULL, *old;
   unsigned long flags;
-  u32 i, j = 0;
+  u32 i, j = 0, replacement_count = 0;
+  bool inverted = policy_has_inverted_stats_layer(snapshot);
+  u64 requested = (u64)snapshot->kmod_count + snapshot->lsposed_count +
+                  snapshot->port_target_count;
+  u32 capacity = inverted || requested > VPNHIDE_UID_STATS_CAPACITY ?
+                     VPNHIDE_UID_STATS_CAPACITY : (u32)requested;
 
-  if (snapshot->kmod_count) {
-    replacement = kvmalloc_array(snapshot->kmod_count,
+  if (capacity) {
+    replacement = kvmalloc_array(capacity,
                                  sizeof(*replacement), GFP_KERNEL | __GFP_ZERO);
     if (!replacement)
       return -ENOMEM;
-    for (i = 0; i < snapshot->kmod_count; i++)
-      replacement[i].uid = snapshot->kmod_uids[i];
+  }
+
+  if (!inverted) {
+    u32 ki = 0, li = 0, pi = 0;
+    while (replacement_count < capacity) {
+      uid_t next = 0;
+      bool have = false;
+      while (pi < snapshot->port_target_count &&
+             snapshot->port_targets[pi].mode == VH_PORT_POLICY_UNRESTRICTED)
+        pi++;
+      if (ki < snapshot->kmod_count) {
+        next = snapshot->kmod_uids[ki];
+        have = true;
+      }
+      if (li < snapshot->lsposed_count &&
+          (!have || snapshot->lsposed_uids[li] < next)) {
+        next = snapshot->lsposed_uids[li];
+        have = true;
+      }
+      if (pi < snapshot->port_target_count &&
+          (!have || snapshot->port_targets[pi].uid < next)) {
+        next = snapshot->port_targets[pi].uid;
+        have = true;
+      }
+      if (!have)
+        break;
+      replacement[replacement_count++].uid = next;
+      while (ki < snapshot->kmod_count && snapshot->kmod_uids[ki] == next)
+        ki++;
+      while (li < snapshot->lsposed_count && snapshot->lsposed_uids[li] == next)
+        li++;
+      while (pi < snapshot->port_target_count &&
+             snapshot->port_targets[pi].uid == next)
+        pi++;
+    }
   }
 
   spin_lock_irqsave(&kmod_stats_lock, flags);
-  /* Both arrays are sorted by UID.  Preserve counters with a merge instead
-   * of turning every policy reload into O(new_count * old_count). */
-  for (i = 0; i < snapshot->kmod_count && j < kmod_stats_count; i++) {
-    while (j < kmod_stats_count && kmod_stats[j].uid < replacement[i].uid)
-      j++;
-    if (j < kmod_stats_count && kmod_stats[j].uid == replacement[i].uid)
-      replacement[i] = kmod_stats[j++];
+  if (inverted) {
+    for (j = 0; j < kmod_stats_count && replacement_count < capacity; j++)
+      if (policy_uid_has_stats(snapshot, kmod_stats[j].uid))
+        replacement[replacement_count++] = kmod_stats[j];
+  } else {
+    j = 0;
+    for (i = 0; i < replacement_count; i++) {
+      while (j < kmod_stats_count && kmod_stats[j].uid < replacement[i].uid)
+        j++;
+      if (j < kmod_stats_count && kmod_stats[j].uid == replacement[i].uid)
+        replacement[i] = kmod_stats[j++];
+    }
   }
   old = kmod_stats;
   kmod_stats = replacement;
-  kmod_stats_count = snapshot->kmod_count;
+  kmod_stats_count = replacement_count;
+  kmod_stats_capacity = capacity;
   spin_unlock_irqrestore(&kmod_stats_lock, flags);
   kvfree(old);
   return 0;
@@ -1106,12 +1231,80 @@ int vpnhide_apply_policy_v3(const void *payload, size_t payload_size,
   return publish_policy_snapshot(snapshot, expected_generation);
 }
 
+static struct vpnhide_policy_snapshot *
+policy_snapshot_from_v4(const struct vpnhide_policy_payload_v4 *payload,
+                        size_t payload_size)
+{
+  struct vpnhide_policy_payload_v3 *v3;
+  struct vpnhide_policy_snapshot *snapshot;
+  size_t delta = sizeof(*payload) - sizeof(*v3);
+  size_t v3_size;
+
+  if (!payload || payload_size < sizeof(*payload) ||
+      payload->total_size != payload_size || payload->reserved ||
+      payload->kmod_match_mode > VPNHIDE_MATCH_EXCLUDE ||
+      payload->lsposed_match_mode > VPNHIDE_MATCH_EXCLUDE ||
+      payload->port_match_mode > VPNHIDE_MATCH_EXCLUDE)
+    return ERR_PTR(-EINVAL);
+  if (payload->kmod_uids.offset < sizeof(*payload) ||
+      payload->lsposed_uids.offset < sizeof(*payload) ||
+      payload->port_targets.offset < sizeof(*payload) ||
+      payload->port_rules.offset < sizeof(*payload) ||
+      payload->app_hook_masks.offset < sizeof(*payload))
+    return ERR_PTR(-EINVAL);
+  v3_size = payload_size - delta;
+  v3 = kvzalloc(v3_size, GFP_KERNEL);
+  if (!v3)
+    return ERR_PTR(-ENOMEM);
+  v3->total_size = v3_size;
+  v3->flags = payload->flags;
+  v3->active_hooks_mask = payload->active_hooks_mask;
+  v3->java_hooks_mask = payload->java_hooks_mask;
+  v3->debug_enabled = payload->debug_enabled;
+  v3->iface_count = payload->iface_count;
+  memcpy(v3->iface_prefixes, payload->iface_prefixes,
+         sizeof(v3->iface_prefixes));
+#define V4_SECTION(name) do { \
+  v3->name = payload->name; \
+  v3->name.offset -= delta; \
+} while (0)
+  V4_SECTION(kmod_uids);
+  V4_SECTION(lsposed_uids);
+  V4_SECTION(port_targets);
+  V4_SECTION(port_rules);
+  V4_SECTION(app_hook_masks);
+#undef V4_SECTION
+  memcpy((u8 *)v3 + sizeof(*v3), (const u8 *)payload + sizeof(*payload),
+         payload_size - sizeof(*payload));
+  snapshot = policy_snapshot_from_v3(v3, v3_size);
+  kvfree(v3);
+  if (!IS_ERR(snapshot)) {
+    snapshot->kmod_match_mode = payload->kmod_match_mode;
+    snapshot->lsposed_match_mode = payload->lsposed_match_mode;
+    snapshot->port_match_mode = payload->port_match_mode;
+  }
+  return snapshot;
+}
+
+int vpnhide_apply_policy_v4(const void *payload, size_t payload_size,
+                            u64 expected_generation)
+{
+  struct vpnhide_policy_snapshot *snapshot =
+      policy_snapshot_from_v4(payload, payload_size);
+  if (IS_ERR(snapshot))
+    return PTR_ERR(snapshot);
+  return publish_policy_snapshot(snapshot, expected_generation);
+}
+
 const struct vpnhide_port_target_v3 *
 vpnhide_find_port_target(const struct vpnhide_policy_snapshot *snapshot,
                          uid_t uid)
 {
+  static const struct vpnhide_port_target_v3 deny_all = {
+      .mode = VH_PORT_POLICY_DENY_ALL,
+  };
   int lo = 0, hi;
-  if (!snapshot || !snapshot->port_target_count)
+  if (!snapshot)
     return NULL;
   hi = (int)snapshot->port_target_count - 1;
   while (lo <= hi) {
@@ -1125,6 +1318,9 @@ vpnhide_find_port_target(const struct vpnhide_policy_snapshot *snapshot,
     else
       hi = mid - 1;
   }
+  if (snapshot->port_match_mode == VPNHIDE_MATCH_EXCLUDE &&
+      vpnhide_uid_matches_mode(NULL, 0, VPNHIDE_MATCH_EXCLUDE, uid))
+    return &deny_all;
   return NULL;
 }
 
@@ -1333,6 +1529,10 @@ static ssize_t vpnhide_dev_read(struct file *file, char __user *buf,
 
       rcu_read_lock();
       snapshot = rcu_dereference(global_policy_snapshot);
+      offset += scnprintf(reader->buf + offset, reader_capacity - offset,
+                          "lsposed_match_mode: %u\n",
+                          snapshot ? snapshot->lsposed_match_mode :
+                                     VPNHIDE_MATCH_INCLUDE);
       offset +=
           scnprintf(reader->buf + offset, reader_capacity - offset, "lsposed_targets:");
       if (snapshot) {
@@ -1506,6 +1706,10 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
       if (request.payload_size < sizeof(struct vpnhide_policy_payload_v3) ||
           request.payload_size > VPNHIDE_POLICY_MAX_BYTES)
         return -EINVAL;
+    } else if (request.abi_version == VPNHIDE_POLICY_ABI_VERSION_V4) {
+      if (request.payload_size < sizeof(struct vpnhide_policy_payload_v4) ||
+          request.payload_size > VPNHIDE_POLICY_MAX_BYTES)
+        return -EINVAL;
     } else {
       return -EPROTONOSUPPORT;
     }
@@ -1517,7 +1721,10 @@ static int handle_vpnhide_ioctl(unsigned int cmd, unsigned long arg) {
       kvfree(payload);
       return -EFAULT;
     }
-    if (request.abi_version == VPNHIDE_POLICY_ABI_VERSION_V3)
+    if (request.abi_version == VPNHIDE_POLICY_ABI_VERSION_V4)
+      policy_ret = vpnhide_apply_policy_v4(payload, request.payload_size,
+                                           request.expected_generation);
+    else if (request.abi_version == VPNHIDE_POLICY_ABI_VERSION_V3)
       policy_ret = vpnhide_apply_policy_v3(payload, request.payload_size,
                                            request.expected_generation);
     else

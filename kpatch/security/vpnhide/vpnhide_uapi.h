@@ -207,7 +207,11 @@ struct vpnhide_app_hook_ioctl_data {
  * through the payload-size/ABI check instead of silently applying garbage. */
 #define VPNHIDE_POLICY_ABI_VERSION_V2 2
 #define VPNHIDE_POLICY_ABI_VERSION_V3 3
-#define VPNHIDE_POLICY_ABI_VERSION VPNHIDE_POLICY_ABI_VERSION_V3
+#define VPNHIDE_POLICY_ABI_VERSION_V4 4
+#define VPNHIDE_POLICY_ABI_VERSION VPNHIDE_POLICY_ABI_VERSION_V4
+
+#define VPNHIDE_MATCH_INCLUDE 0
+#define VPNHIDE_MATCH_EXCLUDE 1
 #define VPNHIDE_POLICY_MAX_BYTES (16U * 1024U * 1024U)
 struct vpnhide_policy_payload {
 	struct vpnhide_target_bundle targets;
@@ -256,6 +260,25 @@ struct vpnhide_policy_payload_v3 {
 	__u32 java_hooks_mask;
 	__u32 debug_enabled;
 	__u32 iface_count;
+	char iface_prefixes[MAX_IFACE_PREFIXES][MAX_IFACE_LEN];
+	struct vpnhide_policy_section_v3 kmod_uids;
+	struct vpnhide_policy_section_v3 lsposed_uids;
+	struct vpnhide_policy_section_v3 port_targets;
+	struct vpnhide_policy_section_v3 port_rules;
+	struct vpnhide_policy_section_v3 app_hook_masks;
+};
+
+struct vpnhide_policy_payload_v4 {
+	__u32 total_size;
+	__u32 flags;
+	__u32 active_hooks_mask;
+	__u32 java_hooks_mask;
+	__u32 debug_enabled;
+	__u32 iface_count;
+	__u32 kmod_match_mode;
+	__u32 lsposed_match_mode;
+	__u32 port_match_mode;
+	__u32 reserved;
 	char iface_prefixes[MAX_IFACE_PREFIXES][MAX_IFACE_LEN];
 	struct vpnhide_policy_section_v3 kmod_uids;
 	struct vpnhide_policy_section_v3 lsposed_uids;
