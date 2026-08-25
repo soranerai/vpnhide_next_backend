@@ -2,8 +2,8 @@ _2026-08-08_
 
 ## English
 
-Policy resolver now supports explicit, Package Manager-verified system application targets while retaining safe legacy defaults.
+Policy ABI v4 moves allowlist inversion into the kernel and exposes LSPosed lists as explicit SHOW/HIDE entries, without daemon-side target enumeration.
 
 ## Русский
 
-Resolver политик теперь поддерживает явные цели среди системных приложений с проверкой через Package Manager, сохраняя безопасное поведение старых конфигураций.
+Policy ABI v4 переносит инверсию allowlist в ядро и передаёт LSPosed явные списки SHOW/HIDE без перечисления целей демоном.

@@ -980,7 +980,7 @@ static void serve_stats_client(int listen_fd, uid_t allowed_uid,
 	close(client);
 }
 
-static void reload_policy(const char *ctl, const char *config, const char *self_uid)
+static void reload_policy(const char *ctl, const char *config)
 {
 	pid_t pid;
 	int status;
@@ -994,10 +994,7 @@ static void reload_policy(const char *ctl, const char *config, const char *self_
 		return;
 	}
 	if (pid == 0) {
-		if (self_uid && self_uid[0])
-			execl(ctl, ctl, "load", config, self_uid, (char *)NULL);
-		else
-			execl(ctl, ctl, "load", config, (char *)NULL);
+		execl(ctl, ctl, "load", config, (char *)NULL);
 		_exit(127);
 	}
 	if (waitpid(pid, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
@@ -1005,7 +1002,7 @@ static void reload_policy(const char *ctl, const char *config, const char *self_
 }
 
 static void drain_config_events(int inotify_fd, const char *config,
-					const char *ctl, const char *self_uid)
+					const char *ctl)
 {
 	char buffer[4096];
 	ssize_t length;
@@ -1025,35 +1022,8 @@ static void drain_config_events(int inotify_fd, const char *config,
 	}
 	if (changed) {
 		fprintf(stderr, "vpnhide-daemon: configuration changed, reloading\n");
-		reload_policy(ctl, config, self_uid);
+		reload_policy(ctl, config);
 	}
-}
-
-/* Package Manager reconciliation is deliberately filesystem-free. The
- * daemon polls the same `pm` interface used by vpnhide_ctl and keeps only a
- * fingerprint in memory; it never opens or watches Package Manager state
- * files directly. */
-static int package_fingerprint(unsigned long long *out)
-{
-	FILE *pipe;
-	char line[1024];
-	unsigned long long hash = 1469598103934665603ULL;
-	unsigned int lines = 0;
-
-	pipe = popen("pm list packages -f -U --user all 2>/dev/null", "r");
-	if (!pipe)
-		return -1;
-	while (fgets(line, sizeof(line), pipe)) {
-		for (size_t i = 0; line[i] != '\0'; i++) {
-			hash ^= (unsigned char)line[i];
-			hash *= 1099511628211ULL;
-		}
-		lines++;
-	}
-	if (pclose(pipe) != 0 || lines == 0)
-		return -1;
-	*out = hash;
-	return 0;
 }
 
 struct owned_port_list {
@@ -1356,11 +1326,7 @@ int main(int argc, char **argv)
 		get_time_ms() + IFACE_RESCAN_INTERVAL_MS;
 	bool update_pending = false;
 	int retry_count = 0;
-	unsigned long long pm_reload_due = 0;
-	unsigned long long next_pm_poll = get_time_ms();
 	unsigned long long next_stats_sample = get_time_ms() + STATS_RESOLUTION_SEC * 1000ULL;
-	unsigned long long pm_fingerprint = 0;
-	bool pm_fingerprint_valid = false;
 	unsigned long long owned_ports_due = 0;
 	unsigned long long next_owned_ports_reconcile = get_time_ms() + 60000;
 
@@ -1380,20 +1346,6 @@ int main(int argc, char **argv)
 				(int)(next_iface_rescan - now);
 			if (poll_timeout < 0 || iface_timeout < poll_timeout)
 				poll_timeout = iface_timeout;
-		}
-		if (pm_reload_due) {
-			unsigned long long now = get_time_ms();
-			int pm_timeout = now >= pm_reload_due ? 0 :
-				(int)(pm_reload_due - now);
-			if (poll_timeout < 0 || pm_timeout < poll_timeout)
-				poll_timeout = pm_timeout;
-		}
-		if (config && ctl) {
-			unsigned long long now = get_time_ms();
-			int pm_timeout = now >= next_pm_poll ? 0 :
-				(int)(next_pm_poll - now);
-			if (poll_timeout < 0 || pm_timeout < poll_timeout)
-				poll_timeout = pm_timeout;
 		}
 		{
 			unsigned long long now = get_time_ms();
@@ -1472,7 +1424,7 @@ int main(int argc, char **argv)
 		}
 		if (config_index >= 0 && ret > 0 &&
 		    (pfds[config_index].revents & POLLIN)) {
-			drain_config_events(config_fd, config, ctl, self_uid);
+			drain_config_events(config_fd, config, ctl);
 			owned_ports_due = get_time_ms() + 100;
 		}
 		if (stats_index >= 0) {
@@ -1498,21 +1450,6 @@ int main(int argc, char **argv)
 				next_stats_sample += STATS_RESOLUTION_SEC * 1000ULL;
 			} while (next_stats_sample <= get_time_ms());
 			sample_stats(fd, &stats_ring);
-		}
-		if (config && ctl && get_time_ms() >= next_pm_poll) {
-			unsigned long long current_fingerprint;
-			next_pm_poll = get_time_ms() + 30000;
-			if (package_fingerprint(&current_fingerprint) == 0) {
-				if (pm_fingerprint_valid && current_fingerprint != pm_fingerprint)
-					pm_reload_due = get_time_ms() + 500;
-				pm_fingerprint = current_fingerprint;
-				pm_fingerprint_valid = true;
-			}
-		}
-		if (pm_reload_due && get_time_ms() >= pm_reload_due) {
-			pm_reload_due = 0;
-			reload_policy(ctl, config, self_uid);
-			owned_ports_due = get_time_ms() + 100;
 		}
 		if ((owned_ports_due && get_time_ms() >= owned_ports_due) ||
 		    get_time_ms() >= next_owned_ports_reconcile) {

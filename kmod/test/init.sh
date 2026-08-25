@@ -44,8 +44,7 @@ if apk add --no-cache iproute2 python3 >/dev/null 2>&1; then echo "IPROUTE2=ok";
 if insmod /vpnhide_kmod.ko; then echo "INSMOD=ok"; else echo "INSMOD=FAIL"; fi
 # Wait for the device node /dev/vpnhide_ctrl to populate
 sleep 1
-# Configure all policy state through the transactional JSON path. The PM
-# command is an in-VM fixture; production uses the real Package Manager.
+# Configure all policy state through the transactional JSON path.
 TEST_CONFIG=/tmp/vpnhide-test-policy.json
 cat > "$TEST_CONFIG" <<'EOF'
 {
@@ -55,9 +54,8 @@ cat > "$TEST_CONFIG" <<'EOF'
   "portRules": [{"enabled":true, "packageName":"com.vpnhide.test", "userId":1, "startPort":0, "endPort":65535, "protocol":"BOTH"}]
 }
 EOF
-export VPNHIDE_PM_COMMAND="echo 'package:/data/app/test/base.apk=com.vpnhide.test uid:115555'; echo 'package:/data/app/keep/base.apk=com.vpnhide.keep uid:115556'; echo 'package:/system/priv-app/Settings/Settings.apk=com.android.settings uid:1000'"
 apply_policy() {
-	/vpnhide-ctl load "$TEST_CONFIG" 0
+	/vpnhide-ctl load "$TEST_CONFIG"
 	rc=$?
 	echo "POLICY_APPLY_RC=$rc"
 	return "$rc"
@@ -75,7 +73,7 @@ cat > "$ALLOWLIST_CONFIG" <<'EOF'
 }
 EOF
 apply_allowlist() {
-	/vpnhide-ctl load "$ALLOWLIST_CONFIG" 0
+	/vpnhide-ctl load "$ALLOWLIST_CONFIG"
 	rc=$?
 	echo "ALLOWLIST_APPLY_RC=$rc"
 	return "$rc"
@@ -182,6 +180,16 @@ done < /tmp/py_res.log
 
 # --- end-to-end allowlist check --------------------------------------------
 apply_allowlist
+_al_status=$(timeout 2 cat /dev/vpnhide_ctrl 2>/dev/null || true)
+if printf '%s\n' "$_al_status" | grep -q '^lsposed_list_mode: SHOW$' &&
+   printf '%s\n' "$_al_status" | grep -Eq '^lsposed_uids:.*(^| )115556( |$)' &&
+   ! printf '%s\n' "$_al_status" | grep -Eq '^lsposed_uids:.*(^| )115555( |$)'; then
+	echo "RESULT allowlist_lsposed_show_list=PASS"
+	PASS=$((PASS + 1))
+else
+	echo "RESULT allowlist_lsposed_show_list=FAIL"
+	FAIL=$((FAIL + 1))
+fi
 _al_nt=$(ip addr show 2>/dev/null | grep -c -- "vpn0")
 _al_keep=$(su testallow -c "ip addr show" 2>/dev/null | grep -c -- "vpn0")
 _al_target=$(su testuser -c "ip addr show" 2>/dev/null | grep -c -- "vpn0")

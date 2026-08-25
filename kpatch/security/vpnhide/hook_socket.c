@@ -715,19 +715,9 @@ void vpnhide_udp_rates_prune(const struct vpnhide_policy_snapshot *snapshot)
 	unsigned int bucket;
 	spin_lock(&rl_lock);
 	hash_for_each_safe(rl_table, bucket, tmp, rate, node) {
-		int lo = 0, hi = snapshot ? snapshot->kmod_count - 1 : -1;
-		bool keep = false;
-		while (lo <= hi) {
-			int mid = lo + ((hi - lo) >> 1);
-			if (snapshot->kmod_uids[mid] == rate->uid) {
-				keep = true;
-				break;
-			}
-			if (snapshot->kmod_uids[mid] < rate->uid)
-				lo = mid + 1;
-			else
-				hi = mid - 1;
-		}
+		bool keep = snapshot && vpnhide_uid_matches_mode(
+			snapshot->kmod_uids, snapshot->kmod_count,
+			snapshot->kmod_match_mode, rate->uid);
 		if (!keep) {
 			hash_del(&rate->node);
 			kfree(rate);

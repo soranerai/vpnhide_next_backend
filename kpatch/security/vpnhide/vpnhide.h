@@ -106,6 +106,9 @@ struct vpnhide_policy_snapshot {
 	u32 java_hooks_mask;
 	u32 debug_enabled;
 	u32 flags;
+	u32 kmod_match_mode;
+	u32 lsposed_match_mode;
+	u32 port_match_mode;
 	struct vpnhide_iface_ioctl_data iface_prefixes;
 	u32 kmod_count;
 	u32 lsposed_count;
@@ -201,6 +204,8 @@ bool is_active_vpn_ifindex(u32 ifindex);
 bool is_active_vpn_ifname(const char *name);
 bool is_target_uid_val(uid_t uid);
 bool is_target_uid(void);
+bool vpnhide_uid_matches_mode(const uid_t *uids, u32 count, u32 mode,
+			      uid_t uid);
 bool vpnhide_uid_owns_port(uid_t uid, u16 port, u8 protocol, u8 family,
 			   const u32 address[4]);
 void vpnhide_record_bound_socket(uid_t uid, struct sock *sk);
@@ -209,6 +214,8 @@ void vpnhide_listen_post(struct socket *sock, int error);
 int vpnhide_apply_policy(const struct vpnhide_policy_payload *payload,
 			 u64 expected_generation);
 int vpnhide_apply_policy_v3(const void *payload, size_t payload_size,
+			    u64 expected_generation);
+int vpnhide_apply_policy_v4(const void *payload, size_t payload_size,
 			    u64 expected_generation);
 const struct vpnhide_port_target_v3 *
 vpnhide_find_port_target(const struct vpnhide_policy_snapshot *snapshot,

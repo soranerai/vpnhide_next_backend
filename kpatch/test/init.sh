@@ -83,9 +83,8 @@ cat > "$TEST_CONFIG" <<'EOF'
   "portRules": [{"enabled":true, "packageName":"com.vpnhide.test", "userId":1, "startPort":0, "endPort":65535, "protocol":"BOTH"}]
 }
 EOF
-export VPNHIDE_PM_COMMAND="echo 'package:/data/app/~~test==/test-install==/base.apk=com.vpnhide.test uid:115555'; echo 'package:/data/app/~~keep==/keep-install==/base.apk=com.vpnhide.keep uid:115556'; echo 'package:/system/priv-app/Settings/Settings.apk=com.android.settings uid:1000'"
 apply_policy() {
-	/vpnhide-ctl load "$TEST_CONFIG" 0
+	/vpnhide-ctl load "$TEST_CONFIG"
 	rc=$?
 	echo "POLICY_APPLY_RC=$rc"
 	return "$rc"
@@ -106,7 +105,7 @@ cat > "$ALLOWLIST_CONFIG" <<'EOF'
 }
 EOF
 apply_allowlist() {
-	/vpnhide-ctl load "$ALLOWLIST_CONFIG" 0
+	/vpnhide-ctl load "$ALLOWLIST_CONFIG"
 	rc=$?
 	echo "ALLOWLIST_APPLY_RC=$rc"
 	return "$rc"
@@ -211,6 +210,16 @@ done < /tmp/py_res.log
 # testallow is selected and must retain visibility; testuser is unselected
 # and must receive the same hiding treatment as the blacklist target.
 apply_allowlist
+_al_status=$(timeout 2 cat /dev/vpnhide_ctrl 2>/dev/null || true)
+if printf '%s\n' "$_al_status" | grep -q '^lsposed_list_mode: SHOW$' &&
+   printf '%s\n' "$_al_status" | grep -Eq '^lsposed_uids:.*(^| )115556( |$)' &&
+   ! printf '%s\n' "$_al_status" | grep -Eq '^lsposed_uids:.*(^| )115555( |$)'; then
+    echo "RESULT allowlist_lsposed_show_list=PASS"
+    PASS=$((PASS + 1))
+else
+    echo "RESULT allowlist_lsposed_show_list=FAIL"
+    FAIL=$((FAIL + 1))
+fi
 _al_nt=$(ip addr show 2>/dev/null | grep -c -- "vpn0")
 _al_keep=$(su testallow -c "ip addr show" 2>/dev/null | grep -c -- "vpn0")
 _al_target=$(su testuser -c "ip addr show" 2>/dev/null | grep -c -- "vpn0")
