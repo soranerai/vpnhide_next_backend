@@ -1,9 +1,12 @@
-# Target policy contract
+# Policy ABI v4 contract
 
-`vpnhide_ctl` accepts a declarative policy in `vpnhide_config.json` and
-translates it into the effective UID snapshots consumed by the kernel.
+`vpnhide_config.json` is the sole source of policy truth. The Android
+application owns package discovery, system-app defaults, current UID
+reconciliation, and persistence. `vpnhide-ctl` only validates and serializes
+that declarative configuration. The daemon never queries Package Manager and
+never expands package names into effective UID sets.
 
-The optional field is:
+The mode is selected by:
 
 ```json
 {
@@ -13,91 +16,77 @@ The optional field is:
 }
 ```
 
-`BLACKLIST` is the compatibility mode: `apps[].kmod` and
-`apps[].lsposed` select UIDs that receive hiding. If the field is absent,
-blacklist is used.
+`BLACKLIST` is the default. ABI v4 publishes `VPNHIDE_MATCH_INCLUDE`, so a UID
+matches a layer when it is present in that layer's list.
 
-`ALLOWLIST` means that selected applications are exceptions. The resolver
-queries Package Manager and targets every eligible application UID that is
-not selected for the corresponding layer. By default it never targets:
+`ALLOWLIST` publishes `VPNHIDE_MATCH_EXCLUDE`. Lists contain exceptions, and
+the kernel evaluates membership as:
 
-- UID 0, UID 1000, or any appId below 10000;
-- the manager application's UID in `BLACKLIST` mode (in `ALLOWLIST` it is
-  eligible unless selected explicitly);
-- system packages, including packages whose APK is outside `/data/app/`.
-
-The last rule is intentionally conservative and protects system, privileged,
-APEX, vendor, product, and shared system UID groups. The resolver also asks
-Package Manager for the authoritative system-package set, so updated system
-APKs under `/data/app/` are classified correctly.
-
-The frontend may opt a Package Manager-verified system package into normal
-per-layer list semantics with `apps[].systemPolicyExplicit: true`. In
-`BLACKLIST`, enabled fields become targets. In `ALLOWLIST`, disabled fields
-become targets. A missing marker always retains the legacy protected default,
-which keeps old configurations and newly installed system packages safe. The
-package name, user and current UID must match; a stale UID hint cannot opt in a
-different package. UID protection uses the appId component (`uid % 100000`)
-for secondary users, and core appIds below 10000 remain ineligible even with
-an explicit marker.
-
-Use the userspace preview before applying a policy:
-
-```sh
-vpnhide-ctl validate /path/to/vpnhide_config.json <manager_uid>
-vpnhide-ctl preview /path/to/vpnhide_config.json <manager_uid>
+```text
+eligible(uid) && !listed(uid)
 ```
 
-Policy ABI v3 stores UID sets, port targets, flattened port rules, and per-app
-hook masks in variable-length sections. There is no per-section UID limit and
-no per-UID port-rule limit. The complete transaction is bounded by
-`VPNHIDE_POLICY_MAX_BYTES` to prevent an administrative writer from consuming
-unbounded kernel memory. ABI v2 remains accepted for one compatibility window;
-its old 512 UID / 16 rule layout is treated as a legacy input format only.
+The rule is evaluated independently for kernel hooks, framework hooks, and
+port policy. Empty allowlists therefore target every eligible UID; there is no
+daemon-generated enumeration of installed applications.
 
-The `load` path resolves and validates the complete policy, builds a versioned
-variable-length policy blob, and commits it with one `VH_SET_POLICY`
-ioctl. The ioctl carries an explicit pointer and length because the complete
-payload is larger than the size field available in the encoded ioctl command.
-The kernel copies the payload, validates all counts/ranges, sorts target UIDs,
-and publishes one exactly-sized immutable RCU snapshot. Readers therefore
-observe either the previous generation or the complete new generation. `expected_generation`
-may be used by a future controller to reject a stale commit with `-EAGAIN`.
+Eligibility is a kernel safety invariant, not package classification. UID 0,
+UID 1000, and every UID whose Android appId (`uid % 100000`) is below 10000
+never matches either mode. `vpnhide-ctl` also rejects those entries while
+packing a snapshot, but the kernel check remains authoritative if userspace is
+buggy or compromised. System applications with an application-range appId are
+not implicitly protected by the backend: the application must persist its
+chosen defaults and explicit overrides in JSON.
 
-Policy writes use only `VH_SET_POLICY`, which replaces the complete immutable
-policy snapshot atomically. The former per-component policy setter ABI has
-been removed. The corresponding GET ioctls remain read-only diagnostics.
+Each `apps[]` object carries a full current UID. Its `kmod`, `lsposed`, and
+`portHiding` booleans control inclusion in the corresponding ABI list. Package
+name, user ID, and `systemPolicyExplicit` are application metadata; the native
+backend does not resolve or reinterpret them. The application refreshes stale
+UIDs after package changes, reinstall, restore, and boot, then atomically
+rewrites the JSON file.
 
-Port hiding follows the same `listMode`. In `BLACKLIST`, apps with
-`portHiding: true` are targeted. In `ALLOWLIST`, those apps are exceptions and
-all other eligible third-party applications are targeted. System packages
-require the same explicit marker, while the manager UID in `BLACKLIST` and
-core system UIDs are never port targets. Port rules are resolved independently
-from the application exception
-set. In `ALLOWLIST`, a `portHiding: true` app with no enabled matching rules
-sees all ports; when rules exist, its matching app-specific rules and enabled
-`massPortRules` form its visible-port set, and the kernel receives the
-complement to hide. An allowlist app with no `portHiding` exception is denied
-all ports and receives full-range hiding, regardless of global rules. Thus
-global rules affect only selected allowlist applications. In
-`BLACKLIST`, matching app-specific rules and enabled `massPortRules` are
-combined; a selected app receives full-range hiding only when no resulting
-rule exists. Invalid ranges and rule-count overflow reject the configuration
-instead of truncating it.
+Use the userspace validator without Package Manager access:
 
-The daemon watches the JSON configuration directory and invokes the same
-`vpnhide-ctl load` path after an atomic config update, so frontend writes do
-not require a reboot or a separate privileged apply action. Package Manager
-reconciliation is filesystem-free: the daemon periodically fingerprints the
-authoritative `pm list packages -f -U --user all` output in memory and
-re-resolves after install, uninstall, UID, or user changes. No Package Manager
-state files are opened, watched, or created; persistent state remains in the
-application configuration directory.
+```sh
+vpnhide-ctl validate /path/to/vpnhide_config.json
+vpnhide-ctl preview /path/to/vpnhide_config.json
+```
 
-Per-app hook masks use the same exception semantics in `ALLOWLIST`: enabled
-bits are removed from the effective global active mask for that application.
-`CONNECT` (hook 13) and `BIND` (hook 16) are mandatory because they enforce
-the port policy; requests to disable either bit are ignored in both global and
-per-app masks. Port targets carry an explicit mode: unrestricted, rule-based
-blocking, or deny-all. The kernel still receives effective active masks, so it
-does not need to know which list mode produced them.
+The preview reports `match_mode=INCLUDE` or `match_mode=EXCLUDE`. Its target
+counts are serialized list counts; in allowlist mode they are exception
+counts, not the number of effective kernel targets.
+
+ABI v4 stores three match modes plus UID sets, port targets, flattened port
+rules, and per-app hook masks in variable-length sections. The complete
+transaction is bounded by `VPNHIDE_POLICY_MAX_BYTES`. The kernel copies and
+validates the payload, sorts and deduplicates UID-keyed sections, reconciles
+statistics, and publishes one immutable RCU snapshot. Readers therefore see
+either the previous complete generation or the next complete generation.
+Malformed mode values, offsets, counts, ranges, duplicates, and reserved bits
+reject the entire transaction. ABI v2 and v3 remain accepted as transitional
+include-only inputs; v4 is the controller's emitted format.
+
+Policy writes use one `VH_SET_POLICY` transaction. `expected_generation` can
+reject a stale writer with `-EAGAIN`. The daemon watches only the JSON
+directory and invokes the same `vpnhide-ctl load` operation after an atomic
+application update. Its Package Manager lookup for the manager UID in module
+startup scripts is used solely to authorize the statistics socket and migrate
+legacy database ownership; that UID is not passed into policy construction.
+
+Port policy follows the same modes. In blacklist mode, listed port targets
+receive their compiled blocking rules. In allowlist mode, an eligible UID with
+no explicit target receives the kernel's synthetic deny-all policy. A listed
+exception overrides that default: no enabled matching rule means unrestricted;
+otherwise app-specific rules plus enabled mass rules describe visible ports,
+and userspace serializes their blocking complement. No full-range entries are
+generated for every installed UID.
+
+Per-app hook masks remain explicit UID-keyed overrides. In allowlist mode the
+controller converts selected bits into removals from the global mask for that
+exception. `CONNECT` and `BIND` remain mandatory because they enforce port
+policy.
+
+Allowlist statistics are created lazily on the first intercepted event because
+the finite exception list cannot enumerate the inverted target population.
+Current-session entries are retained across policy updates only while their UID
+still matches the new policy, with a bounded capacity of 4096 UIDs.

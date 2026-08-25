@@ -2,8 +2,8 @@ _2026-07-29_
 
 ## English
 
-Reconcile policies after Package Manager changes without touching state files
+The application now reconciles UID changes and atomically updates the authoritative policy after package events and boot; the daemon no longer queries Package Manager
 
 ## Русский
 
-Политики после изменений Package Manager теперь повторно применяются без доступа к state-файлам
+Приложение теперь сверяет UID и атомарно обновляет authoritative-конфиг после событий пакетов и загрузки; демон больше не обращается к Package Manager

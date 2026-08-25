@@ -54,8 +54,7 @@ cat > /tmp/vpnhide-perf-policy.json <<'EOF'
     "userId":1, "startPort":1, "endPort":65535, "protocol":"BOTH"}]
 }
 EOF
-export VPNHIDE_PM_COMMAND="echo 'package:/data/app/perf/base.apk=com.vpnhide.perf uid:115555'"
-/vpnhide-ctl load /tmp/vpnhide-perf-policy.json 0 >/tmp/perf-policy.log 2>&1
+/vpnhide-ctl load /tmp/vpnhide-perf-policy.json >/tmp/perf-policy.log 2>&1
 if [ "$?" -ne 0 ]; then
     echo "PERF_ERROR=policy"
     cat /tmp/perf-policy.log

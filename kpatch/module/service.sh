@@ -86,16 +86,7 @@ JSON_CONF="/data/user_de/0/dev.soranerai.vpnhidenext/files/vpnhide_config.json"
 apply_all_rules_from_json() {
     if [ -f "$JSON_CONF" ]; then
         log_msg "applying rules from JSON..."
-        # Resolve the app itself (dev.soranerai.vpnhidenext) UID and pass it to load
-        local self_uid
-        self_uid="$(pm list packages -U --user all 2>/dev/null | grep "^package:dev.soranerai.vpnhidenext " | awk '{print $2}' | sed 's/uid://' | tr ',' '\n' | head -n 1)"
-        if [ -n "$self_uid" ]; then
-            log_msg "applying JSON config with self UID $self_uid"
-            "$CTL" load "$JSON_CONF" "$self_uid"
-        else
-            log_msg "applying JSON config without self UID"
-            "$CTL" load "$JSON_CONF"
-        fi
+        "$CTL" load "$JSON_CONF"
     else
         log_msg "JSON config file not found"
     fi
@@ -114,5 +105,5 @@ chmod +x "$DAEMON"
 
 DAEMON_SELF_UID="$(pm list packages -U --user all 2>/dev/null | grep "^package:dev.soranerai.vpnhidenext " | awk '{print $2}' | sed 's/uid://' | tr ',' '\n' | head -n 1)"
 
-# Start the event-driven C daemon in the background
+# This UID restricts the statistics socket only; policy comes solely from JSON.
 "$DAEMON" "$CTL" "$JSON_CONF" "$DAEMON_SELF_UID" >/data/adb/vpnhide_kmod/daemon.log 2>&1 &

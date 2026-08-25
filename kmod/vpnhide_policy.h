@@ -12,16 +12,13 @@ enum vpnhide_list_mode {
 	VPNHIDE_LIST_ALLOWLIST = 1,
 };
 
-struct vpnhide_policy_summary {
+	struct vpnhide_policy_summary {
 	enum vpnhide_list_mode mode;
-	int discovered_packages;
-	int eligible_packages;
-	int protected_packages;
-	int selected_exceptions;
+	int configured_entries;
+	int rejected_core_uids;
 	int kmod_targets;
 	int lsposed_targets;
 	int port_targets;
-	int ignored_selected_system_packages;
 };
 
 struct vpnhide_uid_vector {
@@ -47,16 +44,15 @@ struct vpnhide_port_policy {
 void vpnhide_uid_vector_free(struct vpnhide_uid_vector *vector);
 void vpnhide_port_policy_free(struct vpnhide_port_policy *policy);
 
-/* Resolve the declarative JSON policy into the two UID snapshots consumed by
- * the kernel. System packages require an explicit, PM-verified override. */
-int vpnhide_resolve_targets(const JSON_Object *root, uid_t self_uid,
+/* Copy the application's declarative UID policy into kernel snapshot lists. */
+int vpnhide_resolve_targets(const JSON_Object *root,
 				    struct vpnhide_uid_vector *kmod,
 				    struct vpnhide_uid_vector *lsposed,
 				    struct vpnhide_policy_summary *summary,
 				    char *error, size_t error_len);
 
-/* Resolve port hiding using the same list mode and protected-package rules. */
-int vpnhide_resolve_port_rules(const JSON_Object *root, uid_t self_uid,
+/* Compile declarative port rules using the same list mode. */
+int vpnhide_resolve_port_rules(const JSON_Object *root,
 				       struct vpnhide_port_policy *result,
 				       struct vpnhide_policy_summary *summary,
 				       char *error, size_t error_len);

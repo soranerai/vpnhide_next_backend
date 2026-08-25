@@ -61,8 +61,8 @@ void print_usage(const char *prog)
 	fprintf(stderr,
 		"Usage: %s <load|validate|preview|set_spoof_ip|active_hooks|java_hooks|stats|stats_history|version> [args...]\n",
 		prog);
-	fprintf(stderr, "  load format: <json_path> [self_uid]\n");
-	fprintf(stderr, "  validate/preview format: <json_path> [self_uid]\n");
+	fprintf(stderr, "  load format: <json_path>\n");
+	fprintf(stderr, "  validate/preview format: <json_path>\n");
 	fprintf(stderr, "  stats output: uid;ioctl;netlink;proc;sockopt;connect;getname;port\n");
 	fprintf(stderr, "  proto: 0=TCP, 1=UDP, 2=BOTH\n");
 	fprintf(stderr, "  set_spoof_ip format: <ipv4|none> <ipv6|none>\n");
@@ -123,15 +123,16 @@ static int policy_add_size(size_t *total, size_t count, size_t element_size)
 	return 0;
 }
 
-static int pack_policy_v3(const struct vpnhide_uid_vector *targets,
+static int pack_policy_v4(const struct vpnhide_uid_vector *targets,
 			  const struct vpnhide_uid_vector *lsposed,
 			  const struct vpnhide_port_policy *ports,
 			  const struct app_hook_mask_vector *masks,
 			  const struct vpnhide_iface_ioctl_data *ifaces,
 			  unsigned int active_mask, unsigned int java_mask,
-			  int debug_enabled, void **out, uint32_t *out_size)
+			  int debug_enabled, unsigned int match_mode,
+			  void **out, uint32_t *out_size)
 {
-	struct vpnhide_policy_payload_v3 *payload;
+	struct vpnhide_policy_payload_v4 *payload;
 	struct vpnhide_port_target_v3 *port_targets;
 	struct vpnhide_port_rule_v3 *port_rules;
 	size_t total = sizeof(*payload), total_rules = 0, cursor;
@@ -162,6 +163,9 @@ static int pack_policy_v3(const struct vpnhide_uid_vector *targets,
 	payload->java_hooks_mask = java_mask;
 	payload->debug_enabled = !!debug_enabled;
 	payload->iface_count = (uint32_t)ifaces->count;
+	payload->kmod_match_mode = match_mode;
+	payload->lsposed_match_mode = match_mode;
+	payload->port_match_mode = match_mode;
 	memcpy(payload->iface_prefixes, ifaces->prefixes,
 	       sizeof(payload->iface_prefixes));
 
@@ -246,15 +250,12 @@ int main(int argc, char **argv)
 		struct vpnhide_port_policy ports = {0};
 		struct vpnhide_policy_summary summary;
 		char error[256];
-		uid_t self_uid = 0;
 		int ret;
 
 		if (argc < 3) {
-			fprintf(stderr, "Error: %s requires <json_path> [self_uid]\n", argv[1]);
+			fprintf(stderr, "Error: %s requires <json_path>\n", argv[1]);
 			return 1;
 		}
-		if (argc > 3)
-			self_uid = (uid_t)atoi(argv[3]);
 		root_value = json_parse_file(argv[2]);
 		if (!root_value || json_value_get_type(root_value) != JSONObject) {
 			fprintf(stderr, "Failed to parse JSON file: %s\n", argv[2]);
@@ -264,7 +265,7 @@ int main(int argc, char **argv)
 		}
 		root = json_value_get_object(root_value);
 		memset(error, 0, sizeof(error));
-		ret = vpnhide_resolve_targets(root, self_uid, &targets, &lsposed,
+		ret = vpnhide_resolve_targets(root, &targets, &lsposed,
 						      &summary, error, sizeof(error));
 		if (ret) {
 			fprintf(stderr, "Policy rejected (%s): %s\n",
@@ -275,7 +276,7 @@ int main(int argc, char **argv)
 			vpnhide_uid_vector_free(&lsposed);
 			return 1;
 		}
-		ret = vpnhide_resolve_port_rules(root, self_uid, &ports, &summary,
+		ret = vpnhide_resolve_port_rules(root, &ports, &summary,
 						 error, sizeof(error));
 		if (ret) {
 			fprintf(stderr, "Port policy rejected: %s\n",
@@ -287,11 +288,10 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		printf("mode=%s\n", vpnhide_list_mode_name(summary.mode));
-		printf("discovered_packages=%d\n", summary.discovered_packages);
-		printf("protected_packages=%d\n", summary.protected_packages);
-		printf("selected_exceptions=%d\n", summary.selected_exceptions);
-		printf("ignored_selected_system_packages=%d\n",
-		       summary.ignored_selected_system_packages);
+		printf("configured_entries=%d\n", summary.configured_entries);
+		printf("rejected_core_uids=%d\n", summary.rejected_core_uids);
+		printf("match_mode=%s\n",
+		       summary.mode == VPNHIDE_LIST_ALLOWLIST ? "EXCLUDE" : "INCLUDE");
 		printf("kmod_targets=%d\n", summary.kmod_targets);
 		printf("lsposed_targets=%d\n", summary.lsposed_targets);
 		printf("port_targets=%d\n", summary.port_targets);
@@ -326,22 +326,17 @@ int main(int argc, char **argv)
 
 	if (strcmp(argv[1], "load") == 0) {
 		if (argc < 3) {
-			fprintf(stderr, "Error: load requires <json_path> [self_uid]\n");
+			fprintf(stderr, "Error: load requires <json_path>\n");
 			close(fd);
 			return 1;
 		}
 		const char *json_path = argv[2];
-		uid_t self_uid = 0;
 		int apply_failed = 0;
 		unsigned int kernel_mask = 0;
 		unsigned int java_mask = 0;
 		int debug_logging = 0;
 		int have_global_config = 0;
 		int allowlist_mode = 0;
-		if (argc > 3) {
-			self_uid = (uid_t)atoi(argv[3]);
-		}
-
 		JSON_Value *root_value = json_parse_file(json_path);
 		if (!root_value || json_value_get_type(root_value) != JSONObject) {
 			fprintf(stderr, "Failed to parse JSON file: %s\n", json_path);
@@ -430,7 +425,7 @@ int main(int argc, char **argv)
 			}
 		}
 
-		policy_ret = vpnhide_resolve_targets(root, self_uid, &targets,
+		policy_ret = vpnhide_resolve_targets(root, &targets,
 							     &lsposed, &policy_summary,
 							     policy_error, sizeof(policy_error));
 		if (policy_ret) {
@@ -441,7 +436,7 @@ int main(int argc, char **argv)
 			close(fd);
 			return 1;
 		}
-		policy_ret = vpnhide_resolve_port_rules(root, self_uid, &port_policy,
+		policy_ret = vpnhide_resolve_port_rules(root, &port_policy,
 								&policy_summary, policy_error,
 								sizeof(policy_error));
 		if (policy_ret) {
@@ -452,10 +447,10 @@ int main(int argc, char **argv)
 			return 1;
 		}
 
-		fprintf(stderr, "Applying %s policy: kmod=%d lsposed=%d protected=%d\n",
+		fprintf(stderr, "Applying %s policy: kmod=%d lsposed=%d rejected_core=%d\n",
 			vpnhide_list_mode_name(policy_summary.mode),
 			policy_summary.kmod_targets, policy_summary.lsposed_targets,
-			policy_summary.protected_packages);
+			policy_summary.rejected_core_uids);
 
 		sort_uids(targets.items, targets.count);
 		sort_uids(lsposed.items, lsposed.count);
@@ -473,11 +468,13 @@ int main(int argc, char **argv)
 				}
 			}
 		}
-		if (pack_policy_v3(&targets, &lsposed, &port_policy,
+		if (pack_policy_v4(&targets, &lsposed, &port_policy,
 				   &app_hook_masks, &idata,
 				   have_global_config ? kernel_mask : 0xFFFFFFFFu,
 				   have_global_config ? java_mask : 0xFFFFFFFFu,
 				   have_global_config ? !!debug_logging : 0,
+				   allowlist_mode ? VPNHIDE_MATCH_EXCLUDE :
+					VPNHIDE_MATCH_INCLUDE,
 				   &payload, &payload_size)) {
 			fprintf(stderr, "Cannot serialize variable-length policy\n");
 			free(app_hook_masks.items);
@@ -490,7 +487,7 @@ int main(int argc, char **argv)
 		}
 
 		memset(&policy_request, 0, sizeof(policy_request));
-		policy_request.abi_version = VPNHIDE_POLICY_ABI_VERSION_V3;
+		policy_request.abi_version = VPNHIDE_POLICY_ABI_VERSION_V4;
 		policy_request.payload_size = payload_size;
 		policy_request.payload_ptr = (uintptr_t)payload;
 		if (ioctl(fd, VH_SET_POLICY, &policy_request) < 0) {

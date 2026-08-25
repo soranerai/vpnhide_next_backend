@@ -15,7 +15,7 @@ int main(void)
 	struct vpnhide_port_policy ports = {0};
 	struct app_hook_mask_vector masks = {0};
 	struct vpnhide_iface_ioctl_data ifaces = {0};
-	struct vpnhide_policy_payload_v3 *payload;
+	struct vpnhide_policy_payload_v4 *payload;
 	struct vpnhide_port_target_v3 *packed_targets;
 	struct vpnhide_port_rule_v3 *packed_rules;
 	struct vpnhide_port_rule *rules;
@@ -49,10 +49,14 @@ int main(void)
 		}
 	}
 
-	assert(pack_policy_v3(&kmod, &lsposed, &ports, &masks, &ifaces,
-			      0x1234U, 0x5678U, 1, &blob, &blob_size) == 0);
+	assert(pack_policy_v4(&kmod, &lsposed, &ports, &masks, &ifaces,
+			      0x1234U, 0x5678U, 1, VPNHIDE_MATCH_EXCLUDE,
+			      &blob, &blob_size) == 0);
 	payload = blob;
 	assert(payload->total_size == blob_size);
+	assert(payload->kmod_match_mode == VPNHIDE_MATCH_EXCLUDE);
+	assert(payload->lsposed_match_mode == VPNHIDE_MATCH_EXCLUDE);
+	assert(payload->port_match_mode == VPNHIDE_MATCH_EXCLUDE);
 	assert(payload->kmod_uids.count == TEST_UID_COUNT);
 	assert(payload->lsposed_uids.count == TEST_UID_COUNT);
 	assert(payload->port_targets.count == TEST_UID_COUNT);
