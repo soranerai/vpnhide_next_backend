@@ -18,8 +18,6 @@
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/ipv6.h>
-#include <linux/fs.h>
-#include <linux/dirent.h>
 
 /* sockptr_t was introduced after the 5.4 kernel line.  Keep the public
  * call-site API source-compatible with pre-sockptr kernels. */
@@ -84,19 +82,6 @@ void vpnhide_bpf_lookup_batch(struct bpf_map *map,
 				      union bpf_attr __user *uattr);
 #endif
 
-/* ------------------------------------------------------------------ */
-/* Filesystem / VFS                                                     */
-/* ------------------------------------------------------------------ */
-
-bool vpnhide_should_hide_path(const struct path *path);
-bool vpnhide_filter_sysctl(struct inode *dir,
-			   const char *name, size_t namelen);
-bool vpnhide_getdents64(unsigned int fd,
-			struct linux_dirent64 __user *dirent,
-			unsigned int count, int *retval);
-void vpnhide_filename_lookup(int dfd, struct filename *name,
-			     unsigned flags, struct path *path, int *retval);
-
 #else /* !CONFIG_VPNHIDE */
 
 #include <linux/types.h>
@@ -111,10 +96,6 @@ struct sockaddr;
 struct sock;
 struct bpf_map;
 union bpf_attr;
-struct path;
-struct linux_dirent64;
-struct inode;
-struct filename;
 struct in_pktinfo;
 struct in6_pktinfo;
 
@@ -155,15 +136,5 @@ static inline void vpnhide_bpf_lookup_elem(struct bpf_map *m,
 static inline void vpnhide_bpf_lookup_batch(struct bpf_map *m,
 	const union bpf_attr *a, union bpf_attr __user *u) {}
 #endif
-static inline bool vpnhide_should_hide_path(const struct path *p)
-	{ return false; }
-static inline bool vpnhide_filter_sysctl(struct inode *dir,
-	const char *n, size_t l) { return false; }
-static inline bool vpnhide_getdents64(unsigned int fd,
-	struct linux_dirent64 __user *d, unsigned int c, int *r)
-	{ return false; }
-static inline void vpnhide_filename_lookup(int dfd, struct filename *name,
-	unsigned flags, struct path *path, int *r) {}
-
 #endif /* CONFIG_VPNHIDE */
 #endif /* _LINUX_VPNHIDE_H */

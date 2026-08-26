@@ -17,6 +17,7 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <poll.h>
 #include <sys/inotify.h>
 #include <sys/wait.h>
@@ -25,13 +26,261 @@
 #include <sys/un.h>
 #include <sys/types.h>
 #include <sys/eventfd.h>
+#include <sys/stat.h>
 #include <linux/inet_diag.h>
 #include <linux/sock_diag.h>
 #include <netinet/tcp.h>
+#include <signal.h>
 
 #include "include/vpnhide.h"
 #include "generated/iface_lists.h"
 #include "daemon_iface.h"
+
+static unsigned long long get_time_ms(void);
+
+/* SUSFS path rules are attached to the current filesystem object.  A VPN
+ * interface can disappear and be recreated under the same name, so keep a
+ * small userspace identity cache and register each new object once. */
+#define SUSFS_MAX_PATHS (MAX_ACTIVE_VPNS * 8)
+#define SUSFS_RETRY_LOG_MS (60ULL * 1000ULL)
+
+struct susfs_registered_path {
+	char path[PATH_MAX];
+	dev_t dev;
+	ino_t ino;
+	bool valid;
+};
+
+static struct susfs_registered_path susfs_registered[SUSFS_MAX_PATHS];
+static const char *const susfs_tool_candidates[] = {
+	"/data/adb/ksu/bin/ksu_susfs",
+	"/data/adb/ksu/bin/susfs",
+};
+static const char *susfs_tool;
+static unsigned long long susfs_last_error_log;
+static const char *susfs_config_path;
+static bool susfs_enabled = true;
+
+/* Bit 18 remains a compatibility/configuration bit, but is no longer read by
+ * the kernel.  The daemon owns this decision because SUSFS is userspace-
+ * commanded and its path rules are not part of the kmod policy snapshot. */
+static void susfs_refresh_enabled(void)
+{
+	FILE *file;
+	char buffer[131072];
+	size_t length;
+	char *global;
+	char *apps;
+	char *mask;
+	char *end;
+	unsigned long long value;
+
+	if (!susfs_config_path || !susfs_config_path[0]) {
+		susfs_enabled = true;
+		return;
+	}
+	file = fopen(susfs_config_path, "r");
+	if (!file)
+		return;
+	length = fread(buffer, 1, sizeof(buffer) - 1, file);
+	fclose(file);
+	buffer[length] = '\0';
+	global = strstr(buffer, "\"globalConfig\"");
+	if (!global)
+		return;
+	apps = strstr(global, "\"apps\"");
+	mask = strstr(global, "\"kernelHookMask\"");
+	if (!mask || (apps && mask > apps))
+		return;
+	mask = strchr(mask, ':');
+	if (!mask)
+		return;
+	value = strtoull(mask + 1, &end, 0);
+	if (end == mask + 1)
+		return;
+	susfs_enabled = (value & (1ULL << 18)) != 0;
+}
+
+static const char *susfs_find_tool(void)
+{
+	size_t i;
+
+	if (susfs_tool)
+		return susfs_tool;
+	for (i = 0; i < sizeof(susfs_tool_candidates) /
+			 sizeof(susfs_tool_candidates[0]); i++) {
+		if (access(susfs_tool_candidates[i], X_OK) == 0) {
+			susfs_tool = susfs_tool_candidates[i];
+			return susfs_tool;
+		}
+	}
+	return NULL;
+}
+
+static void susfs_log_error(const char *format, ...)
+{
+	unsigned long long now = get_time_ms();
+	va_list ap;
+
+	if (susfs_last_error_log &&
+	    now - susfs_last_error_log < SUSFS_RETRY_LOG_MS)
+		return;
+	susfs_last_error_log = now;
+	fputs("vpnhide-daemon: SUSFS path hiding unavailable: ", stderr);
+	va_start(ap, format);
+	vfprintf(stderr, format, ap);
+	va_end(ap);
+	fputc('\n', stderr);
+}
+
+static int susfs_add_path(const char *path)
+{
+	const char *tool = susfs_find_tool();
+	int status;
+	pid_t pid;
+	unsigned long long deadline;
+
+	if (!tool) {
+		susfs_log_error("ksu_susfs command not found; continuing without path hiding");
+		return -ENOENT;
+	}
+
+	pid = fork();
+	if (pid < 0) {
+		susfs_log_error("fork failed: %s", strerror(errno));
+		return -errno;
+	}
+	if (pid == 0) {
+		execl(tool, tool, "add_sus_path", path, (char *)NULL);
+		_exit(127);
+	}
+
+	deadline = get_time_ms() + 2000;
+	for (;;) {
+		pid_t waited = waitpid(pid, &status, WNOHANG);
+		if (waited == pid)
+			break;
+		if (waited < 0) {
+			if (errno == EINTR)
+				continue;
+			susfs_log_error("waitpid failed for %s: %s", path,
+					strerror(errno));
+			return -errno;
+		}
+		if (get_time_ms() >= deadline) {
+			kill(pid, SIGKILL);
+			waitpid(pid, &status, 0);
+			susfs_log_error("command timed out for %s", path);
+			return -ETIMEDOUT;
+		}
+		usleep(10000);
+	}
+
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+		susfs_log_error("add_sus_path failed for %s (status=%d)", path,
+				status);
+		return -EIO;
+	}
+	return 0;
+}
+
+static bool susfs_path_registered(const char *path, const struct stat *st)
+{
+	size_t i;
+
+	for (i = 0; i < SUSFS_MAX_PATHS; i++) {
+		if (susfs_registered[i].valid &&
+		    susfs_registered[i].dev == st->st_dev &&
+		    susfs_registered[i].ino == st->st_ino &&
+		    strcmp(susfs_registered[i].path, path) == 0)
+			return true;
+	}
+	return false;
+}
+
+static void susfs_forget_path(const char *path)
+{
+	size_t i;
+
+	for (i = 0; i < SUSFS_MAX_PATHS; i++) {
+		if (susfs_registered[i].valid &&
+		    strcmp(susfs_registered[i].path, path) == 0)
+			susfs_registered[i].valid = false;
+	}
+}
+
+static void susfs_remember_path(const char *path, const struct stat *st)
+{
+	size_t i;
+
+	for (i = 0; i < SUSFS_MAX_PATHS; i++) {
+		if (!susfs_registered[i].valid) {
+			susfs_registered[i].valid = true;
+			susfs_registered[i].dev = st->st_dev;
+			susfs_registered[i].ino = st->st_ino;
+			strncpy(susfs_registered[i].path, path,
+				sizeof(susfs_registered[i].path) - 1);
+			susfs_registered[i].path[
+				sizeof(susfs_registered[i].path) - 1] = '\0';
+			return;
+		}
+	}
+	susfs_log_error("registration cache is full; path %s was not cached", path);
+}
+
+static void susfs_register_path(const char *path)
+{
+	struct stat st;
+
+	if (!path || !path[0])
+		return;
+	if (stat(path, &st) < 0) {
+		susfs_forget_path(path);
+		return;
+	}
+	if (susfs_path_registered(path, &st))
+		return;
+	if (susfs_add_path(path) == 0)
+		susfs_remember_path(path, &st);
+}
+
+static void susfs_sync_interface(const char *ifname)
+{
+	char path[PATH_MAX];
+	char real_path[PATH_MAX];
+	const char *const suffixes[] = {
+		"/proc/sys/net/ipv4/conf/%s",
+		"/proc/sys/net/ipv6/conf/%s",
+		"/proc/sys/net/ipv4/neigh/%s",
+		"/proc/sys/net/ipv6/neigh/%s",
+		"/proc/net/dev_snmp6/%s",
+	};
+	size_t i;
+
+	if (!ifname || !ifname[0])
+		return;
+	snprintf(path, sizeof(path), "/sys/class/net/%s", ifname);
+	susfs_register_path(path);
+	if (realpath(path, real_path))
+		susfs_register_path(real_path);
+	for (i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+		snprintf(path, sizeof(path), suffixes[i], ifname);
+		susfs_register_path(path);
+	}
+}
+
+static void susfs_sync_interfaces(const struct vpnhide_vpn_ifindexes *vpns)
+{
+	int i;
+
+	if (!vpns)
+		return;
+	susfs_refresh_enabled();
+	if (!susfs_enabled)
+		return;
+	for (i = 0; i < vpns->count && i < MAX_ACTIVE_VPNS; i++)
+		susfs_sync_interface(vpns->vpns[i].name);
+}
 
 static bool is_interface_operstate_up(const char *ifname)
 {
@@ -445,6 +694,7 @@ static bool update_spoof_ip(int fd, char *last_ipv4, char *last_ipv6,
 	}
 
 	/* Send the list of active VPNs to the kernel module */
+	susfs_sync_interfaces(&active_vpns);
 	if (ioctl(fd, VH_SET_VPN_IFINDEXES, &active_vpns) < 0) {
 		fprintf(stderr, "vpnhide-daemon: failed to publish VPN interfaces: %s\n",
 			strerror(errno));
@@ -1235,6 +1485,8 @@ int main(int argc, char **argv)
 	char last_ipv6_linklocal[64];
 	unsigned int last_ipv4_mtu = UINT_MAX;
 	unsigned int last_ipv6_mtu = UINT_MAX;
+
+	susfs_config_path = config;
 
 	setbuf(stdout, NULL);
 	setbuf(stderr, NULL);

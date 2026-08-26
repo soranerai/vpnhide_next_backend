@@ -55,13 +55,6 @@ bool sys_connect_uses_wrapper = false;
 bool sys_bind_uses_wrapper = false;
 bool sys_getsockname_uses_wrapper = false;
 bool sys_bpf_uses_wrapper = false;
-bool sys_getdents64_uses_wrapper = false;
-bool sys_openat_uses_wrapper = false;
-bool sys_openat2_uses_wrapper = false;
-bool sys_faccessat_uses_wrapper = false;
-bool sys_faccessat2_uses_wrapper = false;
-bool sys_newfstatat_uses_wrapper = false;
-bool sys_readlinkat_uses_wrapper = false;
 
 /* --- Core Configuration & Helper Functions --- */
 
@@ -2263,15 +2256,8 @@ static struct kretprobe_reg probes[] = {
     {&inet_getname_krp, "inet_getname", NULL, false, 25},
     {&inet6_getname_krp, "inet6_getname", NULL, false, 25},
     {&sys_bpf_krp, "__arm64_sys_bpf", NULL, false, -1},
-    {&sys_getdents64_krp, "__arm64_sys_getdents64", NULL, false, -1},
     {&dev_seq_krp, "dev_seq_show", NULL, false, -1},
     {&if6_seq_krp, "if6_seq_show", NULL, false, -1},
-    {&sys_openat_krp, "__arm64_sys_openat", NULL, false, -1},
-    {&sys_openat2_krp, "__arm64_sys_openat2", NULL, false, -1},
-    {&sys_faccessat_krp, "__arm64_sys_faccessat", NULL, false, -1},
-    {&sys_faccessat2_krp, "__arm64_sys_faccessat2", NULL, false, -1},
-    {&proc_sys_lookup_krp, "proc_sys_lookup", NULL, false, -1},
-    {&sys_readlinkat_krp, "__arm64_sys_readlinkat", NULL, false, -1},
     {&udp_sendmsg_krp, "udp_sendmsg", NULL, false, -1},
     {&udpv6_sendmsg_ll_krp, "udpv6_sendmsg", NULL, false, -1},
     {&fib_trie_krp, "fib_trie_seq_show", NULL, false, -1},
@@ -2309,38 +2295,6 @@ static int __init vpnhide_init(void) {
       strcmp(sys_getsockname_krp.kp.symbol_name, "__arm64_sys_getsockname") ==
           0) {
     sys_getsockname_uses_wrapper = true;
-  }
-  if (sys_getdents64_krp.kp.symbol_name &&
-      strcmp(sys_getdents64_krp.kp.symbol_name, "__arm64_sys_getdents64") ==
-          0) {
-    sys_getdents64_uses_wrapper = true;
-  }
-  if (sys_openat_krp.kp.symbol_name &&
-      strcmp(sys_openat_krp.kp.symbol_name, "__arm64_sys_openat") == 0) {
-    sys_openat_uses_wrapper = true;
-  }
-  if (sys_openat2_krp.kp.symbol_name &&
-      strcmp(sys_openat2_krp.kp.symbol_name, "__arm64_sys_openat2") == 0) {
-    sys_openat2_uses_wrapper = true;
-  }
-  if (sys_faccessat_krp.kp.symbol_name &&
-      strcmp(sys_faccessat_krp.kp.symbol_name, "__arm64_sys_faccessat") == 0) {
-    sys_faccessat_uses_wrapper = true;
-  }
-  if (sys_faccessat2_krp.kp.symbol_name &&
-      strcmp(sys_faccessat2_krp.kp.symbol_name, "__arm64_sys_faccessat2") ==
-          0) {
-    sys_faccessat2_uses_wrapper = true;
-  }
-  if (sys_newfstatat_krp.kp.symbol_name &&
-      strcmp(sys_newfstatat_krp.kp.symbol_name, "__arm64_sys_newfstatat") ==
-          0) {
-    sys_newfstatat_uses_wrapper = true;
-  }
-  if (sys_readlinkat_krp.kp.symbol_name &&
-      strcmp(sys_readlinkat_krp.kp.symbol_name, "__arm64_sys_readlinkat") ==
-          0) {
-    sys_readlinkat_uses_wrapper = true;
   }
 
   for (i = 0; i < ARRAY_SIZE(probes); i++) {
