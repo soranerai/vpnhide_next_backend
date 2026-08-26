@@ -56,9 +56,11 @@ The script checks the device KMI, builds the module, pushes it over ADB, and reb
 
 ### SUSFS path hiding
 
-The daemon registers active VPN interface paths through SUSFS `add_sus_path`.
-Registration is repeated after an interface is recreated because SUSFS rules
-belong to the current filesystem objects. If SUSFS or its command binary is
+The daemon registers active VPN interface paths through SUSFS
+`add_sus_path_loop`. This makes SUSFS re-apply the rules for each zygote-spawned
+non-root process and for dynamic interface paths. Registration is also
+repeated after an interface is recreated because SUSFS rules belong to the
+current filesystem objects. If SUSFS or its command binary is
 unavailable, the daemon continues operating and writes a rate-limited message
 to `daemon.log`; the remaining kmod hooks are unaffected.
 
@@ -138,7 +140,8 @@ The test build uses the DDK container and stores the result at `kpatch/test/.cac
 ```
 
 Сокрытие файлов интерфейсов VPN выполняется демоном через SUSFS
-`add_sus_path`. После удаления и повторного создания интерфейса пути
+`add_sus_path_loop`, чтобы правило повторно применялось к новым пользовательским
+процессам и динамическим путям интерфейса. После удаления и повторного создания интерфейса пути
 регистрируются заново. Если SUSFS или его команда недоступны, демон не
 завершается, а пишет ограниченное по частоте сообщение в `daemon.log`.
 

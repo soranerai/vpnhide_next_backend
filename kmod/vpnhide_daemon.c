@@ -133,7 +133,7 @@ static void susfs_log_error(const char *format, ...)
 	fputc('\n', stderr);
 }
 
-static int susfs_add_path(const char *path)
+static int susfs_add_path_loop(const char *path)
 {
 	const char *tool = susfs_find_tool();
 	int status;
@@ -151,7 +151,7 @@ static int susfs_add_path(const char *path)
 		return -errno;
 	}
 	if (pid == 0) {
-		execl(tool, tool, "add_sus_path", path, (char *)NULL);
+		execl(tool, tool, "add_sus_path_loop", path, (char *)NULL);
 		_exit(127);
 	}
 
@@ -177,7 +177,7 @@ static int susfs_add_path(const char *path)
 	}
 
 	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-		susfs_log_error("add_sus_path failed for %s (status=%d)", path,
+		susfs_log_error("add_sus_path_loop failed for %s (status=%d)", path,
 				status);
 		return -EIO;
 	}
@@ -240,7 +240,7 @@ static void susfs_register_path(const char *path)
 	}
 	if (susfs_path_registered(path, &st))
 		return;
-	if (susfs_add_path(path) == 0)
+	if (susfs_add_path_loop(path) == 0)
 		susfs_remember_path(path, &st);
 }
 
