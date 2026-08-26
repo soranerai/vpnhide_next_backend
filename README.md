@@ -54,6 +54,14 @@ The KMI must match both the kernel sources and the target device. To install a b
 
 The script checks the device KMI, builds the module, pushes it over ADB, and reboots the device.
 
+### SUSFS path hiding
+
+The daemon registers active VPN interface paths through SUSFS `add_sus_path`.
+Registration is repeated after an interface is recreated because SUSFS rules
+belong to the current filesystem objects. If SUSFS or its command binary is
+unavailable, the daemon continues operating and writes a rate-limited message
+to `daemon.log`; the remaining kmod hooks are unaffected.
+
 ## Applying kpatch
 
 `kpatch` does not produce a `.ko` file. It copies the driver into `security/vpnhide`, copies the public header into `include/linux`, and applies the version-specific patches to a `kernel/common` tree. VPNHide must then be built into the kernel with `CONFIG_VPNHIDE=y`.
@@ -128,6 +136,11 @@ The test build uses the DDK container and stores the result at `kpatch/test/.cac
 ```bash
 ./scripts/deploy-kmod.sh android14-6.1
 ```
+
+Сокрытие файлов интерфейсов VPN выполняется демоном через SUSFS
+`add_sus_path`. После удаления и повторного создания интерфейса пути
+регистрируются заново. Если SUSFS или его команда недоступны, демон не
+завершается, а пишет ограниченное по частоте сообщение в `daemon.log`.
 
 ### Применение kpatch
 

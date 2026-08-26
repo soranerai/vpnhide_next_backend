@@ -170,8 +170,6 @@ check netlink_route6  "ip -6 route show table all"   "vpn0"   # rt6_fill_node
 check policy_rule     "ip rule show"                 "199"    # fib_nl_fill_rule (UID split-routing rule)
 check getrule_iif     "ip rule show"                 "200"    # fib_nl_fill_rule (iifname=vpn0 hidden)
 check getrule_oif     "ip rule show"                 "201"    # fib_nl_fill_rule (oifname=vpn0 hidden)
-check sysfs_ipv4_conf "ls /proc/sys/net/ipv4/conf"   "vpn0"   # getdents64 / proc_sys_lookup
-check sysfs_ipv6_neig "ls /proc/sys/net/ipv6/neigh"  "vpn0"   # getdents64
 check proc_net_dev    "cat /proc/net/dev"            "vpn0"   # dev_seq_show  (kpatch gap fixed)
 check proc_net_if_in6 "cat /proc/net/if_inet6"       "vpn0"   # if6_seq_show  (kpatch gap fixed)
 check tc_qdisc        "tc qdisc show"                "vpn0"   # tc_fill_qdisc (kpatch gap fixed)

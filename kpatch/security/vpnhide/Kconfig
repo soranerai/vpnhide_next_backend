@@ -4,9 +4,10 @@ config VPNHIDE
 	depends on SECURITY && NET && INET && BPF_SYSCALL
 	depends on IPV6
 	help
-	  Builds the VPNHide Next kernel subsystem. Intercepts sockets, VFS
-	  path lookups, directory listings, netlink dumps, route queries, and
-	  BPF map reads for target UIDs to hide active VPN interfaces.
+		Builds the VPNHide Next kernel subsystem. Intercepts sockets, netlink
+		dumps, route queries, and BPF map reads for target UIDs to hide active
+		VPN interfaces. Filesystem path hiding is provided by SUSFS when
+		available and is configured by the userspace daemon.
 
 	  Unlike the out-of-tree kmod version, this implementation patches
 	  call sites directly, eliminating kretprobe overhead and enabling
