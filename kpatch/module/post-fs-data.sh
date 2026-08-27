@@ -13,7 +13,15 @@ mkdir -p "$STATUS_DIR"
 NOW=$(date +%s 2>/dev/null)
 BOOT_ID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
 UNAME_R=$(uname -r 2>/dev/null)
-VERSION=$(grep '^version=' "$MODULE_PROP" 2>/dev/null | cut -d= -f2-)
+RUNTIME_VERSION=""
+RUNTIME_VERSION_CODE=""
+
+version_code_to_tag() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    printf 'v%d.%d.%d\n' "$(( $1 / 10000 ))" "$(( ($1 / 100) % 100 ))" "$(( $1 % 100 ))"
+}
 
 write_module_status() {
     status="$1"
@@ -46,6 +54,12 @@ elif [ ! -x "$CTL" ] || ! "$CTL" hook_status >/dev/null 2>&1; then
 else
     LOADED=1
     MSG="status: ok 😋"
+    RUNTIME_VERSION_CODE=$("$CTL" version kmod 2>/dev/null)
+    RUNTIME_VERSION=$(version_code_to_tag "$RUNTIME_VERSION_CODE") || {
+        LOADED=0
+        RUNTIME_VERSION_CODE=""
+        MSG="status: error (driver version unavailable) 😵"
+    }
 fi
 
 write_module_status "$MSG"
@@ -55,9 +69,9 @@ write_module_status "$MSG"
     printf 'boot_id=%s\n' "$BOOT_ID"
     printf 'uname_r=%s\n' "$UNAME_R"
     printf 'loaded=%s\n' "$LOADED"
-    printf 'runtime_version=%s\n' "$VERSION"
+    printf 'runtime_version=%s\n' "$RUNTIME_VERSION"
     printf 'provider=built-in\n'
-    printf 'version_code=%s\n' "$(grep '^versionCode=' "$MODULE_PROP" 2>/dev/null | cut -d= -f2-)"
+    printf 'version_code=%s\n' "$RUNTIME_VERSION_CODE"
     printf 'msg=%s\n' "$MSG"
 } > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
 chmod 0644 "$STATUS_FILE" 2>/dev/null
