@@ -19,6 +19,11 @@ The mode is selected by:
 `BLACKLIST` is the default. ABI v4 publishes `VPNHIDE_MATCH_INCLUDE`, so a UID
 matches a layer when it is present in that layer's list.
 
+`globalConfig.useNoMountForFileHiding` is an optional daemon setting. It
+defaults to `false`, which uses SUSFS path rules. When `true`, the daemon uses
+the installed NoMount `nm` binary to create whiteout rules for active VPN
+interface paths; this setting does not alter the kernel policy ABI.
+
 `ALLOWLIST` publishes `VPNHIDE_MATCH_EXCLUDE`. Lists contain exceptions, and
 the kernel evaluates membership as:
 

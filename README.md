@@ -64,6 +64,15 @@ current filesystem objects. If SUSFS or its command binary is
 unavailable, the daemon continues operating and writes a rate-limited message
 to `daemon.log`; the remaining kmod hooks are unaffected.
 
+### NoMount path hiding
+
+When `globalConfig.useNoMountForFileHiding` is `true`, the daemon uses the
+installed NoMount module instead of SUSFS. It invokes
+`/data/adb/modules/nomount/bin/nm rule add --whiteout <path>` for each active
+VPN interface path and removes only rules it created when switching back to
+SUSFS. NoMount must be installed and active; otherwise the daemon continues
+without filesystem path hiding and logs the unavailable binary.
+
 ## Applying kpatch
 
 `kpatch` does not produce a `.ko` file. It copies the driver into `security/vpnhide`, copies the public header into `include/linux`, and applies the version-specific patches to a `kernel/common` tree. VPNHide must then be built into the kernel with `CONFIG_VPNHIDE=y`.
