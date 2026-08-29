@@ -6,15 +6,15 @@
 #   "rich",
 # ]
 # ///
-"""Cut a new release: propagate the new version number to the kernel module properties file.
+"""Cut a release and selectively update native component versions.
 
 Usage:
-  release.py X.Y.Z [--kmod-version X.Y.Z] [--built-in-version X.Y.Z]
+  release.py X.Y.Z [--kmod-version X.Y.Z] [--kpatch-version X.Y.Z]
 
-The positional version is the release identifier. Native component versions
-default to their currently committed module.prop versions, so a release can
-update only kmod or only built-in. Passing both component options preserves
-the old all-components-at-once behavior.
+The positional version updates VERSION. With no component options, both kmod
+and KPatch receive that version. Passing a component option updates only that
+component; the other component remains untouched. --built-in-version is kept
+as a deprecated alias for --kpatch-version.
 """
 
 from __future__ import annotations
@@ -82,20 +82,34 @@ def module_version(path: Path) -> str:
     return match.group(1).strip()
 
 
+def write_version_file(version: str) -> None:
+    (REPO_ROOT / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+
+
 def main() -> int:
     console = Console()
-    if len(sys.argv) not in (2, 4, 6):
+    args = sys.argv[1:]
+    if not args or len(args) % 2 == 0:
         console.print(
-            "[red]usage:[/red] release.py X.Y.Z [--kmod-version X.Y.Z] [--built-in-version X.Y.Z]"
+            "[red]usage:[/red] release.py X.Y.Z [--kmod-version X.Y.Z] [--kpatch-version X.Y.Z]"
         )
         return 2
 
-    version, _ = parse_version(sys.argv[1])
-    options = dict(zip(sys.argv[2::2], sys.argv[3::2]))
-    allowed_options = {"--kmod-version", "--built-in-version"}
-    if set(options) - allowed_options:
-        console.print("[red]error:[/red] unknown option")
+    version, _ = parse_version(args[0])
+    option_pairs = list(zip(args[1::2], args[2::2]))
+    options = dict(option_pairs)
+    allowed_options = {"--kmod-version", "--kpatch-version", "--built-in-version"}
+    if set(options) - allowed_options or len(options) != len(option_pairs):
+        console.print("[red]error:[/red] unknown or duplicate option")
         return 2
+    if "--kpatch-version" in options and "--built-in-version" in options:
+        console.print("[red]error:[/red] use only --kpatch-version, not both aliases")
+        return 2
+    if "--built-in-version" in options:
+        console.print(
+            "[yellow]warning:[/yellow] --built-in-version is deprecated; use --kpatch-version"
+        )
+    kpatch_version = options.get("--kpatch-version", options.get("--built-in-version"))
     console.print(f"[bold]Updating native component versions for v{version}[/bold]")
 
     module_prop_kmod = REPO_ROOT / "kmod/module/module.prop"
@@ -111,28 +125,26 @@ def main() -> int:
     if not options:
         # Backward-compatible mode: release.py X.Y.Z updates both native
         # components, exactly as the old script did.
-        kmod_version = built_in_version = version
+        kmod_version = kpatch_version = version
     else:
-        kmod_version = options.get("--kmod-version", module_version(module_prop_kmod))
-        built_in_version = options.get(
-            "--built-in-version", module_version(module_prop_kpatch)
-        )
-    _, kmod_code = parse_version(kmod_version)
-    _, built_in_code = parse_version(built_in_version)
+        kmod_version = options.get("--kmod-version")
 
-    update_module_prop(module_prop_kmod, kmod_version, kmod_code)
-    console.print("  [green]✓[/green] kmod/module/module.prop updated successfully")
+    write_version_file(version)
+    console.print("  [green]✓[/green] VERSION")
 
-    update_module_prop(module_prop_kpatch, built_in_version, built_in_code)
-    console.print("  [green]✓[/green] kpatch/module/module.prop updated successfully")
+    if kmod_version is not None:
+        _, kmod_code = parse_version(kmod_version)
+        update_module_prop(module_prop_kmod, kmod_version, kmod_code)
+        update_version_header(header_kmod, kmod_code)
+        console.print("  [green]✓[/green] kmod/module/module.prop")
+        console.print("  [green]✓[/green] kmod/include/vpnhide.h")
 
-    update_version_header(header_kmod, kmod_code)
-    console.print("  [green]✓[/green] kmod/include/vpnhide.h updated successfully")
-
-    update_version_header(header_kpatch, built_in_code)
-    console.print(
-        "  [green]✓[/green] kpatch/security/vpnhide/vpnhide_uapi.h updated successfully"
-    )
+    if kpatch_version is not None:
+        _, kpatch_code = parse_version(kpatch_version)
+        update_module_prop(module_prop_kpatch, kpatch_version, kpatch_code)
+        update_version_header(header_kpatch, kpatch_code)
+        console.print("  [green]✓[/green] kpatch/module/module.prop")
+        console.print("  [green]✓[/green] kpatch/security/vpnhide/vpnhide_uapi.h")
 
     return 0
 
