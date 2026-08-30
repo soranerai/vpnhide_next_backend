@@ -1,4 +1,4 @@
-/* AUTO-GENERATED from data/interfaces.toml — do not edit by hand. Regenerate with: python3 scripts/codegen-interfaces.py */
+/* VPN interface-name matcher shared by the kernel module and host tests. */
 #ifndef VPNHIDE_GENERATED_IFACE_LISTS_H
 #define VPNHIDE_GENERATED_IFACE_LISTS_H
 

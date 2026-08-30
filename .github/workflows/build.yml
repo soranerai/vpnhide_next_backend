@@ -11,8 +11,8 @@ permissions:
   packages: read
 
 jobs:
-  build-native:
-    name: Build Rust native library (via Gradle + Gobley)
+  build-host:
+    name: Build Android host binaries
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/soranerai/vpnhide_next/ci:latest
@@ -26,42 +26,6 @@ jobs:
 
       - name: Mark workspace safe
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - name: Cache cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            /usr/local/cargo/registry
-            /usr/local/cargo/git
-            lsposed/native/target
-          key: cargo-${{ runner.os }}-native-${{ hashFiles('lsposed/native/Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-native-
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
-
-      - name: Build native lib via Gradle (Gobley cargo plugin, RELEASE)
-        run: |
-          cd lsposed
-          # Invoke Gobley's cargo task directly instead of assembleRelease —
-          # no Kotlin/resources/signing needed, just the Rust release profile
-          # (LTO, opt-level=z, strip=true).
-          ./gradlew :app:cargoBuildAndroidArm64Release
-
-      - name: Copy .so to artifacts
-        run: |
-          mkdir -p artifacts
-          # Find release .so from cargo release target
-          find lsposed -path '*/release/*' -name 'libvpnhide_checks.so' -type f ! -path '*/deps/*' | head -1 | xargs cp -t artifacts/
-          ls -lh artifacts/libvpnhide_checks.so
-
-      - name: Upload .so as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: libvpnhide_checks.so
-          path: artifacts/libvpnhide_checks.so
-          retention-days: 30
-          if-no-files-found: error
 
       # vpnhide-ctl/vpnhide-daemon must be static aarch64 Android (Bionic)
       # binaries — built with the Android NDK's aarch64-linux-android clang,
@@ -91,7 +55,7 @@ jobs:
 
   build-kmod:
     name: Build kernel module (${{ matrix.kmi }})
-    needs: build-native
+    needs: build-host
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -112,7 +76,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download host binaries (ctl, daemon) from build-native
+      - name: Download host binaries (ctl, daemon) from build-host
         uses: actions/download-artifact@v4
         with:
           name: vpnhide-host-binaries
@@ -148,7 +112,7 @@ jobs:
   # sparse-cloning itself from across repos.
   kmod-qemu:
     name: QEMU runtime test (${{ matrix.kmi }})
-    needs: build-native
+    needs: build-host
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -180,7 +144,7 @@ jobs:
       - name: Mark workspace safe
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Download ctl/daemon host binaries from build-native
+      - name: Download ctl/daemon host binaries from build-host
         uses: actions/download-artifact@v4
         with:
           name: vpnhide-host-binaries
@@ -202,7 +166,7 @@ jobs:
   # the same vector harness with VPNHide built in (no .ko).
   kpatch-qemu:
     name: Kpatch QEMU runtime test (${{ matrix.kmi }})
-    needs: build-native
+    needs: build-host
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -224,7 +188,7 @@ jobs:
       - name: Mark workspace safe
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Download ctl/daemon host binaries from build-native
+      - name: Download ctl/daemon host binaries from build-host
         uses: actions/download-artifact@v4
         with:
           name: vpnhide-host-binaries
@@ -259,7 +223,7 @@ jobs:
     # A release is immutable between tags. Branch pushes still run the build
     # and runtime checks above, but must never overwrite a published release.
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-native, build-kmod, kmod-qemu, kpatch-qemu]
+    needs: [build-host, build-kmod, kmod-qemu, kpatch-qemu]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -282,7 +246,6 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           echo "📌 Tag push detected: $TAG"
           gh release create "$TAG" \
-            dist/libvpnhide_checks.so/libvpnhide_checks.so \
             'dist/vpnhide-kmod-*/vpnhide-kmod-*.zip' \
             --repo "$REPO" \
             --draft=false \

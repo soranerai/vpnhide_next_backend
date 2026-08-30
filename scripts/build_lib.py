@@ -3,10 +3,8 @@
 Used by kmod/build.py, portshide/build-zip.py, zygisk/build.py,
 and scripts/build-version.py.
 
-Stdlib-only on purpose: scripts/build-version.py is invoked from
-lsposed/app/build.gradle.kts on every Gradle build, so adding pip/uv
-dependencies here would break the APK build for anyone without those
-tools available.
+Stdlib-only on purpose: these helpers are called by build scripts in minimal
+container environments, where extra Python dependencies are unavailable.
 """
 
 from __future__ import annotations

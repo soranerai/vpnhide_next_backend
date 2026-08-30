@@ -47,34 +47,12 @@ def main() -> int:
         action="store_true",
         help="Only check files without modifying them (CI mode)",
     )
-    parser.add_argument(
-        "--skip-gradle",
-        action="store_true",
-        help="Skip slow Gradle linting/testing tasks",
-    )
-    parser.add_argument(
-        "--skip-rust",
-        action="store_true",
-        help="Skip Rust linting/testing tasks",
-    )
     args = parser.parse_args()
 
     # Keep track of failed checks if we want to run all and report at the end
     failed = False
 
-    print("=== Step 1: Codegen drift check ===")
-    try:
-        run_command([sys.executable, "scripts/codegen-interfaces.py"])
-        # Check for modifications in data/
-        diff_res = subprocess.run(["git", "diff", "--exit-code", "data/"], cwd=ROOT_DIR)
-        if diff_res.returncode != 0:
-            print("Error: Interfaces codegen drifted from data/!")
-            failed = True
-    except Exception as e:
-        print(f"Error checking codegen drift: {e}")
-        failed = True
-
-    print("\n=== Step 2: Python (ruff) ===")
+    print("=== Step 1: Python (ruff) ===")
     if is_tool_available("ruff"):
         # Format
         ruff_fmt = ["ruff", "format"]
@@ -96,65 +74,7 @@ def main() -> int:
     else:
         print("Warning: 'ruff' not found. Skipping Python lint/format.")
 
-    print("\n=== Step 3: Rust (lsposed native) ===")
-    if args.skip_rust:
-        print("Skipping Rust checks as requested.")
-    elif is_tool_available("cargo"):
-        rust_dir = ROOT_DIR / "lsposed/native"
-        # fmt
-        rust_fmt = ["cargo", "fmt"]
-        if args.check:
-            rust_fmt.append("--check")
-        try:
-            run_command(rust_fmt, cwd=rust_dir)
-        except subprocess.CalledProcessError:
-            failed = True
-
-        # clippy
-        if is_tool_available("cargo-ndk"):
-            try:
-                run_command(
-                    [
-                        "cargo",
-                        "ndk",
-                        "-t",
-                        "arm64-v8a",
-                        "clippy",
-                        "--tests",
-                        "--",
-                        "-D",
-                        "warnings",
-                    ],
-                    cwd=rust_dir,
-                )
-            except subprocess.CalledProcessError:
-                failed = True
-        else:
-            print("Warning: 'cargo-ndk' not found. Falling back to host cargo clippy.")
-            try:
-                run_command(
-                    [
-                        "cargo",
-                        "clippy",
-                        "--tests",
-                        "--",
-                        "-D",
-                        "warnings",
-                    ],
-                    cwd=rust_dir,
-                )
-            except subprocess.CalledProcessError:
-                failed = True
-
-        # test
-        try:
-            run_command(["cargo", "test"], cwd=rust_dir)
-        except subprocess.CalledProcessError:
-            failed = True
-    else:
-        print("Warning: 'cargo' not found. Skipping Rust checks.")
-
-    print("\n=== Step 4: Shell scripts (shellcheck) ===")
+    print("\n=== Step 2: Shell scripts (shellcheck) ===")
     if is_tool_available("shellcheck"):
         shell_files = [
             "kmod/module/kmi-check.sh",
@@ -183,7 +103,7 @@ def main() -> int:
     else:
         print("Warning: 'shellcheck' not found. Skipping shell script lint.")
 
-    print("\n=== Step 5: C (clang-format + host test) ===")
+    print("\n=== Step 3: C (clang-format + host test) ===")
     # clang-format
     if is_tool_available("clang-format"):
         c_fmt = ["clang-format"]
@@ -191,11 +111,14 @@ def main() -> int:
             c_fmt.extend(["--dry-run", "--Werror"])
         else:
             c_fmt.append("-i")
-        c_fmt.append("kmod/vpnhide_kmod.c")
-        try:
-            run_command(c_fmt)
-        except subprocess.CalledProcessError:
-            failed = True
+        c_files = sorted(
+            str(path.relative_to(ROOT_DIR)) for path in (ROOT_DIR / "kmod").glob("*.c")
+        )
+        if c_files:
+            try:
+                run_command(c_fmt + c_files)
+            except subprocess.CalledProcessError:
+                failed = True
     else:
         print("Warning: 'clang-format' not found. Skipping C formatting.")
 
@@ -236,36 +159,6 @@ def main() -> int:
                     test_bin.unlink()
     else:
         print("Warning: 'gcc' not found. Skipping host C test.")
-
-    print("\n=== Step 6: Kotlin (ktlint + gradle) ===")
-    # ktlint check/format
-    if is_tool_available("ktlint"):
-        ktlint_cmd = ["ktlint"]
-        if not args.check:
-            ktlint_cmd.append("-F")
-        ktlint_cmd.append("lsposed/app/src/**/*.kt")
-        try:
-            run_command(ktlint_cmd)
-        except subprocess.CalledProcessError:
-            failed = True
-    else:
-        print("Warning: 'ktlint' not found. Skipping Kotlin code style checks.")
-
-    # gradle tests & lint
-    if args.skip_gradle:
-        print("Skipping slow Gradle tasks.")
-    else:
-        gradlew = ROOT_DIR / "lsposed/gradlew"
-        if gradlew.exists():
-            try:
-                run_command(
-                    ["./gradlew", ":app:lintDebug", ":app:testDebugUnitTest"],
-                    cwd=ROOT_DIR / "lsposed",
-                )
-            except subprocess.CalledProcessError:
-                failed = True
-        else:
-            print("Warning: gradlew wrapper not found in lsposed/.")
 
     if failed:
         print("\n[!] Some lint checks or tests FAILED.")

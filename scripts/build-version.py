@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Print the effective build version for vpnhide_next artifacts.
 
-Used by every packaging step (module.prop, APK versionName, CI
-artifact names) so dev builds are unambiguously identifiable at a
-glance. Called from `app/build.gradle.kts` on every Gradle build, so
-stays on stdlib only — Gradle shouldn't need `uv` / external deps to
-assemble the APK.
+Used by every packaging step (module.prop and CI artifact names), so dev
+builds are unambiguously identifiable at a glance. It stays stdlib-only for
+minimal build environments.
 """
 
 from __future__ import annotations
