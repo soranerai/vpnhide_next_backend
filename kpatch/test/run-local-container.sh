@@ -152,8 +152,8 @@ for KMI in "${KMIS[@]}"; do
             export PATH="$CLANG_BIN:$PATH"
             KSRC="$VPNHIDE_QEMU_KSRC"   # /opt/qemu/linux (pre-built, writable in container)
 
-            # Map the KMI to a version patchset directory. The kernel version
-            # (suffix) selects the patchset, not the android generation.
+            # Map the KMI to a compatibility profile. The kernel version
+            # (suffix) selects the profile, not the android generation.
             case "$KMI" in
 				upstream-4.19) PATCHVER=upstream-4.19 ;;
 				*-5.4)   PATCHVER=android12-5.4  ;;
@@ -163,12 +163,12 @@ for KMI in "${KMIS[@]}"; do
                 *-6.6)   PATCHVER=android15-6.6  ;;
                 *-6.12)  PATCHVER=android16-6.12 ;;
                 *-6.18)  PATCHVER=android17-6.18 ;;
-                *) echo "ERROR: no VPNHide patchset for KMI $KMI"; exit 1 ;;
+                *) echo "ERROR: no VPNHide compatibility profile for KMI $KMI"; exit 1 ;;
             esac
 
-            echo "[kpatch/$KMI] Applying VPNHide in-tree patches (apply.sh, $PATCHVER)…"
+            echo "[kpatch/$KMI] Applying VPNHide in-tree integration (apply.sh, $PATCHVER)…"
             # apply.sh copies security/vpnhide + include/linux/vpnhide.h and
-            # applies versions/$PATCHVER/*.patch into the tree.
+            # structurally injects modern GKI call sites.
             bash /repo/kpatch/scripts/apply.sh "$KSRC" "$PATCHVER"
 
             echo "[kpatch/$KMI] Enabling CONFIG_VPNHIDE=y (incremental)…"

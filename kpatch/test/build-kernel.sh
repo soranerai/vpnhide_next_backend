@@ -3,8 +3,8 @@
 #
 # Differences from kmod/test/build-kernel.sh:
 #   - kpatch/scripts/apply.sh is applied to the cloned source tree before building
-#     (copies security/vpnhide/ + include/linux/vpnhide.h and applies the
-#      versions/<ver>/*.patch set for the KMI's kernel version).
+#     (copies security/vpnhide/ + include/linux/vpnhide.h and structurally
+#      injects modern GKI call sites; 4.19/5.4 use exact legacy patches).
 #   - CONFIG_VPNHIDE=y is set via qemu.config (no .ko produced or needed).
 #
 # Usage:  kpatch/test/build-kernel.sh <kmi>          e.g. android14-6.1
@@ -55,9 +55,9 @@ echo "[build-kernel/kpatch] $KMI: bounded build (jobs=$BUILD_JOBS memory=$BUILD_
 	esac
 	cd /tmp/linux
 
-	# 2. Apply VPNHide in-tree patches via apply.sh (copies security/vpnhide +
-	#    include/linux/vpnhide.h and applies versions/<ver>/*.patch).
-	#    The kernel version (KMI suffix) selects the patchset.
+	# 2. Apply VPNHide in-tree integration via apply.sh (copies security/vpnhide +
+	#    include/linux/vpnhide.h and structurally injects modern call sites).
+	#    The kernel version (KMI suffix) selects the compatibility profile.
 	case "$KMI" in
 		upstream-4.19) PATCHVER=upstream-4.19 ;;
 		*-5.4)   PATCHVER=android12-5.4  ;;
@@ -67,7 +67,7 @@ echo "[build-kernel/kpatch] $KMI: bounded build (jobs=$BUILD_JOBS memory=$BUILD_
 		*-6.6)   PATCHVER=android15-6.6  ;;
 		*-6.12)  PATCHVER=android16-6.12 ;;
 		*-6.18)  PATCHVER=android17-6.18 ;;
-		*) echo "ERROR: no VPNHide patchset for KMI $KMI"; exit 1 ;;
+		*) echo "ERROR: no VPNHide compatibility profile for KMI $KMI"; exit 1 ;;
 	esac
 	bash /repo/kpatch/scripts/apply.sh /tmp/linux "$PATCHVER"
 

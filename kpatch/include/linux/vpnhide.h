@@ -37,6 +37,8 @@
 
 bool vpnhide_should_hide_dev(const struct net_device *dev);
 bool vpnhide_should_hide_ifname(const char *ifname);
+bool is_target_uid_val(uid_t uid);
+bool is_target_uid(void);
 
 /* ------------------------------------------------------------------ */
 /* Socket                                                               */
@@ -50,6 +52,8 @@ int  vpnhide_connect_pre(struct socket *sock,
 			 struct sockaddr *addr, int addrlen);
 int  vpnhide_bind_pre(struct socket *sock,
 		      struct sockaddr *addr, int addrlen);
+void vpnhide_bind_post(struct socket *sock, int error);
+void vpnhide_listen_post(struct socket *sock, int error);
 void vpnhide_getname_post(struct socket *sock, struct sockaddr *addr, int peer);
 void vpnhide_pktinfo4_post(struct in_pktinfo *info);
 void vpnhide_pktinfo6_post(struct in6_pktinfo *info);
@@ -102,6 +106,8 @@ struct in6_pktinfo;
 static inline bool vpnhide_should_hide_dev(const struct net_device *d)
 	{ return false; }
 static inline bool vpnhide_should_hide_ifname(const char *n) { return false; }
+static inline bool is_target_uid_val(uid_t uid) { return false; }
+static inline bool is_target_uid(void) { return false; }
 static inline int vpnhide_setsockopt_sock(struct socket *sock, int lv, int opt,
 	VPNHIDE_SOCKPTR_T v, unsigned int l) { return 0; }
 static inline void vpnhide_getsockopt_post(struct socket *sock, int lv,
@@ -110,6 +116,8 @@ static inline int vpnhide_connect_pre(struct socket *sock,
 	struct sockaddr *a, int l) { return 0; }
 static inline int vpnhide_bind_pre(struct socket *sock,
 	struct sockaddr *a, int l) { return 0; }
+static inline void vpnhide_bind_post(struct socket *sock, int error) {}
+static inline void vpnhide_listen_post(struct socket *sock, int error) {}
 static inline void vpnhide_getname_post(struct socket *sock,
 	struct sockaddr *a, int p) {}
 static inline void vpnhide_pktinfo4_post(struct in_pktinfo *i) {}

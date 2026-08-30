@@ -3,7 +3,8 @@
 # apply.sh — apply VPNHide in-tree patches to a GKI kernel source tree
 #
 # Usage: apply.sh <kernel_common_dir> <version>
-#   version: android12-5.10 | android13-5.15 | android14-6.1 |
+#   version: android12-5.10 | android13-5.10 | android13-5.15 | android14-5.15 |
+#            android14-6.1 |
 #            android15-6.6  | android16-6.12 | android17-6.18
 # =============================================================================
 set -euo pipefail
@@ -17,13 +18,13 @@ KPATCH_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PATCHES_DIR="$KPATCH_DIR/versions/$VERSION"
 DRIVER_DIR="$KPATCH_DIR/security/vpnhide"
 HEADER="$KPATCH_DIR/include/linux/vpnhide.h"
+MODERN_INJECTOR="$SCRIPT_DIR/inject_modern.py"
 
 # --------------------------------------------------------------------------
 log() { echo "[apply.sh] $*"; }
 die() { echo "[apply.sh] ERROR: $*" >&2; exit 1; }
 
 [ -d "$KERNEL_DIR" ]  || die "kernel dir not found: $KERNEL_DIR"
-[ -d "$PATCHES_DIR" ] || die "no patches for version '$VERSION' (dir missing: $PATCHES_DIR)"
 [ -d "$DRIVER_DIR" ]  || die "driver source not found: $DRIVER_DIR"
 [ -f "$HEADER" ]      || die "vpnhide.h not found: $HEADER"
 
@@ -41,27 +42,38 @@ log "Copying include/linux/vpnhide.h..."
 cp "$HEADER" "$KERNEL_DIR/include/linux/vpnhide.h"
 
 # --------------------------------------------------------------------------
-# 3. Apply per-file patches in sorted order
+# 3. Inject modern call sites structurally, or apply exact legacy diffs.
 # --------------------------------------------------------------------------
+case "$VERSION" in
+    android12-5.10|android13-5.10|android13-5.15|android14-5.15|android14-6.1|android15-6.6|android16-6.12|android17-6.18)
+        [ -f "$MODERN_INJECTOR" ] || die "modern injector missing: $MODERN_INJECTOR"
+        log "Injecting modern VPNHide hooks structurally..."
+        python3 "$MODERN_INJECTOR" "$KERNEL_DIR" \
+            || die "modern hook injection failed"
+        log "Done. Applied structural hooks for $VERSION."
+        exit 0
+        ;;
+    android12-5.4|upstream-4.19)
+        [ -d "$PATCHES_DIR" ] || die "no legacy patches for version '$VERSION'"
+        ;;
+    *)
+        die "unsupported version '$VERSION'"
+        ;;
+esac
+
+log "Applying exact legacy patch profile for $VERSION..."
 PATCH_COUNT=0
 for p in $(ls "$PATCHES_DIR"/*.patch 2>/dev/null | sort); do
     log "Applying $(basename "$p")..."
-	FUZZ=3
-	if [[ "$VERSION" == "android12-5.4" || "$VERSION" == "upstream-4.19" ]]; then
-		FUZZ=0
-	fi
-	patch -p1 --forward --fuzz="$FUZZ" --no-backup-if-mismatch -d "$KERNEL_DIR" < "$p" \
+    patch -p1 --forward --fuzz=0 --no-backup-if-mismatch -d "$KERNEL_DIR" < "$p" \
         || die "patch failed: $p"
     PATCH_COUNT=$(( PATCH_COUNT + 1 ))
 done
 
-if [ "$PATCH_COUNT" -eq 0 ]; then
-    die "No .patch files found in $PATCHES_DIR"
-fi
+[ "$PATCH_COUNT" -gt 0 ] || die "No .patch files found in $PATCHES_DIR"
 
 # --------------------------------------------------------------------------
-# 4. Version-specific sed fixups for hooks that can't be reliably patched
-#    due to structural differences between kernel sublevels.
+# 4. Legacy profile post-processing.
 # --------------------------------------------------------------------------
 
 # android12/13-5.10: dev_ifconf loop body varies between sublevels
