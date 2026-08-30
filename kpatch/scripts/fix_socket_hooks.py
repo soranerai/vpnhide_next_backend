@@ -89,13 +89,17 @@ def _statement_span(lines, start_idx, open_marker):
 
 def fix_bind(lines):
     func_start = _find_function(lines, "int __sys_bind_socket(")
+    legacy_shape = False
     if func_start is None:
-        print("ERROR: __sys_bind_socket not found in socket.c")
+        func_start = _find_function(lines, "int __sys_bind(")
+        legacy_shape = func_start is not None
+    if func_start is None:
+        print("ERROR: bind implementation not found in socket.c")
         return lines
 
     func_end = len(lines)
     for i in range(func_start + 1, len(lines)):
-        if lines[i].startswith("int __sys_bind("):
+        if not legacy_shape and lines[i].startswith("int __sys_bind("):
             func_end = i
             break
 
@@ -105,7 +109,8 @@ def fix_bind(lines):
 
     target_idx = None
     for i in range(func_start, func_end):
-        if "READ_ONCE(sock->ops)->bind(sock," in lines[i]:
+        if ("READ_ONCE(sock->ops)->bind(sock," in lines[i] or
+                "sock->ops->bind(sock," in lines[i]):
             target_idx = i
             break
     if target_idx is None:
@@ -113,7 +118,9 @@ def fix_bind(lines):
         return lines
 
     guard_idx = target_idx - 1
-    if "if (!err)" not in lines[guard_idx]:
+    while guard_idx >= func_start and "if (!err)" not in lines[guard_idx]:
+        guard_idx -= 1
+    if guard_idx < func_start:
         print(
             "ERROR: unexpected code shape before bind() call, aborting bind hook injection"
         )
@@ -128,9 +135,10 @@ def fix_bind(lines):
         lines[guard_idx].rstrip("\n").replace("if (!err)", "if (!err) {") + "\n"
     )
 
+    address_expr = "&address" if legacy_shape else "address"
     hook = [
         "#ifdef CONFIG_VPNHIDE\n",
-        "\t\tvpnhide_bind_pre(sock, (struct sockaddr *)address, addrlen);\n",
+        f"\t\tvpnhide_bind_pre(sock, (struct sockaddr *){address_expr}, addrlen);\n",
         "#endif\n",
     ]
     post_hook = [
