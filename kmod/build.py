@@ -30,7 +30,7 @@ Examples:
                                                     # local kernel source
 
 The DDK container tag (`DDK_IMAGE_TAG`) is the single source of truth for
-both this script and `.github/workflows/ci.yml`'s kmod matrix — keep them
+both this script and `.github/workflows/build.yml`'s kmod matrix — keep them
 in sync when bumping.
 """
 
@@ -54,10 +54,11 @@ from build_lib import (  # type: ignore[import-not-found]
 # Module file name on disk after `make`.
 KMOD_KO = "vpnhide_kmod.ko"
 
-# Tag of `ghcr.io/ylarod/ddk-min:<kmi>-<TAG>`. Keep this in lockstep with
-# the same constant in `.github/workflows/ci.yml` so a bump rebuilds
-# locally and in CI from the exact same image.
-DDK_IMAGE_TAG = "20260313"
+# Tag suffix of `ghcr.io/ylarod/ddk-min:<kmi>[-<TAG>]`.  Ylarod currently
+# publishes the GKI images under their plain KMI tags (for example,
+# `android17-6.18`), so no dated suffix is used.  Keep this in lockstep with
+# `.github/workflows/build.yml`.
+DDK_IMAGE_TAG = ""
 
 # Every GKI variant we publish a kmod for. Order matches the CI matrix.
 GKI_VARIANTS = (
@@ -95,8 +96,13 @@ def detect_clang_dir() -> str | None:
 
 def detect_kdir(kmi: str) -> str | None:
     """`/opt/ddk/kdir/<kmi>` is laid out by the DDK image."""
-    kdir = Path("/opt/ddk/kdir") / kmi
+    kdir = Path("/opt/ddk/kdir") / ddk_kmi(kmi)
     return str(kdir) if kdir.is_dir() else None
+
+
+def ddk_kmi(kmi: str) -> str:
+    """Map project KMI names to the matching ylarod DDK image names."""
+    return kmi
 
 
 def build_ctl_host(repo_root: Path, kmod_dir: Path) -> Path:
@@ -416,7 +422,10 @@ def find_runtime() -> tuple[str, bool]:
 def container_build_one(
     runtime: str, is_podman: bool, repo_root: Path, kmi: str
 ) -> None:
-    image = f"ghcr.io/ylarod/ddk-min:{kmi}-{DDK_IMAGE_TAG}"
+    tag = ddk_kmi(kmi)
+    if DDK_IMAGE_TAG:
+        tag += f"-{DDK_IMAGE_TAG}"
+    image = f"ghcr.io/ylarod/ddk-min:{tag}"
     mount_spec = f"{repo_root}:/work"
     cmd = [runtime, "run", "--rm"]
     if is_podman:

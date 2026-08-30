@@ -70,7 +70,7 @@ jobs:
           - android17-6.18
     # DDK image from public ylarod — doesn't depend on our repo
     container:
-      image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-20260313
+      image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}
     steps:
       - uses: actions/checkout@v6
         with:
