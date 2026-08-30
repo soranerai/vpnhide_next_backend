@@ -1,4 +1,4 @@
-/* AUTO-GENERATED from data/interfaces.toml — do not edit by hand. Regenerate with: python3 scripts/codegen-interfaces.py */
+/* Test vectors for the VPN interface-name matcher. */
 /*
  * Userspace test driver for generated/iface_lists.h.
  * Build: gcc -O2 -Wall -Werror -o test_iface_lists test_iface_lists.c

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Generates Magisk/KSU updateJson files pointing to the current VERSION.
+# Generates Magisk/KSU updateJson files for the latest release tag.
 # Run AFTER the GitHub release is published so zipUrl is already valid.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION="$(tr -d '[:space:]' < VERSION)"
+VERSION="$(git describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null | sed 's/^v//')"
 
 if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "error: VERSION must be MAJOR.MINOR.PATCH, got '$VERSION'" >&2
+    echo "error: latest Git tag must be vMAJOR.MINOR.PATCH, got '$VERSION'" >&2
     exit 1
 fi
 
@@ -53,4 +53,3 @@ cat > "update-json/update-bridge.json" <<EOJSON
 }
 EOJSON
 echo "  update-json/update-bridge.json"
-

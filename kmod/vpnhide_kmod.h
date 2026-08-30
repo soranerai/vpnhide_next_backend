@@ -67,9 +67,6 @@
 #define BPF_FS_MAGIC 0xcafe4a4b
 #endif
 
-#ifndef CONFIG_ARM64
-#endif
-
 #ifndef IP_MTU_DISCOVER
 #define IP_MTU_DISCOVER 10
 #endif

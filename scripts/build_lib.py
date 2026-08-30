@@ -3,10 +3,8 @@
 Used by kmod/build.py, portshide/build-zip.py, zygisk/build.py,
 and scripts/build-version.py.
 
-Stdlib-only on purpose: scripts/build-version.py is invoked from
-lsposed/app/build.gradle.kts on every Gradle build, so adding pip/uv
-dependencies here would break the APK build for anyone without those
-tools available.
+Stdlib-only on purpose: these helpers are called by build scripts in minimal
+container environments, where extra Python dependencies are unavailable.
 """
 
 from __future__ import annotations
@@ -42,7 +40,7 @@ def get_build_version(repo_root: Path | None = None) -> str:
     - HEAD on a tag vX.Y.Z        -> "X.Y.Z"          (release build)
     - N commits after tag vX.Y.Z  -> "X.Y.Z-N-gSHA"   (dev build)
     - working tree dirty          -> additional "-dirty" suffix
-    - no git / no matching tag    -> falls back to VERSION file
+    - no git / no matching tag    -> "0.0.0-unknown"
     """
     if repo_root is None:
         repo_root = Path(__file__).resolve().parent.parent
@@ -56,5 +54,4 @@ def get_build_version(repo_root: Path | None = None) -> str:
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip().removeprefix("v")
 
-    version_file = repo_root / "VERSION"
-    return version_file.read_text(encoding="utf-8").strip()
+    return "0.0.0-unknown"

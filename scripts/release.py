@@ -11,10 +11,10 @@
 Usage:
   release.py X.Y.Z [--kmod-version X.Y.Z] [--kpatch-version X.Y.Z]
 
-The positional version updates VERSION. With no component options, both kmod
-and KPatch receive that version. Passing a component option updates only that
-component; the other component remains untouched. --built-in-version is kept
-as a deprecated alias for --kpatch-version.
+With no component options, both kmod and KPatch receive the positional
+version. Passing a component option updates only that component; the other
+remains untouched. --built-in-version is kept as a deprecated alias for
+--kpatch-version.
 """
 
 from __future__ import annotations
@@ -82,10 +82,6 @@ def module_version(path: Path) -> str:
     return match.group(1).strip()
 
 
-def write_version_file(version: str) -> None:
-    (REPO_ROOT / "VERSION").write_text(f"{version}\n", encoding="utf-8")
-
-
 def main() -> int:
     console = Console()
     args = sys.argv[1:]
@@ -128,9 +124,6 @@ def main() -> int:
         kmod_version = kpatch_version = version
     else:
         kmod_version = options.get("--kmod-version")
-
-    write_version_file(version)
-    console.print("  [green]✓[/green] VERSION")
 
     if kmod_version is not None:
         _, kmod_code = parse_version(kmod_version)

@@ -16,7 +16,7 @@ We follow a loose conventional-commits style for changelog generation and easier
 - `chore:` — tooling, release, CI, build
 - `ci:` — CI-only changes
 
-Scope the prefix where useful: `feat(lsposed): …`, `fix(kmod): …`.
+Scope the prefix where useful: `feat(kpatch): …`, `fix(kmod): …`.
 
 Keep messages focused on *why*, not *what* — the diff already shows what changed.
 
@@ -36,10 +36,4 @@ Keep messages focused on *why*, not *what* — the diff already shows what chang
 
 ## Coding style
 
-- **Kotlin**: Follow official Kotlin style guide. Use `ktlint` to check.
-- **Rust**: Use `rustfmt` and `clippy`.
 - **C**: Follow Linux kernel coding style for `kmod`.
-
-## UI/UX guidelines
-
-We aim for a "premium" feel. Use modern components, smooth animations, and a cohesive color palette. Avoid simple MVPs; prioritize visual excellence.
