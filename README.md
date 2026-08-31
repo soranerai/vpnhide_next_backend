@@ -65,7 +65,7 @@ without filesystem path hiding and logs the unavailable binary.
 
 ## Applying kpatch
 
-`kpatch` does not produce a `.ko` file. It copies the driver into `security/vpnhide`, copies the public header into `include/linux`, and structurally injects the call sites for modern GKI trees. The legacy 4.19 and 5.4 profiles retain exact compatibility patches. VPNHide must then be built into the kernel with `CONFIG_VPNHIDE=y`.
+`kpatch` does not produce a `.ko` file. It copies the driver into `security/vpnhide`, copies the public header into `include/linux`, and structurally injects the call sites for every supported profile, including legacy 4.19 and 5.4. VPNHide must then be built into the kernel with `CONFIG_VPNHIDE=y`.
 
 The source tree must be clean before applying the integration:
 
@@ -136,7 +136,7 @@ The test build uses the DDK container and stores the result at `kpatch/test/.cac
 
 ### Применение kpatch
 
-`kpatch` встраивает драйвер в дерево `kernel/common` и не создаёт `.ko`. Для современных GKI точки вызова вставляются структурным скриптом; для legacy 4.19/5.4 сохранены точные compatibility-патчи. Исходное дерево должно быть чистым:
+`kpatch` встраивает драйвер в дерево `kernel/common` и не создаёт `.ko`. Точки вызова для всех поддерживаемых профилей, включая legacy 4.19/5.4, вставляются структурными Python-скриптами. Исходное дерево должно быть чистым:
 
 ```bash
 ./kpatch/scripts/apply.sh /path/to/kernel/common android14-6.1

@@ -2,8 +2,8 @@
 """Structure-aware VPNHide injector for Android common 5.10 and newer.
 
 This intentionally edits only named functions and fails when an expected
-anchor is absent or ambiguous.  It replaces context-sensitive patch files for
-the modern GKI profiles; legacy 4.19/5.4 still use their exact diff profiles.
+anchor is absent or ambiguous.  Legacy 4.19/5.4 use the sibling
+``inject_legacy.py`` profile-specific structural injector.
 """
 
 from __future__ import annotations

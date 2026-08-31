@@ -15,10 +15,10 @@ VERSION="${2:?Usage: $0 <kernel_common_dir> <version>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 KPATCH_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-PATCHES_DIR="$KPATCH_DIR/versions/$VERSION"
 DRIVER_DIR="$KPATCH_DIR/security/vpnhide"
 HEADER="$KPATCH_DIR/include/linux/vpnhide.h"
 MODERN_INJECTOR="$SCRIPT_DIR/inject_modern.py"
+LEGACY_INJECTOR="$SCRIPT_DIR/inject_legacy.py"
 
 # --------------------------------------------------------------------------
 log() { echo "[apply.sh] $*"; }
@@ -42,7 +42,7 @@ log "Copying include/linux/vpnhide.h..."
 cp "$HEADER" "$KERNEL_DIR/include/linux/vpnhide.h"
 
 # --------------------------------------------------------------------------
-# 3. Inject modern call sites structurally, or apply exact legacy diffs.
+# 3. Inject call sites structurally for every supported profile.
 # --------------------------------------------------------------------------
 case "$VERSION" in
     android12-5.10|android13-5.10|android13-5.15|android14-5.15|android14-6.1|android15-6.6|android16-6.12|android17-6.18)
@@ -54,27 +54,17 @@ case "$VERSION" in
         exit 0
         ;;
     android12-5.4|upstream-4.19)
-        [ -d "$PATCHES_DIR" ] || die "no legacy patches for version '$VERSION'"
+        [ -f "$LEGACY_INJECTOR" ] || die "legacy injector missing: $LEGACY_INJECTOR"
+        log "Injecting legacy VPNHide hooks structurally for $VERSION..."
+        python3 "$LEGACY_INJECTOR" "$KERNEL_DIR" "$VERSION" \
+            || die "legacy hook injection failed"
+        log "Done. Applied structural hooks for $VERSION."
+        exit 0
         ;;
     *)
         die "unsupported version '$VERSION'"
         ;;
 esac
-
-log "Applying exact legacy patch profile for $VERSION..."
-PATCH_COUNT=0
-for p in $(ls "$PATCHES_DIR"/*.patch 2>/dev/null | sort); do
-    log "Applying $(basename "$p")..."
-    patch -p1 --forward --fuzz=0 --no-backup-if-mismatch -d "$KERNEL_DIR" < "$p" \
-        || die "patch failed: $p"
-    PATCH_COUNT=$(( PATCH_COUNT + 1 ))
-done
-
-[ "$PATCH_COUNT" -gt 0 ] || die "No .patch files found in $PATCHES_DIR"
-
-# --------------------------------------------------------------------------
-# 4. Legacy profile post-processing.
-# --------------------------------------------------------------------------
 
 # android12/13-5.10: dev_ifconf loop body varies between sublevels
 # (older: gifconf_list[i] loop; newer: inet_gifconf).
@@ -146,24 +136,15 @@ SOCKET_C="$KERNEL_DIR/net/socket.c"
 if [ -f "$SOCKET_C" ]; then
     log "Applying socket vpnhide hooks in $SOCKET_C..."
     EXTRA_FLAGS=()
-    # Legacy patchsets contain exact socket call-site edits.  The modern
-    # injector assumes post-5.10 syscall shapes and can silently place a hook
-    # in the wrong function on 5.4/4.19.
-    if [[ "$VERSION" != "android12-5.4" && "$VERSION" != "upstream-4.19" ]]; then
-        EXTRA_FLAGS+=("--connect")
-    fi
+    EXTRA_FLAGS+=("--connect")
     if [[ "$VERSION" == "android15-6.6" || "$VERSION" == "android16-6.12" ]]; then
         EXTRA_FLAGS+=("--setsockopt")
     fi
     if [[ "$VERSION" == "android16-6.12" || "$VERSION" == "android17-6.18" ]]; then
         EXTRA_FLAGS+=("--bind-getname")
     fi
-    if [[ "$VERSION" == "android12-5.4" || "$VERSION" == "upstream-4.19" ]]; then
-        log "Legacy socket hooks are already present in the exact patch; skipping injector."
-    else
-        "$SCRIPT_DIR/fix_socket_hooks.py" "$SOCKET_C" "${EXTRA_FLAGS[@]}" \
-            || die "socket hook injection failed for $SOCKET_C"
-    fi
+    "$SCRIPT_DIR/fix_socket_hooks.py" "$SOCKET_C" "${EXTRA_FLAGS[@]}" \
+        || die "socket hook injection failed for $SOCKET_C"
 fi
 
 # Rewrite packet-info immediately before put_cmsg(). This keeps the ancillary
@@ -172,4 +153,4 @@ log "Applying ancillary packet-info hooks..."
 "$SCRIPT_DIR/fix_cmsg_hooks.py" "$KERNEL_DIR" \
 	|| die "ancillary packet-info hook injection failed"
 
-log "Done. Applied $PATCH_COUNT patches for $VERSION."
+log "Done. Applied structural hooks for $VERSION."

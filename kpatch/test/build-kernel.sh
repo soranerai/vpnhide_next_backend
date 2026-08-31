@@ -4,7 +4,7 @@
 # Differences from kmod/test/build-kernel.sh:
 #   - kpatch/scripts/apply.sh is applied to the cloned source tree before building
 #     (copies security/vpnhide/ + include/linux/vpnhide.h and structurally
-#      injects modern GKI call sites; 4.19/5.4 use exact legacy patches).
+#      injects call sites structurally for every supported profile).
 #   - CONFIG_VPNHIDE=y is set via qemu.config (no .ko produced or needed).
 #
 # Usage:  kpatch/test/build-kernel.sh <kmi>          e.g. android14-6.1
