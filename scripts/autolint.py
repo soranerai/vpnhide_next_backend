@@ -112,7 +112,9 @@ def main() -> int:
         else:
             c_fmt.append("-i")
         c_files = sorted(
-            str(path.relative_to(ROOT_DIR)) for path in (ROOT_DIR / "kmod").glob("*.c")
+            str(path.relative_to(ROOT_DIR))
+            for source_dir in (ROOT_DIR / "kmod", ROOT_DIR / "daemon")
+            for path in source_dir.glob("*.c")
         )
         if c_files:
             try:

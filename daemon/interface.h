@@ -16,9 +16,8 @@
  * interface or the address used for socket-name spoofing.  Match the prefix
  * so additional dummy instances and vendor-suffixed variants are covered.
  */
-static inline bool vpnhide_daemon_is_cover_candidate(const char *ifname)
-{
-	return ifname && ifname[0] && strncmp(ifname, "dummy", 5) != 0;
+static inline bool vpnhide_daemon_is_cover_candidate(const char *ifname) {
+  return ifname && ifname[0] && strncmp(ifname, "dummy", 5) != 0;
 }
 
 /*
@@ -31,31 +30,27 @@ static inline bool vpnhide_daemon_is_cover_candidate(const char *ifname)
  * scoring code.  An explicit static/configured VPN-name match still wins;
  * this exception only narrows the anonymous point-to-point heuristic.
  */
-static inline bool vpnhide_daemon_is_cellular_uplink(const char *ifname)
-{
-	return ifname &&
-	       (strncmp(ifname, "rmnet", 5) == 0 ||
-		strncmp(ifname, "ccmni", 5) == 0 ||
-		strncmp(ifname, "epdg", 4) == 0 ||
-		strncmp(ifname, "r_net", 5) == 0 ||
-		strncmp(ifname, "pdp", 3) == 0);
+static inline bool vpnhide_daemon_is_cellular_uplink(const char *ifname) {
+  return ifname &&
+         (strncmp(ifname, "rmnet", 5) == 0 ||
+          strncmp(ifname, "ccmni", 5) == 0 || strncmp(ifname, "epdg", 4) == 0 ||
+          strncmp(ifname, "r_net", 5) == 0 || strncmp(ifname, "pdp", 3) == 0);
 }
 
-static inline bool
-vpnhide_daemon_is_vpn_interface(const char *ifname, bool is_point_to_point,
-				 unsigned short arphrd, bool name_matches_vpn)
-{
-	if (name_matches_vpn)
-		return true;
+static inline bool vpnhide_daemon_is_vpn_interface(const char *ifname,
+                                                   bool is_point_to_point,
+                                                   unsigned short arphrd,
+                                                   bool name_matches_vpn) {
+  if (name_matches_vpn)
+    return true;
 
-	/* ARPHRD_NONE covers TUN/WireGuard; PPP covers PPP-based VPNs. */
-	/* Cellular raw-IP interfaces may report a tunnel-like ARPHRD too. */
-	if (!vpnhide_daemon_is_cellular_uplink(ifname) &&
-	    (arphrd == ARPHRD_NONE || arphrd == ARPHRD_PPP))
-		return true;
+  /* ARPHRD_NONE covers TUN/WireGuard; PPP covers PPP-based VPNs. */
+  /* Cellular raw-IP interfaces may report a tunnel-like ARPHRD too. */
+  if (!vpnhide_daemon_is_cellular_uplink(ifname) &&
+      (arphrd == ARPHRD_NONE || arphrd == ARPHRD_PPP))
+    return true;
 
-	return is_point_to_point &&
-	       !vpnhide_daemon_is_cellular_uplink(ifname);
+  return is_point_to_point && !vpnhide_daemon_is_cellular_uplink(ifname);
 }
 
 #endif /* VPNHIDE_DAEMON_IFACE_H */

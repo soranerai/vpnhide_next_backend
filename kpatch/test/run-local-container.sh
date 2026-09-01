@@ -63,7 +63,9 @@ echo "[kpatch] Building static host binaries…"
 [ -f "$STRIP_BIN" ] && "$STRIP_BIN" "$CTL_OUT"
 
 "$CLANG_BIN" -O2 -Wall -static \
-    "$REPO/kmod/vpnhide_daemon.c" -o "$DAEMON_OUT"
+    "$REPO/daemon/main.c" "$REPO/daemon/config_watch.c" "$REPO/daemon/file_hiding.c" \
+    "$REPO/daemon/network.c" "$REPO/daemon/stats.c" \
+    "$REPO/daemon/owned_ports.c" -o "$DAEMON_OUT"
 [ -f "$STRIP_BIN" ] && "$STRIP_BIN" "$DAEMON_OUT"
 
 # ---- container runtime detection --------------------------------------------

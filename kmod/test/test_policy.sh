@@ -132,7 +132,7 @@ grep -q '^lsposed_entries=4096$' <<<"$OUTPUT"
 grep -q '^port_targets=4096$' <<<"$OUTPUT"
 
 if rg -n 'VPNHIDE_PM_COMMAND|pm list packages|discover_packages' \
-     "$REPO/vpnhide_policy.c" "$REPO/vpnhide_daemon.c" >/dev/null; then
+     "$REPO/vpnhide_policy.c" "$REPO/../daemon" >/dev/null; then
 	echo "v4 daemon/policy must not resolve packages" >&2
 	exit 1
 fi

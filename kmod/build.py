@@ -164,12 +164,24 @@ def build_ctl_host(repo_root: Path, kmod_dir: Path) -> Path:
         subprocess.run([str(strip_bin), str(out_bin)], check=True)
 
     # Build daemon binary as well
+    daemon_dir = repo_root / "daemon"
+    daemon_sources = [
+        daemon_dir / name
+        for name in (
+            "main.c",
+            "config_watch.c",
+            "file_hiding.c",
+            "network.c",
+            "stats.c",
+            "owned_ports.c",
+        )
+    ]
     out_daemon = kmod_dir / "vpnhide-daemon-host"
     cmd_daemon = [
         clang,
         "-O2",
         "-Wall",
-        str(kmod_dir / "vpnhide_daemon.c"),
+        *(str(source) for source in daemon_sources),
         "-o",
         str(out_daemon),
     ]

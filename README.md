@@ -23,6 +23,11 @@ The resulting archive is written to the repository root:
 vpnhide-kmod-<kmi>.zip
 ```
 
+The userspace daemon is kept in `daemon/`: `main.c` owns the event loop,
+while network state, file hiding, statistics, owned ports, and config reloads
+live in focused modules. The module build still packages it as
+`vpnhide-daemon`.
+
 Supported variants are: `android12-5.10`, `android13-5.10`, `android13-5.15`, `android14-5.15`, `android14-6.1`, `android15-6.6`, `android16-6.12`, and `android17-6.18`.
 
 The in-tree kpatch compatibility profiles additionally cover Android common 5.4 and upstream 4.19.325 (`kpatch/versions/android12-5.4`, `kpatch/versions/upstream-4.19`). Local QEMU matrices always run one build/container at a time. Test containers default to 32 compiler jobs with an 11 GiB hard memory limit; override these with `VPNHIDE_BUILD_JOBS` and `VPNHIDE_BUILD_MEMORY` for smaller hosts.

@@ -67,7 +67,10 @@ if [ -f "$STRIP_BIN" ]; then
     "$STRIP_BIN" "$REPO/kmod/vpnhide-ctl-host"
 fi
 
-"$CLANG_BIN" -O2 -Wall -static "$REPO/kmod/vpnhide_daemon.c" -o "$REPO/kmod/vpnhide-daemon-host"
+"$CLANG_BIN" -O2 -Wall -static \
+    "$REPO/daemon/main.c" "$REPO/daemon/config_watch.c" "$REPO/daemon/file_hiding.c" \
+    "$REPO/daemon/network.c" "$REPO/daemon/stats.c" \
+    "$REPO/daemon/owned_ports.c" -o "$REPO/kmod/vpnhide-daemon-host"
 if [ -f "$STRIP_BIN" ]; then
     "$STRIP_BIN" "$REPO/kmod/vpnhide-daemon-host"
 fi

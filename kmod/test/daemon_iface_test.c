@@ -1,6 +1,6 @@
 #include <assert.h>
 
-#include "../daemon_iface.h"
+#include "../../daemon/interface.h"
 
 int main(void)
 {
