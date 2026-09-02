@@ -21,7 +21,7 @@ FRAG="$HERE/qemu.config"
 
 DDK_IMAGE_TAG="20260313"
 case "$KMI" in
-	upstream-4.19|*-5.4) DDK_KMI="android12-5.10" ;;
+	upstream-4.14|upstream-4.19|*-5.4) DDK_KMI="android12-5.10" ;;
 	*)                   DDK_KMI="$KMI" ;;
 esac
 DDK="${VPNHIDE_DDK_IMAGE:-ghcr.io/ylarod/ddk-min:${DDK_KMI}-${DDK_IMAGE_TAG}}"
@@ -48,17 +48,31 @@ echo "[build-kernel/kpatch] $KMI: bounded build (jobs=$BUILD_JOBS memory=$BUILD_
 	CLANG_BIN="$(ls -d /opt/ddk/clang/*/bin | head -1)"
 	export PATH="$CLANG_BIN:$PATH"
 
-	# 1. Clone kernel source.  Upstream 4.19 has no Android common KMI branch.
+	# 1. Clone kernel source.  Upstream legacy lines have no Android common KMI branch.
 	case "$KMI" in
+		upstream-4.14) git clone --depth=1 -b v4.14.336 https://github.com/gregkh/linux.git /tmp/linux ;;
 		upstream-4.19) git clone --depth=1 -b v4.19.325 https://github.com/gregkh/linux.git /tmp/linux ;;
 		*)             git clone --depth=1 -b "$KMI" https://android.googlesource.com/kernel/common /tmp/linux ;;
 	esac
 	cd /tmp/linux
+	# Linux 4.14 predates Kbuild LLVM=1 support.  Give that one profile
+	# explicit LLVM tools instead of letting it fall back to a GNU cross
+	# compiler that is intentionally absent from the DDK image.
+	if [ "$KMI" = "upstream-4.14" ]; then
+		KMAKE=(make ARCH=arm64 \
+			CC="$CLANG_BIN/clang --target=aarch64-linux-gnu" \
+			LD="$CLANG_BIN/ld.lld" AR="$CLANG_BIN/llvm-ar" \
+			NM="$CLANG_BIN/llvm-nm" OBJCOPY="$CLANG_BIN/llvm-objcopy" \
+			OBJDUMP="$CLANG_BIN/llvm-objdump" STRIP="$CLANG_BIN/llvm-strip")
+	else
+		KMAKE=(make ARCH=arm64 LLVM=1)
+	fi
 
 	# 2. Apply VPNHide in-tree integration via apply.sh (copies security/vpnhide +
 	#    include/linux/vpnhide.h and structurally injects modern call sites).
 	#    The kernel version (KMI suffix) selects the compatibility profile.
 	case "$KMI" in
+		upstream-4.14) PATCHVER=upstream-4.14 ;;
 		upstream-4.19) PATCHVER=upstream-4.19 ;;
 		*-5.4)   PATCHVER=android12-5.4  ;;
 		*-5.10)  PATCHVER=android12-5.10 ;;
@@ -73,8 +87,8 @@ echo "[build-kernel/kpatch] $KMI: bounded build (jobs=$BUILD_JOBS memory=$BUILD_
 
 	# 4. Build kernel with CONFIG_VPNHIDE=y (and virtio/PL011/DUMMY from qemu.config)
 	case "$KMI" in
-		upstream-4.19) make ARCH=arm64 LLVM=1 defconfig ;;
-		*)             make ARCH=arm64 LLVM=1 gki_defconfig ;;
+		upstream-4.14|upstream-4.19) "${KMAKE[@]}" defconfig ;;
+		*)             "${KMAKE[@]}" gki_defconfig ;;
 	esac
 	./scripts/kconfig/merge_config.sh -m .config /qemu.config
 	# Keep legacy/QEMU builds bounded and deterministic.  These options are
@@ -86,7 +100,7 @@ echo "[build-kernel/kpatch] $KMI: bounded build (jobs=$BUILD_JOBS memory=$BUILD_
 for sym in CFI_CLANG CFI_CLANG_SHADOW DEBUG_INFO_BTF IKHEADERS UAPI_HEADER_TEST KVM KVM_ARM_HOST KVM_ARM_VGIC_V3; do
 	scripts/config --disable "$sym" || true
 done
-	make ARCH=arm64 LLVM=1 olddefconfig
+	"${KMAKE[@]}" olddefconfig
 	if grep -Eq "^CONFIG_(LTO_CLANG|THINLTO)=y" .config; then
 		echo "ERROR: legacy QEMU build still has LLVM LTO enabled"
 		exit 1
@@ -99,7 +113,7 @@ done
 		exit 1
 	fi
 
-	make ARCH=arm64 LLVM=1 -j"${VPNHIDE_BUILD_JOBS:-1}" Image
+	"${KMAKE[@]}" -j"${VPNHIDE_BUILD_JOBS:-1}" Image
 
 	cp arch/arm64/boot/Image /out/Image
 	echo "[build-kernel/kpatch] built Image with CONFIG_VPNHIDE=y for $KMI"

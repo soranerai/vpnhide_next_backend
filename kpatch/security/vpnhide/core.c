@@ -481,7 +481,11 @@ static int replace_owned_ports(const struct vpnhide_owned_ports_update *update)
 			return -EFAULT;
 		}
 	}
-	size = struct_size(snapshot, buckets, buckets);
+	if (buckets > (SIZE_MAX - sizeof(*snapshot)) / sizeof(snapshot->buckets[0])) {
+		kvfree(entries);
+		return -EOVERFLOW;
+	}
+	size = sizeof(*snapshot) + buckets * sizeof(snapshot->buckets[0]);
 	snapshot = kvzalloc(size, GFP_KERNEL);
 	if (!snapshot) {
 		kvfree(entries);
@@ -1363,9 +1367,12 @@ static int policy_section_validate(const struct vpnhide_policy_section_v3 *secti
 {
 	size_t bytes;
 	if (section->offset != *cursor ||
-	    check_mul_overflow((size_t)section->count, element_size, &bytes) ||
-	    check_add_overflow(*cursor, bytes, cursor) || *cursor > total_size)
+	    (section->count && element_size > SIZE_MAX / section->count))
 		return -EINVAL;
+	bytes = (size_t)section->count * element_size;
+	if (bytes > total_size - *cursor)
+		return -EINVAL;
+	*cursor += bytes;
 	return 0;
 }
 
@@ -1399,8 +1406,9 @@ policy_snapshot_from_v3(const struct vpnhide_policy_payload_v3 *payload,
 		return ERR_PTR(-EINVAL);
 
 	data_size = payload_size - sizeof(*payload);
-	if (check_add_overflow(sizeof(*snapshot), data_size, &allocation_size))
+	if (data_size > SIZE_MAX - sizeof(*snapshot))
 		return ERR_PTR(-EOVERFLOW);
+	allocation_size = sizeof(*snapshot) + data_size;
 	snapshot = kvzalloc(allocation_size, GFP_KERNEL);
 	if (!snapshot)
 		return ERR_PTR(-ENOMEM);
@@ -2102,9 +2110,8 @@ static long handle_vpnhide_ioctl(struct file *f, unsigned int cmd,
 		struct vh_port_stats_total *old_port_stats;
 		struct vh_port_stats_total *replacement_port_stats;
 
-		replacement_port_stats = kvcalloc(VPNHIDE_PORT_STATS_CAPACITY,
-						  sizeof(*replacement_port_stats),
-						  GFP_KERNEL);
+		replacement_port_stats = kvzalloc(VPNHIDE_PORT_STATS_CAPACITY *
+						  sizeof(*replacement_port_stats), GFP_KERNEL);
 		if (!replacement_port_stats)
 			return -ENOMEM;
 		spin_lock(&intercept_stats.lock);
@@ -2268,8 +2275,8 @@ static int __init vpnhide_init(void)
 	spin_lock_init(&g_vpn_name_cache_lock);
 	spin_lock_init(&intercept_stats.lock);
 	init_waitqueue_head(&vpnhide_config_wait);
-	port_stats = kvcalloc(VPNHIDE_PORT_STATS_CAPACITY,
-			      sizeof(*port_stats), GFP_KERNEL);
+	port_stats = kvzalloc(VPNHIDE_PORT_STATS_CAPACITY * sizeof(*port_stats),
+			     GFP_KERNEL);
 	if (!port_stats)
 		return -ENOMEM;
 

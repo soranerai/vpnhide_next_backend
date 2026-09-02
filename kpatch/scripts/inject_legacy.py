@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Structure-aware VPNHide injector for the 4.19 and Android common 5.4 trees.
+"""Structure-aware VPNHide injector for upstream 4.14/4.19 and Android common 5.4.
 
 The two legacy profiles share the same set of hooks, but a few networking
 structures changed between them.  Keep those differences explicit here rather
@@ -87,6 +87,22 @@ def inject_filters(profile: str) -> None:
              "#ifdef CONFIG_VPNHIDE\n\t{\n\t\tstruct net_device *_dev = dst ? dst->dev : rt->fib6_nh->fib_nh_dev;\n\t\tif (_dev && vpnhide_should_hide_dev(_dev))\n\t\t\treturn 0;\n\t}\n#endif\n",
              "vpnhide_should_hide_dev(_dev)"),
         ]
+    elif profile == "upstream-4.14":
+        specs += [
+            ("net/ipv4/fib_semantics.c", "fib_dump_info", "\tnlh = nlmsg_put(",
+             "#ifdef CONFIG_VPNHIDE\n\tif (fi && fi->fib_nh->nh_dev &&\n\t    vpnhide_should_hide_dev(fi->fib_nh->nh_dev))\n\t\treturn 0;\n#endif\n",
+             "vpnhide_should_hide_dev(fi->fib_nh->nh_dev)"),
+            ("net/ipv4/fib_trie.c", "fib_route_seq_show", "\t\tif ((fa->fa_type",
+             "#ifdef CONFIG_VPNHIDE\n\t\tif (fi && fi->fib_dev && vpnhide_should_hide_dev(fi->fib_dev))\n\t\t\tcontinue;\n#endif\n\n",
+             "vpnhide_should_hide_dev(fi->fib_dev)"),
+            ("net/ipv6/ip6_fib.c", "ipv6_route_seq_show",
+             "\tseq_printf(seq, \"%pi6 %02x \", &rt->rt6i_dst.addr, rt->rt6i_dst.plen);",
+             "#ifdef CONFIG_VPNHIDE\n\tif (rt->dst.dev && vpnhide_should_hide_dev(rt->dst.dev)) {\n\t\titer->w.leaf = NULL;\n\t\treturn 0;\n\t}\n#endif\n\n",
+             "vpnhide_should_hide_dev(rt->dst.dev)"),
+            ("net/ipv6/route.c", "rt6_fill_node", "\tnlh = nlmsg_put(",
+             "#ifdef CONFIG_VPNHIDE\n\tif (rt->dst.dev && vpnhide_should_hide_dev(rt->dst.dev))\n\t\treturn 0;\n#endif\n\n",
+             "vpnhide_should_hide_dev(rt->dst.dev)"),
+        ]
     else:
         specs += [
             ("net/ipv4/fib_semantics.c", "fib_dump_info", "\tnlh = nlmsg_put(",
@@ -124,9 +140,121 @@ def inject_socket() -> None:
         common.fail(f"net/socket.c: legacy socket injector missed {', '.join(missing)}")
 
 
+def inject_socket_adjacent_414() -> None:
+    """Inject UDP and IPv6 bind hooks at their pre-5.4 call sites."""
+    rel = "net/ipv4/udp.c"
+    common.ensure_include(rel)
+    common.insert_in_function(
+        rel, "udp_sendmsg", "\tif (len > 0xFFFF)",
+        "#ifdef CONFIG_VPNHIDE\n\t{\n\t\tint _err = 0;\n"
+        "\t\tif (vpnhide_udp_sendmsg_pre(sk, msg, len, &_err))\n"
+        "\t\t\treturn _err;\n\t}\n#endif\n",
+        marker="vpnhide_udp_sendmsg_pre",
+    )
+    rel = "net/ipv6/udp.c"
+    common.ensure_include(rel)
+    common.insert_in_function(
+        rel, "udpv6_sendmsg", "\tsockc.tsflags = sk->sk_tsflags;",
+        "#ifdef CONFIG_VPNHIDE\n\t{\n\t\tint _err = 0;\n"
+        "\t\tif (vpnhide_udp_sendmsg_pre(sk, msg, len, &_err))\n"
+        "\t\t\treturn _err;\n\t}\n#endif\n",
+        marker="vpnhide_udp_sendmsg_pre",
+    )
+    rel = "net/ipv6/af_inet6.c"
+    common.ensure_include(rel)
+    common.insert_in_function(
+        rel, "inet6_bind", "\taddr_type = ipv6_addr_type(",
+        "#ifdef CONFIG_VPNHIDE\n\t{\n"
+        "\t\tint _r = vpnhide_inet6_bind_ll(sk, uaddr, addr_len);\n"
+        "\t\tif (_r)\n\t\t\treturn _r;\n"
+        "\t}\n#endif\n\n",
+        marker="vpnhide_inet6_bind_ll",
+    )
+
+
+def inject_socket_414() -> None:
+    """Inject socket syscall hooks for the pre-__sys_* 4.14 implementation."""
+    rel = "net/socket.c"
+    common.ensure_include(rel)
+    common.replace_in_function(
+        rel, "bind",
+        "\t\t\tif (!err)\n"
+        "\t\t\t\terr = sock->ops->bind(sock,\n"
+        "\t\t\t\t\t\t      (struct sockaddr *)\n"
+        "\t\t\t\t\t\t      &address, addrlen);",
+        "\t\t\tif (!err) {\n"
+        "#ifdef CONFIG_VPNHIDE\n"
+        "\t\t\t\tvpnhide_bind_pre(sock, (struct sockaddr *)&address, addrlen);\n"
+        "#endif\n"
+        "\t\t\t\terr = sock->ops->bind(sock, (struct sockaddr *)&address, addrlen);\n"
+        "#ifdef CONFIG_VPNHIDE\n"
+        "\t\t\t\tvpnhide_bind_post(sock, err);\n"
+        "#endif\n"
+        "\t\t\t}",
+        marker="vpnhide_bind_post",
+    )
+    common.replace_in_function(
+        rel, "listen",
+        "\t\tif (!err)\n\t\t\terr = sock->ops->listen(sock, backlog);",
+        "\t\tif (!err) {\n"
+        "\t\t\terr = sock->ops->listen(sock, backlog);\n"
+        "#ifdef CONFIG_VPNHIDE\n\t\t\tvpnhide_listen_post(sock, err);\n#endif\n"
+        "\t\t}",
+        marker="vpnhide_listen_post",
+    )
+    common.replace_in_function(
+        rel, "connect",
+        "\terr = sock->ops->connect(sock, (struct sockaddr *)&address, addrlen,\n"
+        "\t\t\t\t sock->file->f_flags);",
+        "#ifdef CONFIG_VPNHIDE\n"
+        "\terr = vpnhide_connect_pre(sock, (struct sockaddr *)&address, addrlen);\n"
+        "\tif (!err)\n"
+        "#endif\n"
+        "\t\terr = sock->ops->connect(sock, (struct sockaddr *)&address, addrlen,\n"
+        "\t\t\t\t sock->file->f_flags);",
+        marker="vpnhide_connect_pre",
+    )
+    common.insert_in_function(
+        rel, "getsockname", "\terr = move_addr_to_user(&address, len, usockaddr, usockaddr_len);",
+        "#ifdef CONFIG_VPNHIDE\n"
+        "\tvpnhide_getname(sock, (struct sockaddr *)&address, 0, &err);\n"
+        "#endif\n",
+        marker="vpnhide_getname(sock, (struct sockaddr *)&address, 0,",
+    )
+    common.replace_in_function(
+        rel, "getpeername",
+        "\t\tif (!err)\n"
+        "\t\t\terr = move_addr_to_user(&address, len, usockaddr,\n"
+        "\t\t\t\t\t\tusockaddr_len);",
+        "\t\tif (!err) {\n"
+        "#ifdef CONFIG_VPNHIDE\n"
+        "\t\t\tvpnhide_getname(sock, (struct sockaddr *)&address, 1, &err);\n"
+        "#endif\n"
+        "\t\t\terr = move_addr_to_user(&address, len, usockaddr,\n"
+        "\t\t\t\t\t\tusockaddr_len);\n"
+        "\t\t}",
+        marker="vpnhide_getname(sock, (struct sockaddr *)&address, 1,",
+    )
+    common.insert_in_function(
+        rel, "setsockopt", "\tif (sock != NULL) {",
+        "\n#ifdef CONFIG_VPNHIDE\n\t\t{\n"
+        "\t\t\tint _vret = vpnhide_setsockopt_sock(sock, level, optname, optval, optlen);\n"
+        "\t\t\tif (_vret) {\n\t\t\t\terr = (_vret > 0) ? 0 : _vret;\n"
+        "\t\t\t\tgoto out_put;\n\t\t\t}\n\t\t}\n#endif\n",
+        before=False, marker="vpnhide_setsockopt_sock",
+    )
+    common.insert_in_function(
+        rel, "getsockopt", "out_put:",
+        "#ifdef CONFIG_VPNHIDE\n"
+        "\tif (!err)\n\t\tvpnhide_getsockopt(sock, level, optname, optval, optlen, &err);\n"
+        "#endif\n",
+        marker="vpnhide_getsockopt(sock, level, optname, optval, optlen, &err)",
+    )
+
+
 def main() -> int:
-    if len(sys.argv) != 3 or sys.argv[2] not in ("upstream-4.19", "android12-5.4"):
-        print(f"usage: {sys.argv[0]} <kernel-dir> <upstream-4.19|android12-5.4>", file=sys.stderr)
+    if len(sys.argv) != 3 or sys.argv[2] not in ("upstream-4.14", "upstream-4.19", "android12-5.4"):
+        print(f"usage: {sys.argv[0]} <kernel-dir> <upstream-4.14|upstream-4.19|android12-5.4>", file=sys.stderr)
         return 2
     common.ROOT = Path(sys.argv[1]).resolve()
     if not common.ROOT.is_dir():
@@ -138,8 +266,14 @@ def main() -> int:
         common.inject_dev_ioctl()
         inject_filters(sys.argv[2])
         common.inject_address_paths()
-        common.inject_socket_adjacent()
-        inject_socket()
+        if sys.argv[2] == "upstream-4.14":
+            inject_socket_adjacent_414()
+        else:
+            common.inject_socket_adjacent()
+        if sys.argv[2] == "upstream-4.14":
+            inject_socket_414()
+        else:
+            inject_socket()
         common.inject_cmsg()
     except common.InjectError as exc:
         print(f"inject_legacy.py: ERROR: {exc}", file=sys.stderr)

@@ -31,6 +31,10 @@ ln -sf /bin/sh /system/bin/sh
 
 echo "##### VPNHIDE-QEMU-TEST START #####"
 echo "KREL=$(uname -r)"
+VECTOR_ARGS=""
+case "$(uname -r)" in
+    4.14.*) VECTOR_ARGS="--legacy-4.14" ;;
+esac
 
 # Use the injected iproute2 consistently for topology creation and vectors.
 # The QEMU runner supplies its ARM64 runtime dependencies host-side.
@@ -194,7 +198,7 @@ kill "$DAEMON_PID" 2>/dev/null
 # --- programmatic socket / ioctl / BPF checks (Python) ----------------------
 apply_policy
 
-python3 /vector_tests.py > /tmp/py_res.log 2>&1
+python3 /vector_tests.py $VECTOR_ARGS > /tmp/py_res.log 2>&1
 cat /tmp/py_res.log
 
 while read -r line; do
@@ -241,7 +245,7 @@ fi
 
 # The existing programmatic vectors now run against the unselected UID 115555
 # under the allowlist snapshot, including port and socket policy.
-python3 /vector_tests.py > /tmp/py_allowlist_res.log 2>&1
+python3 /vector_tests.py $VECTOR_ARGS > /tmp/py_allowlist_res.log 2>&1
 cat /tmp/py_allowlist_res.log
 while read -r line; do
     case "$line" in
@@ -250,7 +254,7 @@ while read -r line; do
     esac
 done < /tmp/py_allowlist_res.log
 
-# Old 4.19/5.4 kernels can emit non-fatal mm accounting warnings while
+# Old 4.14/4.19/5.4 kernels can emit non-fatal mm accounting warnings while
 # tearing down short-lived test shells.  Count only fatal kernel diagnostics.
 PANIC=$(dmesg | grep -ci 'Unable to handle\|Internal error\|Oops\|Kernel panic')
 echo "=== DAEMON LOG ==="

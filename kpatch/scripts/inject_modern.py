@@ -64,7 +64,22 @@ def function_span(text: str, name: str) -> tuple[int, int]:
             starts.append((index, brace))
         offset = index + len(needle)
     if len(starts) != 1:
-        fail(f"{name}: expected one function definition, found {len(starts)}")
+        # Older kernels implement socket entrypoints directly through the
+        # SYSCALL_DEFINE<n>() macro instead of __sys_* helpers.
+        macro_indices = []
+        for argc in range(7):
+            macro = f"SYSCALL_DEFINE{argc}({name},"
+            index = text.find(macro)
+            if index >= 0 and text.find(macro, index + 1) < 0:
+                macro_indices.append(index)
+        if len(macro_indices) == 1:
+            macro_index = macro_indices[0]
+            brace = text.find("{", macro_index)
+            semi = text.find(";", macro_index)
+            if brace >= 0 and (semi < 0 or brace < semi):
+                starts.append((macro_index, brace))
+        if len(starts) != 1:
+            fail(f"{name}: expected one function definition, found {len(starts)}")
     start, brace = starts[0]
     depth = 0
     for end in range(brace, len(text)):
@@ -178,22 +193,32 @@ def inject_dev_ioctl() -> None:
     start, end = function_span(text, "dev_ifname")
     body = text[start:end]
     if "vpnhide_should_hide_ifname" not in body:
-        declaration_at = text.find("{\n", start, end)
-        if declaration_at < 0:
-            fail(f"{rel}:dev_ifname: no opening brace")
-        text = text[:declaration_at + 2] + "\tint _ret;\n" + text[declaration_at + 2:]
         old = "\treturn netdev_get_name(net, ifr->ifr_name, ifr->ifr_ifindex);"
-        new = "\t_ret = netdev_get_name(net, ifr->ifr_name, ifr->ifr_ifindex);\n"
-        new += "#ifdef CONFIG_VPNHIDE\n"
-        new += "\tif (_ret == 0 && vpnhide_should_hide_ifname(ifr->ifr_name))\n"
-        new += "\t\treturn -ENODEV;\n"
-        new += "#endif\n"
-        new += "\treturn _ret;"
-        start, end = function_span(text, "dev_ifname")
-        body = text[start:end]
-        if body.count(old) != 1:
-            fail(f"{rel}:dev_ifname: expected one netdev_get_name return")
-        text = text[:start] + body.replace(old, new, 1) + text[end:]
+        if old in body:
+            declaration_at = text.find("{\n", start, end)
+            if declaration_at < 0:
+                fail(f"{rel}:dev_ifname: no opening brace")
+            text = text[:declaration_at + 2] + "\tint _ret;\n" + text[declaration_at + 2:]
+            start, end = function_span(text, "dev_ifname")
+            body = text[start:end]
+            new = "\t_ret = netdev_get_name(net, ifr->ifr_name, ifr->ifr_ifindex);\n"
+            new += "#ifdef CONFIG_VPNHIDE\n"
+            new += "\tif (_ret == 0 && vpnhide_should_hide_ifname(ifr->ifr_name))\n"
+            new += "\t\treturn -ENODEV;\n"
+            new += "#endif\n"
+            new += "\treturn _ret;"
+            text = text[:start] + body.replace(old, new, 1) + text[end:]
+        else:
+            # Linux 4.14 stores the result in `error` and checks it on the
+            # following line before copying the ifreq back to userspace.
+            old = "\terror = netdev_get_name(net, ifr.ifr_name, ifr.ifr_ifindex);"
+            new = old + "\n#ifdef CONFIG_VPNHIDE\n"
+            new += "\tif (!error && vpnhide_should_hide_ifname(ifr.ifr_name))\n"
+            new += "\t\treturn -ENODEV;\n"
+            new += "#endif"
+            if body.count(old) != 1:
+                fail(f"{rel}:dev_ifname: expected one netdev_get_name result")
+            text = text[:start] + body.replace(old, new, 1) + text[end:]
         write(rel, text)
     # Old 5.10 sublevels declare `int done;` as the first item inside the
     # loop.  Keep the hook after that declaration to satisfy C90; newer trees
