@@ -33,11 +33,9 @@ void file_hiding_set_config_path(const char *config_path) {
 struct nomount_registered_path {
   char path[PATH_MAX];
   bool valid;
-  unsigned long generation;
 };
 
 static struct nomount_registered_path nomount_registered[NOMOUNT_MAX_PATHS];
-static unsigned long nomount_generation;
 static const char *const nomount_tool_candidates[] = {
     "/data/adb/modules/nomount/bin/nm",
 };
@@ -169,16 +167,13 @@ static void nomount_register_path(const char *path) {
   if (!path || !path[0])
     return;
   registered = nomount_find_registered_path(path);
-  if (registered) {
-    registered->generation = nomount_generation;
+  if (registered)
     return;
-  }
   if (nomount_run_rule("add", path))
     return;
   for (i = 0; i < NOMOUNT_MAX_PATHS; i++) {
     if (!nomount_registered[i].valid) {
       nomount_registered[i].valid = true;
-      nomount_registered[i].generation = nomount_generation;
       strncpy(nomount_registered[i].path, path, PATH_MAX - 1);
       nomount_registered[i].path[PATH_MAX - 1] = '\0';
       return;
@@ -193,18 +188,6 @@ static void nomount_unregister_paths(void) {
 
   for (i = 0; i < NOMOUNT_MAX_PATHS; i++) {
     if (!nomount_registered[i].valid)
-      continue;
-    nomount_run_rule("del", nomount_registered[i].path);
-    nomount_registered[i].valid = false;
-  }
-}
-
-static void nomount_prune_stale_paths(void) {
-  size_t i;
-
-  for (i = 0; i < NOMOUNT_MAX_PATHS; i++) {
-    if (!nomount_registered[i].valid ||
-        nomount_registered[i].generation == nomount_generation)
       continue;
     nomount_run_rule("del", nomount_registered[i].path);
     nomount_registered[i].valid = false;
@@ -404,12 +387,8 @@ void file_hiding_sync_interfaces(const struct vpnhide_vpn_ifindexes *vpns) {
     return;
   susfs_refresh_enabled();
   if (use_nomount_for_file_hiding) {
-    nomount_generation++;
-    if (!nomount_generation)
-      nomount_generation++;
     for (i = 0; i < vpns->count && i < MAX_ACTIVE_VPNS; i++)
       nomount_sync_interface(vpns->vpns[i].name);
-    nomount_prune_stale_paths();
     return;
   }
   nomount_unregister_paths();
