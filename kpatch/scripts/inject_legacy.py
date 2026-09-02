@@ -29,6 +29,16 @@ def inject_bpf() -> None:
            "vpnhide_bpf_lookup_elem")
 
 
+def ipv6_route_show_function() -> str:
+    """Return the conventional IPv6 route renderer for an Android 5.4 tree."""
+    ip6_fib = common.read("net/ipv6/ip6_fib.c")
+    # A BPF-iterator backport keeps ipv6_route_seq_show() as a dispatcher and
+    # moves the proc renderer into the native function.
+    if "ipv6_route_native_seq_show(" in ip6_fib:
+        return "ipv6_route_native_seq_show"
+    return "ipv6_route_seq_show"
+
+
 def inject_filters(profile: str) -> None:
     specs = [
         ("net/core/fib_rules.c", "fib_nl_fill_rule", "\tnlh = nlmsg_put(",
@@ -57,6 +67,12 @@ def inject_filters(profile: str) -> None:
          "vpnhide_should_hide_dev(qdisc_dev(q))"),
     ]
     if profile == "android12-5.4":
+        # Some Android common 5.4 derivatives backport BPF iterators for
+        # ipv6_route.  That backport moves the conventional proc renderer
+        # from ipv6_route_seq_show() into ipv6_route_native_seq_show(), while
+        # retaining the former as a dispatcher.  Put the hook in the native
+        # renderer when it exists; unmodified 5.4 trees keep the old function.
+        ipv6_route_show = ipv6_route_show_function()
         specs += [
             ("net/ipv4/fib_semantics.c", "fib_dump_info", "\tnlh = nlmsg_put(",
              "#ifdef CONFIG_VPNHIDE\n\tif (fi && fi->fib_nh[0].fib_nh_dev &&\n\t    vpnhide_should_hide_dev(fi->fib_nh[0].fib_nh_dev))\n\t\treturn 0;\n#endif\n",
@@ -64,7 +80,7 @@ def inject_filters(profile: str) -> None:
             ("net/ipv4/fib_trie.c", "fib_route_seq_show", "\t\tif ((fa->fa_type",
              "#ifdef CONFIG_VPNHIDE\n\t\tif (fi && fi->fib_nh[0].fib_nh_dev &&\n\t\t    vpnhide_should_hide_dev(fi->fib_nh[0].fib_nh_dev))\n\t\t\tcontinue;\n#endif\n\n",
              "vpnhide_should_hide_dev(fi->fib_nh[0].fib_nh_dev)"),
-            ("net/ipv6/ip6_fib.c", "ipv6_route_seq_show", "\tdev = fib6_nh->fib_nh_dev;",
+            ("net/ipv6/ip6_fib.c", ipv6_route_show, "\tdev = fib6_nh->fib_nh_dev;",
              "\n#ifdef CONFIG_VPNHIDE\n\tif (dev && vpnhide_should_hide_dev(dev))\n\t\treturn 0;\n#endif\n\n",
              "vpnhide_should_hide_dev(dev)", True),
             ("net/ipv6/route.c", "rt6_fill_node", "\tnlh = nlmsg_put(",
