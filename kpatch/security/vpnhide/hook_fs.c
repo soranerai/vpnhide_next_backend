@@ -23,24 +23,38 @@
  * "map_netd_iface_*" key by a bare u32 ifindex. */
 static bool vh_is_wide_stats_map(struct bpf_map *map)
 {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 16, 0)
+	return false;
+#else
 	return !strncmp(map->name, "stats_map_", 10) ||
 	       !strncmp(map->name, "map_netd_stats", 14);
+#endif
 }
 
 static bool vh_is_iface_stats_map(struct bpf_map *map)
 {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 16, 0)
+	return false;
+#else
 	return !strncmp(map->name, "iface_stats", 11) ||
 	       !strncmp(map->name, "map_netd_iface_", 15) ||
 	       !strncmp(map->name, "tether_stats", 12);
+#endif
 }
 
 bool vh_is_stats_map(struct bpf_map *map)
 {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 16, 0)
+	/* bpf_map has no name field in 4.14, so the map class cannot be
+	 * identified safely.  Leave the BPF statistics vector inactive. */
+	return false;
+#else
 	if (!map || !map->name[0])
 		return false;
 	return vh_is_wide_stats_map(map) || vh_is_iface_stats_map(map) ||
 	       !strncmp(map->name, "uid_stats", 9) ||
 	       !strncmp(map->name, "app_uid_stats", 13);
+#endif
 }
 
 bool vh_is_vpn_stats_key(struct bpf_map *map, const struct vh_stats_key *key)

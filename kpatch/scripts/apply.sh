@@ -5,7 +5,8 @@
 # Usage: apply.sh <kernel_common_dir> <version>
 #   version: android12-5.10 | android13-5.10 | android13-5.15 | android14-5.15 |
 #            android14-6.1 |
-#            android15-6.6  | android16-6.12 | android17-6.18
+#            android15-6.6  | android16-6.12 | android17-6.18 |
+#            upstream-4.14 | upstream-4.19 | android12-5.4
 # =============================================================================
 set -euo pipefail
 
@@ -53,7 +54,7 @@ case "$VERSION" in
         log "Done. Applied structural hooks for $VERSION."
         exit 0
         ;;
-    android12-5.4|upstream-4.19)
+    android12-5.4|upstream-4.19|upstream-4.14)
         [ -f "$LEGACY_INJECTOR" ] || die "legacy injector missing: $LEGACY_INJECTOR"
         log "Injecting legacy VPNHide hooks structurally for $VERSION..."
         python3 "$LEGACY_INJECTOR" "$KERNEL_DIR" "$VERSION" \

@@ -134,7 +134,9 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 			record_kmod_intercept(uid, HOOK_SETSOCKOPT);
 			return 1;
 		}
-	} else if (level == SOL_UDP) {
+	}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
+	else if (level == SOL_UDP) {
 		if (optname == UDP_SEGMENT) {
 			/* udp_sk() is not a generic struct sock cast. */
 			if (sk->sk_protocol != IPPROTO_UDP ||
@@ -151,6 +153,7 @@ int vpnhide_setsockopt_sock(struct socket *sock, int level, int optname,
 			return 1;
 		}
 	}
+#endif
 	return 0;
 }
 EXPORT_SYMBOL_GPL(vpnhide_setsockopt_sock);

@@ -11,6 +11,7 @@
 set -euo pipefail
 
 KMIS_DEFAULT=(
+	"upstream-4.14"
 	"upstream-4.19"
 	"android12-5.4"
 	"android12-5.10"
@@ -82,7 +83,7 @@ USERNS_ARG=""
 echo "[kpatch] Checking container images…"
 for KMI in "${KMIS[@]}"; do
 	case "$KMI" in
-		upstream-4.19|*-5.4)
+		upstream-4.14|upstream-4.19|*-5.4)
 			echo "  [$KMI] clean-build profile (no ddk-qemu source image required)"
 			continue
 			;;
@@ -116,7 +117,7 @@ for KMI in "${KMIS[@]}"; do
     LOG_FILE="/tmp/vpnhide-kpatch-test-$KMI.log"
 
     case "$KMI" in
-        upstream-4.19|*-5.4)
+		upstream-4.14|upstream-4.19|*-5.4)
             echo "[kpatch] [$KMI] starting bounded clean build + host QEMU (log: $LOG_FILE)…"
             if VPNHIDE_BUILD_JOBS="$BUILD_JOBS" \
                 VPNHIDE_BUILD_MEMORY="$BUILD_MEMORY" \
@@ -157,6 +158,7 @@ for KMI in "${KMIS[@]}"; do
             # Map the KMI to a compatibility profile. The kernel version
             # (suffix) selects the profile, not the android generation.
             case "$KMI" in
+				upstream-4.14) PATCHVER=upstream-4.14 ;;
 				upstream-4.19) PATCHVER=upstream-4.19 ;;
 				*-5.4)   PATCHVER=android12-5.4  ;;
                 *-5.10)  PATCHVER=android12-5.10 ;;

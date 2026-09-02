@@ -75,6 +75,49 @@ class LegacyIpv6RouteInjectorTest(unittest.TestCase):
         self.assertGreater(result.index(self.hook), native_start)
         self.assertLess(result.index(self.hook), dispatcher_start)
 
+    def test_function_span_accepts_legacy_syscall_macro(self) -> None:
+        source = (
+            "SYSCALL_DEFINE5(setsockopt, int, fd, int, level, int, optname,\n"
+            "\t\tchar __user *, optval, int, optlen)\n"
+            "{\n"
+            "\treturn 0;\n"
+            "}\n"
+        )
+
+        start, end = common.function_span(source, "setsockopt")
+        self.assertIn("SYSCALL_DEFINE5(setsockopt", source[start:end])
+        self.assertIn("return 0", source[start:end])
+
+    def test_dev_ifname_accepts_both_414_and_newer_shapes(self) -> None:
+        templates = (
+            (
+                "\tint error;\n"
+                "\terror = netdev_get_name(net, ifr.ifr_name, ifr.ifr_ifindex);\n"
+                "\tif (error)\n\t\treturn error;",
+                "vpnhide_should_hide_ifname(ifr.ifr_name)",
+            ),
+            (
+                "\treturn netdev_get_name(net, ifr->ifr_name, ifr->ifr_ifindex);",
+                "vpnhide_should_hide_ifname(ifr->ifr_name)",
+            ),
+        )
+        for dev_ifname_body, expected_hook in templates:
+            with self.subTest(expected_hook=expected_hook), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / "net/core/dev_ioctl.c"
+                path.parent.mkdir(parents=True)
+                path.write_text(
+                    "#include <linux/netdevice.h>\n"
+                    "static int dev_ifname(void)\n{\n" + dev_ifname_body + "\n}\n"
+                    "static int dev_ifconf(void)\n{\n"
+                    "\tfor_each_netdev(net, dev) {\n\t\tint done;\n\t}\n}\n"
+                    "static int dev_ifsioc_locked(void)\n{\n\tswitch (cmd) {\n\t}\n}\n"
+                )
+                common.ROOT = root
+                common.inject_dev_ioctl()
+                result = path.read_text()
+                self.assertIn(expected_hook, result)
+
 
 if __name__ == "__main__":
     unittest.main()
