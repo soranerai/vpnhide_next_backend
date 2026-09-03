@@ -136,6 +136,15 @@ class LegacyIpv6RouteInjectorTest(unittest.TestCase):
             common.ROOT = root
             self.assertTrue(legacy.fib6_info_uses_nexthop_array())
 
+    def test_upstream_414_backported_fib_nh_device_member(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "include/net/ip_fib.h"
+            path.parent.mkdir(parents=True)
+            path.write_text("struct fib_nh { struct net_device *fib_nh_dev; };\n")
+            common.ROOT = root
+            self.assertTrue(legacy.fib_nh_uses_fib_nh_dev())
+
     def test_dev_ifname_accepts_both_414_and_newer_shapes(self) -> None:
         templates = (
             (
