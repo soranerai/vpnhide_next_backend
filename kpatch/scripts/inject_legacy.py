@@ -30,7 +30,7 @@ def inject_bpf() -> None:
 
 
 def ipv6_route_show_function() -> str:
-    """Return the conventional IPv6 route renderer for an Android 5.4 tree."""
+    """Return the conventional IPv6 route renderer for a legacy tree."""
     ip6_fib = common.read("net/ipv6/ip6_fib.c")
     # A BPF-iterator backport keeps ipv6_route_seq_show() as a dispatcher and
     # moves the proc renderer into the native function.
@@ -104,6 +104,7 @@ def inject_filters(profile: str) -> None:
              "vpnhide_should_hide_dev(rt->dst.dev)"),
         ]
     else:
+        ipv6_route_show = ipv6_route_show_function()
         specs += [
             ("net/ipv4/fib_semantics.c", "fib_dump_info", "\tnlh = nlmsg_put(",
              "#ifdef CONFIG_VPNHIDE\n\tif (fi && fi->fib_dev && vpnhide_should_hide_dev(fi->fib_dev))\n\t\treturn 0;\n#endif\n",
@@ -111,7 +112,7 @@ def inject_filters(profile: str) -> None:
             ("net/ipv4/fib_trie.c", "fib_route_seq_show", "\t\tif ((fa->fa_type",
              "#ifdef CONFIG_VPNHIDE\n\t\tif (fi && fi->fib_dev && vpnhide_should_hide_dev(fi->fib_dev))\n\t\t\tcontinue;\n#endif\n\n",
              "vpnhide_should_hide_dev(fi->fib_dev)"),
-            ("net/ipv6/ip6_fib.c", "ipv6_route_seq_show", "\tseq_printf(seq, \" %08x",
+            ("net/ipv6/ip6_fib.c", ipv6_route_show, "\tseq_printf(seq, \" %08x",
              "#ifdef CONFIG_VPNHIDE\n\tif (dev && vpnhide_should_hide_dev(dev)) {\n\t\titer->w.leaf = NULL;\n\t\treturn 0;\n\t}\n#endif\n\n",
              "vpnhide_should_hide_dev(dev)"),
             ("net/ipv6/route.c", "rt6_fill_node", "\tnlh = nlmsg_put(",

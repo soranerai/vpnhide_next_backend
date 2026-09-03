@@ -17,7 +17,7 @@ class LegacyIpv6RouteInjectorTest(unittest.TestCase):
     hook = "vpnhide_should_hide_dev(dev)"
     anchor = "\tdev = fib6_nh->fib_nh_dev;"
 
-    def inject_ipv6_spec(self, source: str) -> str:
+    def inject_ipv6_spec(self, source: str, anchor: str | None = None) -> str:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             rel = "net/ipv6/ip6_fib.c"
@@ -32,7 +32,7 @@ class LegacyIpv6RouteInjectorTest(unittest.TestCase):
             legacy.insert(
                 rel,
                 show,
-                self.anchor,
+                anchor or self.anchor,
                 "\n#ifdef CONFIG_VPNHIDE\n"
                 "\tif (dev && vpnhide_should_hide_dev(dev))\n"
                 "\t\treturn 0;\n"
@@ -74,6 +74,27 @@ class LegacyIpv6RouteInjectorTest(unittest.TestCase):
         self.assertEqual(result.count(self.hook), 1)
         self.assertGreater(result.index(self.hook), native_start)
         self.assertLess(result.index(self.hook), dispatcher_start)
+
+    def test_bpf_backport_avoids_duplicate_419_dispatchers(self) -> None:
+        result = self.inject_ipv6_spec(
+            "#include <linux/seq_file.h>\n"
+            "static int ipv6_route_native_seq_show(struct seq_file *seq, void *v)\n"
+            "{\n\tseq_printf(seq, \" %08x\", 0);\n\treturn 0;\n}\n"
+            "#if defined(CONFIG_BPF_SYSCALL)\n"
+            "static int ipv6_route_seq_show(struct seq_file *seq, void *v)\n"
+            "{\n\treturn ipv6_route_native_seq_show(seq, v);\n}\n"
+            "#else\n"
+            "static int ipv6_route_seq_show(struct seq_file *seq, void *v)\n"
+            "{\n\treturn ipv6_route_native_seq_show(seq, v);\n}\n"
+            "#endif\n",
+            '\tseq_printf(seq, " %08x',
+        )
+
+        self.assertEqual(result.count(self.hook), 1)
+        self.assertLess(
+            result.index(self.hook),
+            result.index("ipv6_route_seq_show("),
+        )
 
     def test_function_span_accepts_legacy_syscall_macro(self) -> None:
         source = (
