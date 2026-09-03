@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Structure-aware VPNHide injector for upstream 4.14/4.19 and Android common 5.4.
+"""Structure-aware VPNHide injector for upstream 4.9/4.14/4.19 and Android common 5.4.
 
 The two legacy profiles share the same set of hooks, but a few networking
 structures changed between them.  Keep those differences explicit here rather
@@ -56,7 +56,31 @@ def fib_nh_uses_fib_nh_dev() -> bool:
     return "fib_nh_dev" in common.read("include/net/ip_fib.h")
 
 
+def uses_pre54_socket_layout(profile: str) -> bool:
+    """Return whether a profile uses the old syscall/UDP hook locations."""
+    return profile in ("upstream-4.9", "upstream-4.14")
+
+
+def fib_rule_uses_uid_range() -> bool:
+    """Return whether this tree's fib_rule exposes the UID-range fields."""
+    return "uid_range" in common.read("include/net/fib_rules.h")
+
+
 def inject_filters(profile: str) -> None:
+    if fib_rule_uses_uid_range():
+        rule_uid_filter = (
+            "\t\t{\n"
+            "\t\t\tuid_t _s = from_kuid(&init_user_ns, rule->uid_range.start);\n"
+            "\t\t\tuid_t _e = from_kuid(&init_user_ns, rule->uid_range.end);\n"
+            "\t\t\tif (_e != (uid_t)~0 && (_s >= 10000 || _e >= 10000 ||\n"
+            "\t\t\t    is_target_uid_val(_s) || is_target_uid_val(_e)) &&\n"
+            "\t\t\t    rule->table != 253 && rule->table != 254 &&\n"
+            "\t\t\t    rule->table != 255 && rule->table > 100)\n"
+            "\t\t\t\treturn 0;\n"
+            "\t\t}\n"
+        )
+    else:
+        rule_uid_filter = ""
     specs = [
         ("net/core/fib_rules.c", "fib_nl_fill_rule", "\tnlh = nlmsg_put(",
          "#ifdef CONFIG_VPNHIDE\n"
@@ -64,15 +88,7 @@ def inject_filters(profile: str) -> None:
          "\t\tif ((rule->iifname[0] && vpnhide_should_hide_ifname(rule->iifname)) ||\n"
          "\t\t    (rule->oifname[0] && vpnhide_should_hide_ifname(rule->oifname)))\n"
          "\t\t\treturn 0;\n"
-         "\t\t{\n"
-         "\t\t\tuid_t _s = from_kuid(&init_user_ns, rule->uid_range.start);\n"
-         "\t\t\tuid_t _e = from_kuid(&init_user_ns, rule->uid_range.end);\n"
-         "\t\t\tif (_e != (uid_t)~0 && (_s >= 10000 || _e >= 10000 ||\n"
-         "\t\t\t    is_target_uid_val(_s) || is_target_uid_val(_e)) &&\n"
-         "\t\t\t    rule->table != 253 && rule->table != 254 &&\n"
-         "\t\t\t    rule->table != 255 && rule->table > 100)\n"
-         "\t\t\t\treturn 0;\n"
-         "\t\t}\n\t}\n#endif\n\n", "vpnhide_should_hide_ifname(rule->iifname)"),
+         + rule_uid_filter + "\t}\n#endif\n\n", "vpnhide_should_hide_ifname(rule->iifname)"),
         ("net/core/net-procfs.c", "dev_seq_show", "\tif (v == SEQ_START_TOKEN)",
          "#ifdef CONFIG_VPNHIDE\n\tif (v != SEQ_START_TOKEN && vpnhide_should_hide_dev((struct net_device *)v))\n\t\treturn 0;\n#endif\n",
          "vpnhide_should_hide_dev((struct net_device *)v)"),
@@ -104,8 +120,8 @@ def inject_filters(profile: str) -> None:
              "#ifdef CONFIG_VPNHIDE\n\t{\n\t\tstruct net_device *_dev = dst ? dst->dev : rt->fib6_nh->fib_nh_dev;\n\t\tif (_dev && vpnhide_should_hide_dev(_dev))\n\t\t\treturn 0;\n\t}\n#endif\n",
              "vpnhide_should_hide_dev(_dev)"),
         ]
-    elif profile == "upstream-4.14":
-        # Android 4.14 trees can backport the BPF iterator just as 4.19/5.4
+    elif profile in ("upstream-4.9", "upstream-4.14"):
+        # Android 4.9/4.14 trees can backport the BPF iterator just as 4.19/5.4
         # do.  Its renderer is renamed to ipv6_route_native_seq_show(); the
         # dispatcher has two preprocessor alternatives, so never inject it.
         ipv6_route_show = ipv6_route_show_function()
@@ -204,7 +220,7 @@ def inject_socket() -> None:
         common.fail(f"net/socket.c: legacy socket injector missed {', '.join(missing)}")
 
 
-def inject_socket_adjacent_414() -> None:
+def inject_socket_adjacent_pre54() -> None:
     """Inject UDP and IPv6 bind hooks at their pre-5.4 call sites."""
     rel = "net/ipv4/udp.c"
     common.ensure_include(rel)
@@ -241,8 +257,8 @@ def inject_socket_adjacent_414() -> None:
     )
 
 
-def inject_socket_414() -> None:
-    """Inject socket syscall hooks for the pre-__sys_* 4.14 implementation."""
+def inject_socket_pre54() -> None:
+    """Inject socket syscall hooks for the pre-__sys_* implementation."""
     rel = "net/socket.c"
     common.ensure_include(rel)
     socket_source = common.read(rel)
@@ -325,8 +341,8 @@ def inject_socket_414() -> None:
 
 
 def main() -> int:
-    if len(sys.argv) != 3 or sys.argv[2] not in ("upstream-4.14", "upstream-4.19", "android12-5.4"):
-        print(f"usage: {sys.argv[0]} <kernel-dir> <upstream-4.14|upstream-4.19|android12-5.4>", file=sys.stderr)
+    if len(sys.argv) != 3 or sys.argv[2] not in ("upstream-4.9", "upstream-4.14", "upstream-4.19", "android12-5.4"):
+        print(f"usage: {sys.argv[0]} <kernel-dir> <upstream-4.9|upstream-4.14|upstream-4.19|android12-5.4>", file=sys.stderr)
         return 2
     common.ROOT = Path(sys.argv[1]).resolve()
     if not common.ROOT.is_dir():
@@ -338,12 +354,12 @@ def main() -> int:
         common.inject_dev_ioctl()
         inject_filters(sys.argv[2])
         common.inject_address_paths()
-        if sys.argv[2] == "upstream-4.14":
-            inject_socket_adjacent_414()
+        if uses_pre54_socket_layout(sys.argv[2]):
+            inject_socket_adjacent_pre54()
         else:
             common.inject_socket_adjacent()
-        if sys.argv[2] == "upstream-4.14":
-            inject_socket_414()
+        if uses_pre54_socket_layout(sys.argv[2]):
+            inject_socket_pre54()
         else:
             inject_socket()
         common.inject_cmsg()

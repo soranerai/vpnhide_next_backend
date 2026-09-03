@@ -6,7 +6,7 @@
 #   version: android12-5.10 | android13-5.10 | android13-5.15 | android14-5.15 |
 #            android14-6.1 |
 #            android15-6.6  | android16-6.12 | android17-6.18 |
-#            upstream-4.14 | upstream-4.19 | android12-5.4
+#            upstream-4.9 | upstream-4.14 | upstream-4.19 | android12-5.4
 # =============================================================================
 set -euo pipefail
 
@@ -51,6 +51,14 @@ if grep -Eq 'sock_from_file\(struct file \*file\);' "$KERNEL_DIR/include/linux/n
 #define VPNHIDE_SOCK_FROM_FILE_ONE_ARG 1' "$KERNEL_DIR/include/linux/vpnhide.h"
 fi
 
+# Android 4.9 vendor trees may backport FRA_UID_RANGE without changing their
+# base version.  The driver must follow the source ABI, not LINUX_VERSION_CODE.
+if grep -q 'uid_range' "$KERNEL_DIR/include/net/fib_rules.h"; then
+    log "Detected fib_rule uid_range ABI..."
+    sed -i '/#ifdef CONFIG_VPNHIDE/a\
+#define VPNHIDE_FIB_RULE_HAS_UID_RANGE 1' "$KERNEL_DIR/include/linux/vpnhide.h"
+fi
+
 # --------------------------------------------------------------------------
 # 3. Inject call sites structurally for every supported profile.
 # --------------------------------------------------------------------------
@@ -63,7 +71,7 @@ case "$VERSION" in
         log "Done. Applied structural hooks for $VERSION."
         exit 0
         ;;
-    android12-5.4|upstream-4.19|upstream-4.14)
+    android12-5.4|upstream-4.19|upstream-4.14|upstream-4.9)
         [ -f "$LEGACY_INJECTOR" ] || die "legacy injector missing: $LEGACY_INJECTOR"
         log "Injecting legacy VPNHide hooks structurally for $VERSION..."
         python3 "$LEGACY_INJECTOR" "$KERNEL_DIR" "$VERSION" \

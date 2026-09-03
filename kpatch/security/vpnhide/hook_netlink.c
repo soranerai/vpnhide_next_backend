@@ -47,6 +47,7 @@ bool vpnhide_skip_fib_rule(struct sk_buff *skb, struct fib_rule *rule)
 	/* Hide UID split-routing rules — covers "RTM_GETRULE UID route leak":
 	 * any rule with a uid_range that includes the target or any app UID
 	 * (>= 10000) pointing to a non-main/default/local table. */
+	#ifdef VPNHIDE_FIB_RULE_HAS_UID_RANGE
 	{
 		uid_t start = from_kuid(&init_user_ns, rule->uid_range.start);
 		uid_t end   = from_kuid(&init_user_ns, rule->uid_range.end);
@@ -61,6 +62,7 @@ bool vpnhide_skip_fib_rule(struct sk_buff *skb, struct fib_rule *rule)
 			return true;
 		}
 	}
+	#endif
 
 	rcu_read_unlock();
 	return false;

@@ -1322,7 +1322,7 @@ def main():
         ok = test_allowlist_local_port()
         sys.exit(0 if ok else 1)
 
-    legacy_414 = "--legacy-4.14" in sys.argv
+    legacy_pre_416 = "--legacy-pre-4.16" in sys.argv
 
     try:
         vpn0_idx = socket.if_nametoindex("vpn0")
@@ -1336,7 +1336,7 @@ def main():
     def run(name, fn, *args):
         nonlocal success
         if fn is None:
-            print(f"RESULT {name}=SKIP (unsupported by Linux 4.14)")
+            print(f"RESULT {name}=SKIP (unsupported before Linux 4.16)")
             results.append((name, "SKIP"))
             return
         ok = fn(*args)
@@ -1355,12 +1355,12 @@ def main():
     run("bind_port_block", test_bind_port_block)
     run("own_port_access", test_own_port_access)
     run("owned_port_address_scope", test_owned_port_address_scope)
-    # 4.14 has neither named BPF maps nor the map ABI used by this vector.
-    run("bpf_laundering", None if legacy_414 else test_bpf_laundering, vpn0_idx)
+    # Pre-4.16 kernels have neither named BPF maps nor the map ABI used here.
+    run("bpf_laundering", None if legacy_pre_416 else test_bpf_laundering, vpn0_idx)
     run("tc_qdisc", test_tc_qdisc, vpn0_idx)
     run("pmtu_discover", test_pmtu_discover)
-    # UDP_SEGMENT and udp_sock.gso_size were introduced after 4.14.
-    run("gso_asymmetry", None if legacy_414 else test_gso_asymmetry)
+    # UDP_SEGMENT and udp_sock.gso_size were introduced after Linux 4.14.
+    run("gso_asymmetry", None if legacy_pre_416 else test_gso_asymmetry)
     run("ipv6_link_local", test_ipv6_link_local, vpn0_idx)
     run("tcp_info_mss", test_tcp_info_mss)
     run("netlink_getrule", test_netlink_getrule, "vpn0")

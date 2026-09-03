@@ -30,7 +30,7 @@ live in focused modules. The module build still packages it as
 
 Supported variants are: `android12-5.10`, `android13-5.10`, `android13-5.15`, `android14-5.15`, `android14-6.1`, `android15-6.6`, `android16-6.12`, and `android17-6.18`.
 
-The in-tree kpatch compatibility profiles additionally cover upstream 4.14.336, upstream 4.19.325, and Android common 5.4 (`upstream-4.14`, `upstream-4.19`, `android12-5.4`). Local QEMU matrices always run one build/container at a time. Test containers default to 32 compiler jobs with an 11 GiB hard memory limit; override these with `VPNHIDE_BUILD_JOBS` and `VPNHIDE_BUILD_MEMORY` for smaller hosts.
+The in-tree kpatch compatibility profiles additionally cover upstream 4.9.337, 4.14.336, 4.19.325, and Android common 5.4 (`upstream-4.9`, `upstream-4.14`, `upstream-4.19`, `android12-5.4`). Local QEMU matrices always run one build/container at a time. Test containers default to 32 compiler jobs with an 11 GiB hard memory limit; override these with `VPNHIDE_BUILD_JOBS` and `VPNHIDE_BUILD_MEMORY` for smaller hosts.
 
 If the kernel sources and LLVM are already available locally, the container can be skipped:
 
@@ -70,7 +70,7 @@ without filesystem path hiding and logs the unavailable binary.
 
 ## Applying kpatch
 
-`kpatch` does not produce a `.ko` file. It copies the driver into `security/vpnhide`, copies the public header into `include/linux`, and structurally injects the call sites for every supported profile, including legacy 4.14, 4.19, and 5.4. VPNHide must then be built into the kernel with `CONFIG_VPNHIDE=y`.
+`kpatch` does not produce a `.ko` file. It copies the driver into `security/vpnhide`, copies the public header into `include/linux`, and structurally injects the call sites for every supported profile, including legacy 4.9, 4.14, 4.19, and 5.4. VPNHide must then be built into the kernel with `CONFIG_VPNHIDE=y`.
 
 The source tree must be clean before applying the integration:
 
@@ -88,9 +88,9 @@ CONFIG_VPNHIDE=y
 
 The second argument to `apply.sh` selects the compatibility profile. The supported versions are the same as those listed above.
 
-`upstream-4.14` is pinned to Linux `v4.14.336` and is intended for Android
-kernel trees whose relevant networking code remains close to upstream 4.14.
-It is not a universal OEM-4.14 profile: the structural injector deliberately
+`upstream-4.9` is pinned to Linux `v4.9.337` and is intended for Android
+kernel trees whose relevant networking code remains close to upstream 4.9.
+Like the other legacy profiles, it is not a universal OEM profile: the structural injector deliberately
 stops when a source shape differs instead of applying a fuzzy patch.
 
 For a quick QEMU build and runtime check:
@@ -100,21 +100,20 @@ For a quick QEMU build and runtime check:
 ./kpatch/test/run.sh android14-6.1
 ```
 
-The legacy 4.14 QEMU gate is reproducible with:
+The legacy 4.9 QEMU gate is reproducible with:
 
 ```bash
-VPNHIDE_BUILD_JOBS=32 VPNHIDE_BUILD_MEMORY=8g \
-  ./kpatch/test/build-kernel.sh upstream-4.14
-./kpatch/test/run.sh upstream-4.14
+./kpatch/test/build-kernel.sh upstream-4.9
+./kpatch/test/run.sh upstream-4.9
 ```
 
-Linux 4.14 lacks the named-BPF-map ABI needed by the BPF laundering vector
+Linux kernels before 4.16 lack the named-BPF-map ABI needed by the BPF laundering vector
 and the UDP GSO (`UDP_SEGMENT`) API. The harness reports those two vectors as
 `SKIP` for this profile; every vector supported by the kernel remains a
 required pass.
 
 To run the complete matrix sequentially, including clean builds for the
-legacy 4.14, 4.19, and 5.4 profiles:
+legacy 4.9, 4.14, 4.19, and 5.4 profiles:
 
 ```bash
 ./kpatch/test/run-local-container.sh
@@ -159,7 +158,7 @@ The test build uses the DDK container and stores the result at `kpatch/test/.cac
 
 ### Применение kpatch
 
-`kpatch` встраивает драйвер в дерево `kernel/common` и не создаёт `.ko`. Точки вызова для всех поддерживаемых профилей, включая legacy 4.14/4.19/5.4, вставляются структурными Python-скриптами. Исходное дерево должно быть чистым:
+`kpatch` встраивает драйвер в дерево `kernel/common` и не создаёт `.ko`. Точки вызова для всех поддерживаемых профилей, включая legacy 4.9/4.14/4.19/5.4, вставляются структурными Python-скриптами. Исходное дерево должно быть чистым:
 
 ```bash
 ./kpatch/scripts/apply.sh /path/to/kernel/common android14-6.1
@@ -172,21 +171,20 @@ The test build uses the DDK container and stores the result at `kpatch/test/.cac
 ./kpatch/test/run.sh android14-6.1
 ```
 
-Профиль `upstream-4.14` закреплён за Linux `v4.14.336` и предназначен для
-Android-ядер, в которых соответствующая сетевая часть близка к upstream 4.14.
-Это не универсальный профиль для любого OEM-ядра 4.14: при отличающейся
+Профиль `upstream-4.9` закреплён за Linux `v4.9.337` и предназначен для
+Android-ядер, в которых соответствующая сетевая часть близка к upstream 4.9.
+Это не универсальный OEM-профиль: при отличающейся
 структуре исходников инжектор завершится с ошибкой, а не применит нечёткий
 патч.
 
 Воспроизводимая QEMU-проверка legacy-профиля:
 
 ```bash
-VPNHIDE_BUILD_JOBS=32 VPNHIDE_BUILD_MEMORY=8g \
-  ./kpatch/test/build-kernel.sh upstream-4.14
-./kpatch/test/run.sh upstream-4.14
+./kpatch/test/build-kernel.sh upstream-4.9
+./kpatch/test/run.sh upstream-4.9
 ```
 
-В Linux 4.14 нет ABI именованных BPF map, необходимого для вектора BPF
+В Linux до 4.16 нет ABI именованных BPF map, необходимого для вектора BPF
 laundering, и API UDP GSO (`UDP_SEGMENT`). Для этого профиля эти два вектора
 выводятся как `SKIP`; все поддерживаемые ядром векторы остаются обязательными
 для прохождения.

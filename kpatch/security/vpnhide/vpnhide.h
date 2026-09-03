@@ -16,6 +16,7 @@
 #include <linux/version.h>
 #include <linux/miscdevice.h>
 #include <linux/sort.h>
+#include <linux/vmalloc.h>
 #include <linux/vpnhide.h>
 
 #include "vpnhide_uapi.h"
@@ -64,6 +65,22 @@ bool vpnhide_skip_fib_rule(struct sk_buff *skb, struct fib_rule *rule);
 		if (vpnhide_debug_is_enabled())                \
 			pr_info(MODNAME ": " fmt, ##__VA_ARGS__); \
 	} while (0)
+
+/* kvmalloc-family helpers appeared after the 4.9 baseline.  The old
+ * allocator's callers here all run in process context, so vmalloc is a safe
+ * compatibility implementation and vfree keeps ownership unambiguous. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 12, 0)
+static inline void *vpnhide_kvmalloc_array(size_t n, size_t size)
+{
+	if (size && n > ULONG_MAX / size)
+		return NULL;
+	return vzalloc(n * size);
+}
+#define kvmalloc(size, flags) vzalloc(size)
+#define kvzalloc(size, flags) vzalloc(size)
+#define kvmalloc_array(n, size, flags) vpnhide_kvmalloc_array(n, size)
+#define kvfree(ptr) vfree(ptr)
+#endif
 
 enum vpnhide_hook_idx {
 	HOOK_DEV_IOCTL     = 0,

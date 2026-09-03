@@ -33,7 +33,7 @@ echo "##### VPNHIDE-QEMU-TEST START #####"
 echo "KREL=$(uname -r)"
 VECTOR_ARGS=""
 case "$(uname -r)" in
-    4.14.*) VECTOR_ARGS="--legacy-4.14" ;;
+    4.9.*|4.14.*) VECTOR_ARGS="--legacy-pre-4.16" ;;
 esac
 
 # Use the injected iproute2 consistently for topology creation and vectors.

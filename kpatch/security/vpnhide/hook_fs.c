@@ -45,7 +45,7 @@ static bool vh_is_iface_stats_map(struct bpf_map *map)
 bool vh_is_stats_map(struct bpf_map *map)
 {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 16, 0)
-	/* bpf_map has no name field in 4.14, so the map class cannot be
+	/* bpf_map has no name field before 4.16, so the map class cannot be
 	 * identified safely.  Leave the BPF statistics vector inactive. */
 	return false;
 #else
