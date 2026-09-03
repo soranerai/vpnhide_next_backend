@@ -39,6 +39,18 @@ def ipv6_route_show_function() -> str:
     return "ipv6_route_seq_show"
 
 
+def fib_info_uses_nexthop() -> bool:
+    """Return whether this legacy tree has the backported nexthop member."""
+    ip_fib = common.read("include/net/ip_fib.h")
+    return "struct nexthop\t\t*nh;" in ip_fib or "struct nexthop *nh;" in ip_fib
+
+
+def fib6_info_uses_nexthop_array() -> bool:
+    """Return whether fib6_info stores direct nexthops in its flexible array."""
+    ip6_fib = common.read("include/net/ip6_fib.h")
+    return "struct fib6_nh\t\t\tfib6_nh[0];" in ip6_fib or "struct fib6_nh fib6_nh[0];" in ip6_fib
+
+
 def inject_filters(profile: str) -> None:
     specs = [
         ("net/core/fib_rules.c", "fib_nl_fill_rule", "\tnlh = nlmsg_put(",
@@ -105,18 +117,42 @@ def inject_filters(profile: str) -> None:
         ]
     else:
         ipv6_route_show = ipv6_route_show_function()
+        # Android 4.19 vendor trees can backport the nexthop infrastructure
+        # from newer kernels.  Its fib_info has no fib_dev; keep the original
+        # upstream-4.19 expression for ordinary trees, but use the same safe
+        # direct-nexthop condition as newer profiles when the member exists.
+        if fib_info_uses_nexthop():
+            fib_dump_filter = (
+                "#ifdef CONFIG_VPNHIDE\n\tif (fi && !fi->nh && fi->fib_nh[0].fib_nh_dev &&\n"
+                "\t    vpnhide_should_hide_dev(fi->fib_nh[0].fib_nh_dev))\n\t\treturn 0;\n#endif\n"
+            )
+            fib_trie_filter = (
+                "#ifdef CONFIG_VPNHIDE\n\t\tif (fi && !fi->nh && fi->fib_nh[0].fib_nh_dev &&\n"
+                "\t\t    vpnhide_should_hide_dev(fi->fib_nh[0].fib_nh_dev))\n\t\t\tcontinue;\n#endif\n\n"
+            )
+            fib_marker = "vpnhide_should_hide_dev(fi->fib_nh[0].fib_nh_dev)"
+        else:
+            fib_dump_filter = (
+                "#ifdef CONFIG_VPNHIDE\n\tif (fi && fi->fib_dev && vpnhide_should_hide_dev(fi->fib_dev))\n\t\treturn 0;\n#endif\n"
+            )
+            fib_trie_filter = (
+                "#ifdef CONFIG_VPNHIDE\n\t\tif (fi && fi->fib_dev && vpnhide_should_hide_dev(fi->fib_dev))\n\t\t\tcontinue;\n#endif\n\n"
+            )
+            fib_marker = "vpnhide_should_hide_dev(fi->fib_dev)"
+        if fib6_info_uses_nexthop_array():
+            rt6_dev = "dst ? dst->dev : (!rt->nh ? rt->fib6_nh[0].fib_nh_dev : NULL)"
+        else:
+            rt6_dev = "dst ? dst->dev : rt->fib6_nh.nh_dev"
         specs += [
             ("net/ipv4/fib_semantics.c", "fib_dump_info", "\tnlh = nlmsg_put(",
-             "#ifdef CONFIG_VPNHIDE\n\tif (fi && fi->fib_dev && vpnhide_should_hide_dev(fi->fib_dev))\n\t\treturn 0;\n#endif\n",
-             "vpnhide_should_hide_dev(fi->fib_dev)"),
+             fib_dump_filter, fib_marker),
             ("net/ipv4/fib_trie.c", "fib_route_seq_show", "\t\tif ((fa->fa_type",
-             "#ifdef CONFIG_VPNHIDE\n\t\tif (fi && fi->fib_dev && vpnhide_should_hide_dev(fi->fib_dev))\n\t\t\tcontinue;\n#endif\n\n",
-             "vpnhide_should_hide_dev(fi->fib_dev)"),
+             fib_trie_filter, fib_marker),
             ("net/ipv6/ip6_fib.c", ipv6_route_show, "\tseq_printf(seq, \" %08x",
              "#ifdef CONFIG_VPNHIDE\n\tif (dev && vpnhide_should_hide_dev(dev)) {\n\t\titer->w.leaf = NULL;\n\t\treturn 0;\n\t}\n#endif\n\n",
              "vpnhide_should_hide_dev(dev)"),
             ("net/ipv6/route.c", "rt6_fill_node", "\tnlh = nlmsg_put(",
-             "#ifdef CONFIG_VPNHIDE\n\t{\n\t\tstruct net_device *_dev = dst ? dst->dev : rt->fib6_nh.nh_dev;\n\t\tif (_dev && vpnhide_should_hide_dev(_dev))\n\t\t\treturn 0;\n\t}\n#endif\n",
+             f"#ifdef CONFIG_VPNHIDE\n\t{{\n\t\tstruct net_device *_dev = {rt6_dev};\n\t\tif (_dev && vpnhide_should_hide_dev(_dev))\n\t\t\treturn 0;\n\t}}\n#endif\n",
              "vpnhide_should_hide_dev(_dev)"),
         ]
     for spec in specs:
