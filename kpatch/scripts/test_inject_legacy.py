@@ -109,6 +109,33 @@ class LegacyIpv6RouteInjectorTest(unittest.TestCase):
         self.assertIn("SYSCALL_DEFINE5(setsockopt", source[start:end])
         self.assertIn("return 0", source[start:end])
 
+    def test_upstream_419_nexthop_backport_uses_fib_nh(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "include/net/ip_fib.h"
+            path.parent.mkdir(parents=True)
+            path.write_text("struct fib_info {\n\tstruct nexthop\t\t*nh;\n};\n")
+            common.ROOT = root
+            self.assertTrue(legacy.fib_info_uses_nexthop())
+
+    def test_upstream_419_regular_tree_uses_fib_dev(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "include/net/ip_fib.h"
+            path.parent.mkdir(parents=True)
+            path.write_text("struct fib_info {\n\tstruct net_device *fib_dev;\n};\n")
+            common.ROOT = root
+            self.assertFalse(legacy.fib_info_uses_nexthop())
+
+    def test_upstream_419_nexthop_array_uses_fib6_nh_index(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "include/net/ip6_fib.h"
+            path.parent.mkdir(parents=True)
+            path.write_text("struct fib6_info {\n\tstruct fib6_nh\t\t\tfib6_nh[0];\n};\n")
+            common.ROOT = root
+            self.assertTrue(legacy.fib6_info_uses_nexthop_array())
+
     def test_dev_ifname_accepts_both_414_and_newer_shapes(self) -> None:
         templates = (
             (

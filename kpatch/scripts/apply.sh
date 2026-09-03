@@ -42,6 +42,15 @@ cp -r "$DRIVER_DIR" "$KERNEL_DIR/security/vpnhide"
 log "Copying include/linux/vpnhide.h..."
 cp "$HEADER" "$KERNEL_DIR/include/linux/vpnhide.h"
 
+# Some Android 4.19 vendor trees backport the later single-argument
+# sock_from_file() API.  This is not inferable from LINUX_VERSION_CODE, so
+# record the source-tree ABI in the copied private header for the wrapper.
+if grep -Eq 'sock_from_file\(struct file \*file\);' "$KERNEL_DIR/include/linux/net.h"; then
+    log "Detected one-argument sock_from_file() API..."
+    sed -i '/#ifdef CONFIG_VPNHIDE/a\
+#define VPNHIDE_SOCK_FROM_FILE_ONE_ARG 1' "$KERNEL_DIR/include/linux/vpnhide.h"
+fi
+
 # --------------------------------------------------------------------------
 # 3. Inject call sites structurally for every supported profile.
 # --------------------------------------------------------------------------

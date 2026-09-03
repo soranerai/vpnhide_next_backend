@@ -859,14 +859,14 @@ bool vpnhide_setsockopt(int fd, int level, int optname,
 #else
 	struct file *ffile = f.file;
 #endif
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0) && !defined(VPNHIDE_SOCK_FROM_FILE_ONE_ARG)
 	int err = 0;
 #endif
 	int r;
 
 	if (!ffile)
 		return false;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) || defined(VPNHIDE_SOCK_FROM_FILE_ONE_ARG)
 	sock = sock_from_file(ffile);
 #else
 	sock = sock_from_file(ffile, &err);
