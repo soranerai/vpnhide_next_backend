@@ -51,6 +51,11 @@ def fib6_info_uses_nexthop_array() -> bool:
     return "struct fib6_nh\t\t\tfib6_nh[0];" in ip6_fib or "struct fib6_nh fib6_nh[0];" in ip6_fib
 
 
+def fib_nh_uses_fib_nh_dev() -> bool:
+    """Return whether the legacy fib_nh member uses the backported name."""
+    return "fib_nh_dev" in common.read("include/net/ip_fib.h")
+
+
 def inject_filters(profile: str) -> None:
     specs = [
         ("net/core/fib_rules.c", "fib_nl_fill_rule", "\tnlh = nlmsg_put(",
@@ -100,20 +105,42 @@ def inject_filters(profile: str) -> None:
              "vpnhide_should_hide_dev(_dev)"),
         ]
     elif profile == "upstream-4.14":
+        # Android 4.14 trees can backport the BPF iterator just as 4.19/5.4
+        # do.  Its renderer is renamed to ipv6_route_native_seq_show(); the
+        # dispatcher has two preprocessor alternatives, so never inject it.
+        ipv6_route_show = ipv6_route_show_function()
+        if ipv6_route_show == "ipv6_route_native_seq_show":
+            ipv6_anchor = "\tdev = rt->fib6_nh.nh_dev;"
+            ipv6_filter = (
+                "\n#ifdef CONFIG_VPNHIDE\n\tif (dev && vpnhide_should_hide_dev(dev)) {\n"
+                "\t\titer->w.leaf = NULL;\n\t\treturn 0;\n\t}\n#endif\n\n"
+            )
+            ipv6_marker = "vpnhide_should_hide_dev(dev)"
+        else:
+            ipv6_anchor = "\tseq_printf(seq, \"%pi6 %02x \", &rt->rt6i_dst.addr, rt->rt6i_dst.plen);"
+            ipv6_filter = (
+                "#ifdef CONFIG_VPNHIDE\n\tif (rt->dst.dev && vpnhide_should_hide_dev(rt->dst.dev)) {\n"
+                "\t\titer->w.leaf = NULL;\n\t\treturn 0;\n\t}\n#endif\n\n"
+            )
+            ipv6_marker = "vpnhide_should_hide_dev(rt->dst.dev)"
+        fib_nh_dev = "fib_nh_dev" if fib_nh_uses_fib_nh_dev() else "nh_dev"
+        rt6_source = common.read("net/ipv6/route.c")
+        if "struct fib6_info *rt, struct dst_entry *dst" in rt6_source:
+            rt6_dev = "dst ? dst->dev : rt->fib6_nh.nh_dev"
+        else:
+            rt6_dev = "rt->dst.dev"
         specs += [
             ("net/ipv4/fib_semantics.c", "fib_dump_info", "\tnlh = nlmsg_put(",
-             "#ifdef CONFIG_VPNHIDE\n\tif (fi && fi->fib_nh->nh_dev &&\n\t    vpnhide_should_hide_dev(fi->fib_nh->nh_dev))\n\t\treturn 0;\n#endif\n",
-             "vpnhide_should_hide_dev(fi->fib_nh->nh_dev)"),
+             f"#ifdef CONFIG_VPNHIDE\n\tif (fi && fi->fib_nh->{fib_nh_dev} &&\n\t    vpnhide_should_hide_dev(fi->fib_nh->{fib_nh_dev}))\n\t\treturn 0;\n#endif\n",
+             f"vpnhide_should_hide_dev(fi->fib_nh->{fib_nh_dev})"),
             ("net/ipv4/fib_trie.c", "fib_route_seq_show", "\t\tif ((fa->fa_type",
              "#ifdef CONFIG_VPNHIDE\n\t\tif (fi && fi->fib_dev && vpnhide_should_hide_dev(fi->fib_dev))\n\t\t\tcontinue;\n#endif\n\n",
              "vpnhide_should_hide_dev(fi->fib_dev)"),
-            ("net/ipv6/ip6_fib.c", "ipv6_route_seq_show",
-             "\tseq_printf(seq, \"%pi6 %02x \", &rt->rt6i_dst.addr, rt->rt6i_dst.plen);",
-             "#ifdef CONFIG_VPNHIDE\n\tif (rt->dst.dev && vpnhide_should_hide_dev(rt->dst.dev)) {\n\t\titer->w.leaf = NULL;\n\t\treturn 0;\n\t}\n#endif\n\n",
-             "vpnhide_should_hide_dev(rt->dst.dev)"),
+            ("net/ipv6/ip6_fib.c", ipv6_route_show, ipv6_anchor,
+             ipv6_filter, ipv6_marker),
             ("net/ipv6/route.c", "rt6_fill_node", "\tnlh = nlmsg_put(",
-             "#ifdef CONFIG_VPNHIDE\n\tif (rt->dst.dev && vpnhide_should_hide_dev(rt->dst.dev))\n\t\treturn 0;\n#endif\n\n",
-             "vpnhide_should_hide_dev(rt->dst.dev)"),
+             f"#ifdef CONFIG_VPNHIDE\n\t{{\n\t\tstruct net_device *_dev = {rt6_dev};\n\t\tif (_dev && vpnhide_should_hide_dev(_dev))\n\t\t\treturn 0;\n\t}}\n#endif\n\n",
+             "vpnhide_should_hide_dev(_dev)"),
         ]
     else:
         ipv6_route_show = ipv6_route_show_function()
@@ -199,8 +226,13 @@ def inject_socket_adjacent_414() -> None:
     )
     rel = "net/ipv6/af_inet6.c"
     common.ensure_include(rel)
+    # Android 4.14 backports can split the binding implementation into
+    # __inet6_bind(), leaving inet6_bind() as a thin BPF-CGROUP wrapper.
+    # Hook the implementation that actually owns addr_type in either shape.
+    inet6_source = common.read(rel)
+    inet6_bind_function = "__inet6_bind" if "__inet6_bind(" in inet6_source else "inet6_bind"
     common.insert_in_function(
-        rel, "inet6_bind", "\taddr_type = ipv6_addr_type(",
+        rel, inet6_bind_function, "\taddr_type = ipv6_addr_type(",
         "#ifdef CONFIG_VPNHIDE\n\t{\n"
         "\t\tint _r = vpnhide_inet6_bind_ll(sk, uaddr, addr_len);\n"
         "\t\tif (_r)\n\t\t\treturn _r;\n"
@@ -213,6 +245,7 @@ def inject_socket_414() -> None:
     """Inject socket syscall hooks for the pre-__sys_* 4.14 implementation."""
     rel = "net/socket.c"
     common.ensure_include(rel)
+    socket_source = common.read(rel)
     common.replace_in_function(
         rel, "bind",
         "\t\t\tif (!err)\n"
@@ -272,16 +305,18 @@ def inject_socket_414() -> None:
         "\t\t}",
         marker="vpnhide_getname(sock, (struct sockaddr *)&address, 1,",
     )
+    setsockopt_function = "__sys_setsockopt" if "__sys_setsockopt(" in socket_source else "setsockopt"
     common.insert_in_function(
-        rel, "setsockopt", "\tif (sock != NULL) {",
+        rel, setsockopt_function, "\tif (sock != NULL) {",
         "\n#ifdef CONFIG_VPNHIDE\n\t\t{\n"
         "\t\t\tint _vret = vpnhide_setsockopt_sock(sock, level, optname, optval, optlen);\n"
         "\t\t\tif (_vret) {\n\t\t\t\terr = (_vret > 0) ? 0 : _vret;\n"
         "\t\t\t\tgoto out_put;\n\t\t\t}\n\t\t}\n#endif\n",
         before=False, marker="vpnhide_setsockopt_sock",
     )
+    getsockopt_function = "__sys_getsockopt" if "__sys_getsockopt(" in socket_source else "getsockopt"
     common.insert_in_function(
-        rel, "getsockopt", "out_put:",
+        rel, getsockopt_function, "out_put:",
         "#ifdef CONFIG_VPNHIDE\n"
         "\tif (!err)\n\t\tvpnhide_getsockopt(sock, level, optname, optval, optlen, &err);\n"
         "#endif\n",
