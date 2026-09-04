@@ -145,6 +145,21 @@ class LegacyIpv6RouteInjectorTest(unittest.TestCase):
             common.ROOT = root
             self.assertTrue(legacy.fib_nh_uses_fib_nh_dev())
 
+    def test_upstream_49_uses_pre54_socket_injectors(self) -> None:
+        """4.9 must retain the old syscall and UDP hook placement contract."""
+        self.assertTrue(legacy.uses_pre54_socket_layout("upstream-4.9"))
+        self.assertTrue(legacy.uses_pre54_socket_layout("upstream-4.14"))
+        self.assertFalse(legacy.uses_pre54_socket_layout("upstream-4.19"))
+
+    def test_upstream_49_has_no_fib_rule_uid_range(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "include/net/fib_rules.h"
+            path.parent.mkdir(parents=True)
+            path.write_text("struct fib_rule { unsigned long table; };\n")
+            common.ROOT = root
+            self.assertFalse(legacy.fib_rule_uses_uid_range())
+
     def test_dev_ifname_accepts_both_414_and_newer_shapes(self) -> None:
         templates = (
             (
