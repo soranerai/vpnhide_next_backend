@@ -67,17 +67,23 @@ LOG="$WORK/serial.log"
 BOOT_TIMEOUT="${VPNHIDE_QEMU_TIMEOUT:-300}"
 QEMU_MEM="${VPNHIDE_QEMU_MEM:-512M}"
 QEMU_SMP="${VPNHIDE_QEMU_SMP:-1}"
+# This kernel probes Gunyah with HVC during early boot; QEMU needs EL2
+# enabled to handle that probe instead of raising an undefined instruction.
+QEMU_MACHINE="virt"
+case "$KMI" in
+	*-6.12) QEMU_MACHINE="virt,virtualization=on" ;;
+esac
 echo "[run] $KMI: booting $(basename "$IMAGE") in QEMU (TCG, no KVM)…"
 # romfile= disables the virtio-net PCI option ROM (iPXE) so we don't need the
 # ipxe-qemu package — only matters for PXE boot, which we never do; networking
 # (for apk in the VM) still works.
 timeout "$BOOT_TIMEOUT" qemu-system-aarch64 \
-	-machine virt -cpu max -accel tcg,thread=multi,tb-size=1024 \
+	-machine "$QEMU_MACHINE" -cpu max -accel tcg,thread=multi,tb-size=1024 \
 	-smp "$QEMU_SMP" -m "$QEMU_MEM" \
 	-kernel "$IMAGE" -initrd "$WORK/initramfs.cpio.gz" \
-	-append "console=ttyAMA0 panic=-1 rdinit=/init" \
+	-append "earlycon=pl011,mmio32,0x09000000 console=ttyAMA0 panic=-1 rdinit=/init" \
 	-netdev user,id=n0 -device virtio-net-pci,netdev=n0,romfile= \
-	-display none -no-reboot -serial "file:$LOG" >/dev/null 2>&1 || true
+	-display none -no-reboot -serial "file:$LOG" >/dev/null || true
 
 echo "------------------------- test output -------------------------"
 if ! sed -n '/VPNHIDE-QEMU-TEST START/,/VPNHIDE-QEMU-TEST END/p' "$LOG" |
