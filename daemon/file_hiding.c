@@ -19,7 +19,14 @@ static const char *const susfs_tool_candidates[] = {
     "/data/adb/ksu/bin/ksu_susfs",
     "/data/adb/ksu/bin/susfs",
 };
+static const char *const ksud_tool_candidates[] = {
+    "/data/adb/ksu/bin/ksud",
+    "/data/adb/ksud",
+};
 static const char *susfs_tool;
+static const char *ksud_tool;
+static bool ksud_susfs_checked;
+static bool ksud_susfs_available;
 static unsigned long long susfs_last_error_log;
 static const char *susfs_config_path;
 static bool susfs_enabled = true;
@@ -155,6 +162,61 @@ static const char *susfs_find_tool(void) {
   return NULL;
 }
 
+/* Sukisu Nova exposes SUSFS through ksud. Check its advertised subcommands
+ * once, so older ksud builds without add-sus-path-loop are not invoked. */
+static const char *susfs_find_ksud_tool(void) {
+  size_t i;
+  int status;
+  pid_t pid;
+  unsigned long long deadline;
+  char output[8192];
+  size_t used = 0;
+  int pipefd[2];
+
+  if (ksud_susfs_checked)
+    return ksud_susfs_available ? ksud_tool : NULL;
+  ksud_susfs_checked = true;
+  for (i = 0; i < sizeof(ksud_tool_candidates) / sizeof(ksud_tool_candidates[0]); i++)
+    if (access(ksud_tool_candidates[i], X_OK) == 0) {
+      ksud_tool = ksud_tool_candidates[i];
+      break;
+    }
+  if (!ksud_tool || pipe(pipefd) < 0)
+    return NULL;
+  pid = fork();
+  if (pid < 0) {
+    close(pipefd[0]); close(pipefd[1]);
+    return NULL;
+  }
+  if (pid == 0) {
+    close(pipefd[0]);
+    dup2(pipefd[1], STDOUT_FILENO);
+    dup2(pipefd[1], STDERR_FILENO);
+    close(pipefd[1]);
+    execl(ksud_tool, ksud_tool, "susfs", "--help", (char *)NULL);
+    _exit(127);
+  }
+  close(pipefd[1]);
+  deadline = daemon_get_time_ms() + 2000;
+  while (used < sizeof(output) - 1) {
+    ssize_t n = read(pipefd[0], output + used, sizeof(output) - 1 - used);
+    if (n > 0) { used += (size_t)n; continue; }
+    if (n < 0 && errno == EINTR) continue;
+    break;
+  }
+  close(pipefd[0]);
+  output[used] = '\0';
+  while (waitpid(pid, &status, WNOHANG) == 0 && daemon_get_time_ms() < deadline)
+    usleep(10000);
+  if (waitpid(pid, &status, WNOHANG) == 0) {
+    kill(pid, SIGKILL); waitpid(pid, &status, 0);
+    return NULL;
+  }
+  ksud_susfs_available = WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+                         strstr(output, "add-sus-path-loop") != NULL;
+  return ksud_susfs_available ? ksud_tool : NULL;
+}
+
 static void susfs_log_error(const char *format, ...) {
   unsigned long long now = daemon_get_time_ms();
   va_list ap;
@@ -171,10 +233,15 @@ static void susfs_log_error(const char *format, ...) {
 
 static int susfs_add_path_loop(const char *path) {
   const char *tool = susfs_find_tool();
+  bool use_ksud = false;
   int status;
   pid_t pid;
   unsigned long long deadline;
 
+  if (!tool) {
+    tool = susfs_find_ksud_tool();
+    use_ksud = tool != NULL;
+  }
   if (!tool) {
     susfs_log_error(
         "ksu_susfs command not found; continuing without path hiding");
@@ -187,7 +254,10 @@ static int susfs_add_path_loop(const char *path) {
     return -errno;
   }
   if (pid == 0) {
-    execl(tool, tool, "add_sus_path_loop", path, (char *)NULL);
+    if (use_ksud)
+      execl(tool, tool, "susfs", "add-sus-path-loop", path, (char *)NULL);
+    else
+      execl(tool, tool, "add_sus_path_loop", path, (char *)NULL);
     _exit(127);
   }
 
