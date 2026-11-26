@@ -2297,6 +2297,15 @@ static int __init vpnhide_init(void) {
     sys_getsockname_uses_wrapper = true;
   }
 
+  /* Register before probes so a failure cannot leave live probe handlers. */
+  ret = misc_register(&vpnhide_misc);
+  if (ret) {
+    pr_err(MODNAME ": failed to register misc device: %d\n", ret);
+    kvfree(kmod_port_stats);
+    kmod_port_stats = NULL;
+    return ret;
+  }
+
   for (i = 0; i < ARRAY_SIZE(probes); i++) {
     if (strcmp(probes[i].name, "sock_getsockopt") == 0) {
       int j;
@@ -2339,13 +2348,6 @@ static int __init vpnhide_init(void) {
   sys_connect_uses_wrapper = probes[19].registered;
   sys_bind_uses_wrapper = probes[20].registered;
 
-  ret = misc_register(&vpnhide_misc);
-  if (ret) {
-    pr_err(MODNAME ": failed to register misc device\n");
-    kvfree(kmod_port_stats);
-    kmod_port_stats = NULL;
-  }
-
   vpnhide_dbg("loaded\n");
   return 0;
 }
@@ -2365,6 +2367,9 @@ static void __exit vpnhide_exit(void) {
                   probes[i].krp->nmissed);
     }
   }
+
+  /* No probe or open control file can enqueue another module callback. */
+  rcu_barrier();
 
   spin_lock(&policy_snapshot_lock);
   snapshot = rcu_dereference_protected(

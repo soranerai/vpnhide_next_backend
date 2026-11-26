@@ -1414,7 +1414,8 @@ static int udpv6_sendmsg_ll_entry(struct kretprobe_instance *ri,
   uid = from_kuid(&init_user_ns, current_uid());
   if ((msg->msg_flags & MSG_DONTWAIT) &&
       vpnhide_udp_dst_is_vpn_bound(sk, msg)) {
-    if (udp_rate_limit_exceeded(uid)) {
+    /* Keep the return handler installed until it restores the socket. */
+    if (udp_rate_limit_exceeded(uid) && try_module_get(THIS_MODULE)) {
       sk->sk_sndbuf = 0;
       data->rl_spoofed = true;
       udelay(50);
@@ -1428,8 +1429,10 @@ static int udpv6_sendmsg_ll_ret(struct kretprobe_instance *ri,
                                 struct pt_regs *regs) {
   struct udpv6_sendmsg_ll_data *data = (void *)ri->data;
 
-  if (data->rl_spoofed && data->sk)
+  if (data->rl_spoofed && data->sk) {
     data->sk->sk_sndbuf = data->orig_sndbuf;
+    module_put(THIS_MODULE);
+  }
 
   if (!data->should_deny)
     return 0;
