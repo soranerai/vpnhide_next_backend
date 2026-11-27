@@ -17,6 +17,7 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sys /sys 2>/dev/null
 mount -t devtmpfs dev /dev 2>/dev/null
+chmod 1777 /tmp
 
 # The Android/Bionic static ctl uses /system/bin/sh for popen().  The Alpine
 # QEMU rootfs only provides /bin/sh, so provide the Android-compatible path.
@@ -85,6 +86,22 @@ echo "REGISTERED=$REGISTERED"
 DAEMON_PID=$!
 # Give the daemon a moment to register netlink events
 sleep 1
+
+# A peer in a separate namespace gives the TCP test a real route through a
+# hidden interface, rather than the local route used for local addresses.
+if ip netns add vhpeer 2>/dev/null &&
+   ip link add vpntest type veth peer name vhpeer0 &&
+   ip link set vhpeer0 netns vhpeer &&
+   ip link set vpntest mtu 1200 up &&
+   ip addr add 10.77.0.1/24 dev vpntest &&
+   ip -n vhpeer link set lo up &&
+   ip -n vhpeer link set vhpeer0 up &&
+   ip -n vhpeer addr add 10.77.0.2/24 dev vhpeer0; then
+  ip netns exec vhpeer python3 -u -c 'import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("10.77.0.2",45678)); s.listen(8); exec("while True:\n c,a=s.accept()\n c.recv(1)\n c.close()")' >/tmp/vhpeer.log 2>&1 &
+  echo "TCP_MSS_FIXTURE=ready"
+else
+  echo "TCP_MSS_FIXTURE=unavailable"
+fi
 
 # --- fabricate a VPN-like interface + routes + a per-uid policy rule ---------
 ip link add vpn0 type dummy 2>/dev/null

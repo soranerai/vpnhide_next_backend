@@ -55,222 +55,53 @@ struct kretprobe dev_ioctl_krp = {
     .kp.symbol_name = "dev_ioctl",
 };
 
-/* --- inet_ioctl hook --- */
-
-struct inet_ioctl_data {
-  unsigned int cmd;
-  void __user *uarg;
-};
-
-static int inet_ioctl_entry(struct kretprobe_instance *ri,
-                            struct pt_regs *regs) {
-  struct inet_ioctl_data *data;
-  unsigned int cmd = (unsigned int)regs->regs[1];
-
-  switch (cmd) {
-  case SIOCGIFADDR:
-  case SIOCGIFDSTADDR:
-  case SIOCGIFBRDADDR:
-  case SIOCGIFNETMASK:
-    break;
-  default:
-    return 1;
-  }
-
-  if (!is_hook_active(HOOK_DEV_IOCTL, from_kuid(&init_user_ns, current_uid())))
-    return 1;
-
-  if (!is_target_uid())
-    return 1;
-
-  data = (void *)ri->data;
-  data->cmd = cmd;
-  data->uarg = (void __user *)regs->regs[2];
-
-  vpnhide_dbg("inet_ioctl_entry: uid=%u cmd=0x%x\n",
-              from_kuid(&init_user_ns, current_uid()), data->cmd);
-  return 0;
-}
-
-static int inet_ioctl_ret(struct kretprobe_instance *ri, struct pt_regs *regs) {
-  struct inet_ioctl_data *data = (void *)ri->data;
-  char name[IFNAMSIZ];
-
-  if (regs_return_value(regs) != 0)
-    return 0;
-
-  if (!data->uarg)
-    return 0;
-
-  if (copy_from_user(name, data->uarg, IFNAMSIZ)) {
-    vpnhide_dbg("inet_ioctl_ret: copy_from_user failed\n");
-    return 0;
-  }
-  name[IFNAMSIZ - 1] = '\0';
-
-  if (is_active_vpn_ifname(name)) {
-    vpnhide_dbg("inet_ioctl_ret: hiding iface=%s cmd=0x%x\n", name, data->cmd);
-    record_kmod_intercept(from_kuid(&init_user_ns, current_uid()), 0);
-    regs_set_return_value(regs, -ENODEV);
-  }
-
-  return 0;
-}
-
-struct kretprobe inet_ioctl_krp = {
-    .handler = inet_ioctl_ret,
-    .entry_handler = inet_ioctl_entry,
-    .data_size = sizeof(struct inet_ioctl_data),
+/* IPv4 address ioctls are handled by devinet_ioctl with a kernel-space
+ * ifreq. Return ENODEV there, before inet_ioctl can copy the successful
+ * result to userspace. A return probe on inet_ioctl is too late: it can
+ * change errno but cannot undo the already-visible address. */
+struct kretprobe devinet_ioctl_krp = {
+    .handler = dev_ioctl_ret,
+    .entry_handler = dev_ioctl_entry,
+    .data_size = sizeof(struct dev_ioctl_data),
     .maxactive = VPNHIDE_KRETPROBE_MAXACTIVE,
-    .kp.symbol_name = "inet_ioctl",
+    .kp.symbol_name = "devinet_ioctl",
 };
 
-/* --- sock_ioctl hook --- */
+/* --- SIOCGIFCONF filtering before copying entries to userspace --- */
 
-struct sock_ioctl_data {
-  void __user *argp;
-  struct ifreq __user *user_ifc_req;
-  int ifc_capacity;
-};
+/* dev_ifconf calls inet_gifconf once per network device for both the NULL
+ * size query and the actual output. Skipping the hidden device at entry keeps
+ * the count and list consistent without touching unused userspace memory.
+ * The caller holds RTNL, so the device remains valid throughout the call. */
+static int inet_gifconf_pre(struct kprobe *kp, struct pt_regs *regs) {
+  struct net_device *dev = (struct net_device *)regs->regs[0];
+  uid_t uid = from_kuid(&init_user_ns, current_uid());
 
-enum filter_ifconf_result {
-  FILTER_IFCONF_NO_CHANGE,
-  FILTER_IFCONF_CHANGED,
-  FILTER_IFCONF_COPY_FAULT,
-};
+  (void)kp;
+  if (!dev || !is_hook_active(HOOK_SOCK_IOCTL, uid) || !is_target_uid_val(uid) ||
+      !is_active_vpn_ifindex(dev->ifindex))
+    return 0;
 
-static enum filter_ifconf_result filter_ifconf_buf(struct ifreq __user *usr_ifr,
-                                                   int n, int *out_len) {
-  struct ifreq tmp;
-  int i, dst = 0;
-
-  for (i = 0; i < n; i++) {
-    if (copy_from_user(&tmp, &usr_ifr[i], sizeof(tmp)))
-      return FILTER_IFCONF_COPY_FAULT;
-    tmp.ifr_name[IFNAMSIZ - 1] = '\0';
-    if (is_active_vpn_ifname(tmp.ifr_name))
-      continue;
-    if (dst != i) {
-      if (copy_to_user(&usr_ifr[dst], &tmp, sizeof(tmp)))
-        return FILTER_IFCONF_COPY_FAULT;
-    }
-    dst++;
-  }
-
-  if (dst == n)
-    return FILTER_IFCONF_NO_CHANGE;
-  *out_len = dst * (int)sizeof(struct ifreq);
-  return FILTER_IFCONF_CHANGED;
+  record_kmod_intercept(uid, 0);
+  /* inet_gifconf returns the number of bytes written. Zero entries is the
+   * same result it would return for a device without IPv4 addresses. */
+  regs->regs[0] = 0;
+  regs->pc = regs->regs[30];
+  return 1;
 }
 
-/* SIOCGIFCONF writes only the returned entries.  Anything beyond ifc_len is
- * caller-owned memory and may still contain entries from a previous query.
- * RKNHardering deliberately inspects that tail, so compacting the visible
- * entries alone is not sufficient. */
-static bool clear_ifconf_tail(struct ifreq __user *usr_ifr,
-                              int start_len, int capacity_len) {
-  unsigned long tail_len;
-
-  if (!usr_ifr || start_len < 0 || capacity_len <= start_len)
-    return true;
-
-  tail_len = (unsigned long)(capacity_len - start_len);
-  if (clear_user((char __user *)usr_ifr + start_len, tail_len) != 0)
-    return false;
-  return true;
+/* A post-handler prevents optimized probes from ignoring the PC change. */
+static void inet_gifconf_post(struct kprobe *kp, struct pt_regs *regs,
+                              unsigned long flags) {
+  (void)kp;
+  (void)regs;
+  (void)flags;
 }
 
-static int sock_ioctl_ret(struct kretprobe_instance *ri, struct pt_regs *regs) {
-  struct sock_ioctl_data *data = (void *)ri->data;
-  struct ifconf __user *uifc;
-  struct ifconf ifc;
-  int orig_len;
-  int filtered_len;
-  enum filter_ifconf_result res;
-
-  vpnhide_dbg("sock_ioctl_ret: retval=%ld argp=%px\n", regs_return_value(regs),
-              data->argp);
-
-  if (regs_return_value(regs) != 0 || !data->argp)
-    return 0;
-
-  uifc = data->argp;
-  if (copy_from_user(&ifc, uifc, sizeof(ifc)))
-    return 0;
-  if (!ifc.ifc_req || ifc.ifc_len < 0)
-    return 0;
-
-  /* Use the pointer captured before the ioctl returns.  This also prevents a
-   * concurrent userspace mutation of ifc_req from changing the range we
-   * compact or clear. */
-  ifc.ifc_req = data->user_ifc_req;
-  if (ifc.ifc_len > data->ifc_capacity)
-    ifc.ifc_len = data->ifc_capacity;
-
-  orig_len = ifc.ifc_len;
-  res = filter_ifconf_buf(ifc.ifc_req, ifc.ifc_len / (int)sizeof(struct ifreq),
-                          &ifc.ifc_len);
-
-  if (res == FILTER_IFCONF_COPY_FAULT) {
-    vpnhide_dbg("ifconf: copy fault during filter; ifc_len untouched\n");
-    return 0;
-  }
-
-  filtered_len = ifc.ifc_len;
-  if (!clear_ifconf_tail(ifc.ifc_req, filtered_len, data->ifc_capacity)) {
-    vpnhide_dbg("ifconf: failed to clear tail start=%d capacity=%d\n",
-                filtered_len, data->ifc_capacity);
-    return 0;
-  }
-
-  if (res == FILTER_IFCONF_CHANGED) {
-    if (put_user(ifc.ifc_len, &uifc->ifc_len)) {
-      vpnhide_dbg("ifconf: put_user(ifc_len=%d) failed; userspace will see compacted buffer with stale length\n",
-                  ifc.ifc_len);
-      return 0;
-    }
-    record_kmod_intercept(from_kuid(&init_user_ns, current_uid()), 0);
-    vpnhide_dbg("ifconf filtered %d -> %d bytes\n", orig_len, ifc.ifc_len);
-  }
-
-  return 0;
-}
-
-static int sock_ioctl_entry(struct kretprobe_instance *ri,
-                            struct pt_regs *regs) {
-  struct sock_ioctl_data *data;
-  struct ifconf ifc;
-  unsigned int cmd = (unsigned int)regs->regs[1];
-  unsigned long arg = (unsigned long)regs->regs[2];
-
-  if (!is_hook_active(HOOK_SOCK_IOCTL, from_kuid(&init_user_ns, current_uid())))
-    return 1;
-
-  if (cmd != SIOCGIFCONF)
-    return 1;
-
-  if (!is_target_uid())
-    return 1;
-
-  if (copy_from_user(&ifc, (void __user *)arg, sizeof(ifc)) ||
-      !ifc.ifc_req || ifc.ifc_len <= 0)
-    return 1;
-
-  data = (void *)ri->data;
-  data->argp = (void __user *)arg;
-  data->user_ifc_req = ifc.ifc_req;
-  data->ifc_capacity = ifc.ifc_len;
-  vpnhide_dbg("sock_ioctl_entry: uid=%u SIOCGIFCONF argp=%px\n",
-              from_kuid(&init_user_ns, current_uid()), data->argp);
-  return 0;
-}
-
-struct kretprobe sock_ioctl_krp = {
-    .handler = sock_ioctl_ret,
-    .entry_handler = sock_ioctl_entry,
-    .data_size = sizeof(struct sock_ioctl_data),
-    .maxactive = VPNHIDE_KRETPROBE_MAXACTIVE,
-    .kp.symbol_name = "sock_ioctl",
+struct kprobe inet_gifconf_kp = {
+    .symbol_name = "inet_gifconf",
+    .pre_handler = inet_gifconf_pre,
+    .post_handler = inet_gifconf_post,
 };
 
 /* --- Netlink link/address info hooks --- */
@@ -944,14 +775,22 @@ static int fib_dump_entry(struct kretprobe_instance *ri, struct pt_regs *regs) {
 
 static int fib_dump_ret(struct kretprobe_instance *ri, struct pt_regs *regs) {
   struct fib_dump_data *data = (void *)ri->data;
+  struct nlmsghdr hdr;
+  bool single = false;
 
   if (!data->should_filter || !data->skb)
     return 0;
 
   if (regs_return_value(regs) >= 0) {
+    /* Dump messages are multipart. A non-multipart message is a point
+     * RTM_F_FIB_MATCH reply: return an error rather than send an empty skb. */
+    if (data->skb->len >= data->saved_len + sizeof(hdr) &&
+        !skb_copy_bits(data->skb, data->saved_len, &hdr, sizeof(hdr)) &&
+        hdr.nlmsg_type == RTM_NEWROUTE && !(hdr.nlmsg_flags & NLM_F_MULTI))
+      single = true;
     record_kmod_intercept(from_kuid(&init_user_ns, current_uid()), 1);
     skb_trim(data->skb, data->saved_len);
-    regs_set_return_value(regs, 0);
+    regs_set_return_value(regs, single ? -ENETUNREACH : 0);
   }
   return 0;
 }
@@ -1116,84 +955,71 @@ struct kretprobe rt6_fill_krp = {
     .kp.symbol_name = "rt6_fill_node",
 };
 
-struct rt_fill_data {
-  struct sk_buff *skb;
-  unsigned int saved_len;
-  bool should_filter;
-};
+/* Point route replies are serialized before netlink_unicast, avoiding the
+ * LTO-dependent rt_fill_info and inlined rtnl_unicast ABIs. */
+static bool vh_route_reply_has_hidden_oif(struct sk_buff *skb)
+{
+  struct nlmsghdr hdr;
+  struct rtmsg route;
+  unsigned int pos, end;
 
-static int rt_fill_entry(struct kretprobe_instance *ri, struct pt_regs *regs) {
-  struct rt_fill_data *data;
-  struct net_device *dev = NULL;
-  struct rtable *rt = NULL;
-  struct sk_buff *skb = NULL;
-  struct net_device *dev_ptr = NULL;
-  unsigned int temp_len = 0;
-  bool is_vpn = false;
-
-  if (!is_hook_active(HOOK_RT_FILL, from_kuid(&init_user_ns, current_uid())))
-    return 1;
-
-  if (!is_target_uid())
-    return 1;
-
-  rt = (struct rtable *)regs->regs[3];
-  skb = (struct sk_buff *)regs->regs[7];
-
-  if (rt) {
-    if (copy_from_kernel_nofault(&dev_ptr, &rt->dst.dev, sizeof(dev_ptr)) ==
-            0 &&
-        dev_ptr) {
-      dev = dev_ptr;
-    }
+  if (!skb || skb_copy_bits(skb, 0, &hdr, sizeof(hdr)) ||
+      hdr.nlmsg_type != RTM_NEWROUTE ||
+      hdr.nlmsg_len < NLMSG_LENGTH(sizeof(route)) || hdr.nlmsg_len > skb->len ||
+      skb_copy_bits(skb, NLMSG_HDRLEN, &route, sizeof(route)) ||
+      route.rtm_family != AF_INET)
+    return false;
+  pos = NLMSG_LENGTH(sizeof(route));
+  end = hdr.nlmsg_len;
+  while (pos + sizeof(struct rtattr) <= end) {
+    struct rtattr attr;
+    u32 ifindex;
+    unsigned int step;
+    if (skb_copy_bits(skb, pos, &attr, sizeof(attr)) ||
+        attr.rta_len < sizeof(attr) || attr.rta_len > end - pos)
+      return false;
+    if ((attr.rta_type & NLA_TYPE_MASK) == RTA_OIF &&
+        attr.rta_len >= RTA_LENGTH(sizeof(ifindex)) &&
+        !skb_copy_bits(skb, pos + RTA_LENGTH(0), &ifindex, sizeof(ifindex)) &&
+        is_active_vpn_ifindex(ifindex))
+      return true;
+    step = RTA_ALIGN(attr.rta_len);
+    if (step > end - pos)
+      break;
+    pos += step;
   }
-
-  rcu_read_lock();
-  if (dev && is_active_vpn_ifindex(dev->ifindex)) {
-    is_vpn = true;
-  }
-  rcu_read_unlock();
-
-  if (!is_vpn)
-    return 1;
-
-  data = (void *)ri->data;
-  data->should_filter = true;
-  data->skb = NULL;
-  data->saved_len = 0;
-
-  if (skb) {
-    if (copy_from_kernel_nofault(&temp_len, &skb->len, sizeof(temp_len)) == 0) {
-      data->skb = skb;
-      data->saved_len = temp_len;
-    }
-  }
-
-  vpnhide_dbg("rt_fill_entry: hiding route via index %d\n", dev->ifindex);
-
-  return 0;
+  return false;
 }
 
-static int rt_fill_ret(struct kretprobe_instance *ri, struct pt_regs *regs) {
-  struct rt_fill_data *data = (void *)ri->data;
-
-  if (!data->should_filter || !data->skb)
+static int vh_rtnl_unicast_pre(struct kprobe *kp, struct pt_regs *regs)
+{
+  struct sock *sender = (struct sock *)regs->regs[0];
+  struct sk_buff *skb = (struct sk_buff *)regs->regs[1];
+  uid_t uid = from_kuid(&init_user_ns, current_uid());
+  (void)kp;
+  /* Limit interception to the network namespace's kernel routing socket. */
+  if (!sender || sender->sk_protocol != NETLINK_ROUTE ||
+      sock_net(sender)->rtnl != sender ||
+      !is_hook_active(HOOK_RT_FILL, uid) || !is_target_uid_val(uid) ||
+      !vh_route_reply_has_hidden_oif(skb))
     return 0;
-
-  if (regs_return_value(regs) >= 0) {
-    record_kmod_intercept(from_kuid(&init_user_ns, current_uid()), 1);
-    skb_trim(data->skb, data->saved_len);
-    regs_set_return_value(regs, 0);
-  }
-  return 0;
+  record_kmod_intercept(uid, 1);
+  kfree_skb(skb);
+  regs_set_return_value(regs, -ENETUNREACH);
+  instruction_pointer_set(regs, regs->regs[30]);
+  return 1;
 }
 
-struct kretprobe rt_fill_krp = {
-    .handler = rt_fill_ret,
-    .entry_handler = rt_fill_entry,
-    .data_size = sizeof(struct rt_fill_data),
-    .maxactive = VPNHIDE_KRETPROBE_MAXACTIVE,
-    .kp.symbol_name = "rt_fill_info",
+static void vh_rtnl_unicast_post(struct kprobe *kp, struct pt_regs *regs,
+                                 unsigned long flags)
+{
+  (void)kp; (void)regs; (void)flags;
+}
+
+struct kprobe rt_unicast_kp = {
+  .symbol_name = "netlink_unicast",
+  .pre_handler = vh_rtnl_unicast_pre,
+  .post_handler = vh_rtnl_unicast_post,
 };
 
 /* --- TC fill qdisc hook --- */

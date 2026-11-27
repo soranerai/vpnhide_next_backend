@@ -2228,8 +2228,10 @@ struct kretprobe_reg {
 
 static struct kretprobe_reg probes[] = {
     {&dev_ioctl_krp, "dev_ioctl", NULL, false, -1},
-    {&inet_ioctl_krp, "inet_ioctl", NULL, false, -1},
-    {&sock_ioctl_krp, "sock_ioctl", NULL, false, -1},
+    {&devinet_ioctl_krp, "devinet_ioctl", NULL, false, -1},
+    /* Keep this slot reserved: fallback and wrapper indices below are ABI
+     * independent array positions. inet_gifconf uses an entry kprobe. */
+    {NULL, "inet_gifconf", NULL, false, -1},
     {&rtnl_fill_krp, "rtnl_fill_ifinfo", NULL, false, -1},
     {&inet6_fill_krp, "inet6_fill_ifaddr", NULL, false, -1},
     {&inet_fill_krp, "inet_fill_ifaddr", NULL, false, -1},
@@ -2237,7 +2239,7 @@ static struct kretprobe_reg probes[] = {
     {&fib_dump_krp, "fib_dump_info", NULL, false, -1},
     {&fib_rule_fill_krp, "fib_nl_fill_rule", NULL, false, -1},
     {&rt6_fill_krp, "rt6_fill_node", NULL, false, -1},
-    {&rt_fill_krp, "rt_fill_info", NULL, false, -1},
+    {NULL, "netlink_unicast", NULL, false, -1},
     {&sys_setsockopt_krp, "__arm64_sys_setsockopt", NULL, false, -1},
     {&sys_getsockopt_krp, "__arm64_sys_getsockopt", NULL, false, -1},
     {&sk_getsockopt_krp, "sk_getsockopt", NULL, false, 13},
@@ -2306,7 +2308,59 @@ static int __init vpnhide_init(void) {
     return ret;
   }
 
+  ret = register_kprobe(&inet_gifconf_kp);
+  if (ret) {
+    pr_err(MODNAME ": failed to register inet_gifconf kprobe: %d\n", ret);
+    misc_deregister(&vpnhide_misc);
+    kvfree(kmod_port_stats);
+    kmod_port_stats = NULL;
+    return ret;
+  }
+
+  ret = register_kprobe(&rt_unicast_kp);
+  if (ret) {
+    pr_err(MODNAME ": failed to register netlink_unicast kprobe: %d\n", ret);
+    unregister_kprobe(&inet_gifconf_kp);
+    misc_deregister(&vpnhide_misc);
+    kvfree(kmod_port_stats);
+    kmod_port_stats = NULL;
+    return ret;
+  }
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+  ret = register_getsockopt_redirect();
+  if (ret) {
+    pr_err(MODNAME ": failed to register getsockopt redirect: %d\n", ret);
+    unregister_kprobe(&rt_unicast_kp);
+    unregister_kprobe(&inet_gifconf_kp);
+    misc_deregister(&vpnhide_misc);
+    kvfree(kmod_port_stats);
+    kmod_port_stats = NULL;
+    return ret;
+  }
+#endif
+
+  ret = register_socket_bind_hooks();
+  if (ret) {
+    pr_err(MODNAME ": failed to register socket bind hooks: %d\n", ret);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+    rollback_getsockopt_redirect();
+#endif
+    unregister_kprobe(&rt_unicast_kp);
+    unregister_kprobe(&inet_gifconf_kp);
+    misc_deregister(&vpnhide_misc);
+    kvfree(kmod_port_stats);
+    kmod_port_stats = NULL;
+    return ret;
+  }
+
+  #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+  enable_getsockopt_redirect();
+  #endif
+
   for (i = 0; i < ARRAY_SIZE(probes); i++) {
+    if (!probes[i].krp)
+      continue;
     if (strcmp(probes[i].name, "sock_getsockopt") == 0) {
       int j;
       bool skip = false;
@@ -2352,7 +2406,7 @@ static int __init vpnhide_init(void) {
   return 0;
 }
 
-static void __exit vpnhide_exit(void) {
+static void __exit __maybe_unused vpnhide_exit(void) {
   struct vpnhide_active_vpns *vpns;
   struct vpnhide_spoof_ip_rcu *old_sip;
   struct vpnhide_policy_snapshot *snapshot;
@@ -2360,6 +2414,8 @@ static void __exit vpnhide_exit(void) {
   struct eventfd_ctx *event_ctx;
   int i;
 
+  unregister_kprobe(&rt_unicast_kp);
+  unregister_kprobe(&inet_gifconf_kp);
   for (i = 0; i < ARRAY_SIZE(probes); i++) {
     if (probes[i].registered) {
       unregister_kretprobe(probes[i].krp);
@@ -2444,7 +2500,7 @@ static void __exit vpnhide_exit(void) {
 }
 
 module_init(vpnhide_init);
-module_exit(vpnhide_exit);
+/* Entry redirects can outlive probe handlers; remain resident until reboot. */
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("soranerai");

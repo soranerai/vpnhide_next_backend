@@ -33,6 +33,7 @@
 #include <linux/uidgid.h>
 #include <linux/version.h>
 #include <net/fib_rules.h>
+#include <net/addrconf.h>
 #include <net/if_inet6.h>
 #include <net/ip6_fib.h>
 #include <net/ip6_route.h>
@@ -296,9 +297,15 @@ static inline void sv_add(struct vh_stats_value *dst,
 
 /* Extern Declarations for kretprobes defined in hook files */
 extern struct kretprobe dev_ioctl_krp;
-extern struct kretprobe inet_ioctl_krp;
-extern struct kretprobe sock_ioctl_krp;
+extern struct kretprobe devinet_ioctl_krp;
+extern struct kprobe inet_gifconf_kp;
 extern struct kretprobe sys_setsockopt_krp;
+int register_socket_bind_hooks(void);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+int register_getsockopt_redirect(void);
+void enable_getsockopt_redirect(void);
+void rollback_getsockopt_redirect(void);
+#endif
 extern struct kretprobe sock_getsockopt_krp;
 extern struct kretprobe sys_getsockopt_krp;
 extern struct kretprobe sk_getsockopt_krp;
@@ -314,7 +321,7 @@ extern struct kretprobe fib_dump_krp;
 extern struct kretprobe fib_rule_fill_krp;
 extern struct kretprobe rt6_fill_krp;
 extern struct kretprobe ipv6_route_krp;
-extern struct kretprobe rt_fill_krp;
+extern struct kprobe rt_unicast_kp;
 extern struct kretprobe socket_connect_krp;
 extern struct kretprobe security_socket_connect_krp;
 extern struct kretprobe socket_bind_krp;

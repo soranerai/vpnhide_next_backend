@@ -2,11 +2,14 @@
 import ctypes
 import errno
 import fcntl
+import ipaddress
+import mmap
 import os
 import platform
 import socket
 import struct
 import sys
+import tempfile
 
 # ruff: noqa: E501
 
@@ -14,8 +17,10 @@ import sys
 SO_BINDTODEVICE = getattr(socket, "SO_BINDTODEVICE", 25)
 SO_BINDTOIFINDEX = 62  # On Linux (asm-generic/socket.h), SO_BINDTOIFINDEX is 62
 SIOCGIFFLAGS = 0x8913
+SIOCGIFCONF = 0x8912
 SIOCGIFADDR = 0x8915
 SIOCGIFDSTADDR = 0x8917
+SIOCGIFBRDADDR = 0x8919
 SIOCGIFNETMASK = 0x891B
 
 
@@ -24,6 +29,38 @@ def safe_fork():
     sys.stdout.flush()
     sys.stderr.flush()
     return os.fork()
+
+
+def check_ifconf(fd, hidden):
+    class Ifconf(ctypes.Structure):
+        _fields_ = [("length", ctypes.c_int), ("buf", ctypes.c_void_p)]
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    query = Ifconf(0, None)
+    if libc.ioctl(fd, SIOCGIFCONF, ctypes.byref(query)) != 0:
+        raise AssertionError(f"ifconf size query: errno={ctypes.get_errno()}")
+    capacity = 4096
+    buf = (ctypes.c_ubyte * capacity)(*([0xA5] * capacity))
+    output = Ifconf(capacity, ctypes.addressof(buf))
+    if libc.ioctl(fd, SIOCGIFCONF, ctypes.byref(output)) != 0:
+        raise AssertionError(f"ifconf list: errno={ctypes.get_errno()}")
+    raw = bytes(buf)
+    if output.length != query.length or output.length % 40:
+        raise AssertionError(f"ifconf count={query.length} list={output.length}")
+    names = [raw[i : i + 16].split(b"\0", 1)[0] for i in range(0, output.length, 40)]
+    if (b"vpn0" in names) == hidden or b"eth0" not in names:
+        raise AssertionError(f"ifconf hidden={hidden} names={names}")
+    if raw[output.length :] != bytes([0xA5]) * (capacity - output.length):
+        raise AssertionError("ifconf overwrote memory beyond returned entries")
+
+    # A short buffer must preserve its unused portion and bytes past capacity.
+    small = (ctypes.c_ubyte * 160)(*([0xA5] * 160))
+    limited = Ifconf(80, ctypes.addressof(small))
+    if libc.ioctl(fd, SIOCGIFCONF, ctypes.byref(limited)) != 0:
+        raise AssertionError(f"short ifconf: errno={ctypes.get_errno()}")
+    if limited.length < 0 or limited.length > 80 or bytes(small)[limited.length :] != bytes([0xA5]) * (160 - limited.length):
+        raise AssertionError(f"short ifconf modified tail: length={limited.length}")
+    print(f"[ifconf] hidden={hidden} size={query.length} visible={names}; tails intact")
 
 
 def test_dev_ioctl(vpn0_idx):
@@ -41,6 +78,11 @@ def test_dev_ioctl(vpn0_idx):
         return False
 
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        check_ifconf(s.fileno(), hidden=False)
+    except AssertionError as e:
+        print(f"FAIL: non-target {e}")
+        return False
 
     # Test SIOCGIFFLAGS (non-target, should succeed)
     try:
@@ -90,6 +132,7 @@ def test_dev_ioctl(vpn0_idx):
         # Child process
         try:
             os.setuid(115555)
+            check_ifconf(s.fileno(), hidden=True)
             # Should fail (raises OSError/ValueError)
             try:
                 socket.if_nametoindex("vpn0")
@@ -174,6 +217,29 @@ def test_dev_ioctl(vpn0_idx):
                     f"[dev_ioctl] Target ioctl(SIOCGIFNETMASK, 'vpn0') failed as expected: errno {e.errno}"
                 )
 
+            # Use libc ioctl directly: Python's fcntl.ioctl may use an
+            # intermediate buffer and hide writes made before an error.
+            libc = ctypes.CDLL(None, use_errno=True)
+            for cmd in (SIOCGIFADDR, SIOCGIFDSTADDR, SIOCGIFBRDADDR, SIOCGIFNETMASK):
+                for name in (b"vpn0", b"no_vpn_device"):
+                    before = name.ljust(16, b"\0") + bytes([0xA5]) * 24
+                    buf = ctypes.create_string_buffer(before, len(before))
+                    rc = libc.ioctl(s.fileno(), cmd, ctypes.byref(buf))
+                    err = ctypes.get_errno()
+                    if rc != -1 or err != errno.ENODEV or buf.raw != before:
+                        print(f"FAIL: ioctl 0x{cmd:x} {name!r}: rc={rc} errno={err} buffer_changed={buf.raw != before}")
+                        sys.exit(1)
+            # Visible interfaces must still return their real IPv4 address.
+            before = b"eth0".ljust(16, b"\0") + bytes([0xA5]) * 24
+            buf = ctypes.create_string_buffer(before, len(before))
+            if libc.ioctl(s.fileno(), SIOCGIFADDR, ctypes.byref(buf)) != 0:
+                print(f"FAIL: visible eth0 SIOCGIFADDR: errno={ctypes.get_errno()}")
+                sys.exit(1)
+            if buf.raw[20:24] != socket.inet_aton("10.0.2.15"):
+                print(f"FAIL: visible eth0 address: {buf.raw[20:24].hex()}")
+                sys.exit(1)
+            print("[dev_ioctl] hidden and absent address ioctls leave buffers intact; eth0 remains visible")
+
             sys.exit(0)
         except Exception as e:
             print(f"FAIL: child process exception: {e}")
@@ -249,6 +315,59 @@ def test_setsockopt(vpn0_idx):
                     print(
                         f"FAIL: setsockopt SO_BINDTOIFINDEX target expected errno 19, got {e.errno}"
                     )
+                    sys.exit(1)
+
+            libc = ctypes.CDLL(None, use_errno=True)
+            invalid_name = ctypes.create_string_buffer(b"vpn0")
+            rc = libc.setsockopt(-1, socket.SOL_SOCKET, SO_BINDTODEVICE, invalid_name, len(invalid_name))
+            if rc != -1 or ctypes.get_errno() != errno.EBADF:
+                print(f"FAIL: invalid fd bind errno={ctypes.get_errno()} rc={rc}")
+                sys.exit(1)
+            visible = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            visible.setsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE, b"eth0\0")
+            if visible.getsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE, 16).rstrip(b"\0") != b"eth0":
+                print("FAIL: visible interface bind did not persist")
+                sys.exit(1)
+            visible.close()
+            page = mmap.mmap(-1, mmap.PAGESIZE, prot=mmap.PROT_READ | mmap.PROT_WRITE)
+            ptr = ctypes.addressof(ctypes.c_char.from_buffer(page))
+            libc.mprotect.argtypes = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int)
+            for option, value in ((SO_BINDTODEVICE, b"vpn0\0"), (SO_BINDTOIFINDEX, struct.pack("i", vpn0_idx))):
+                for readonly in (False, True):
+                    page.seek(0)
+                    page.write(value)
+                    if readonly and libc.mprotect(ptr, mmap.PAGESIZE, mmap.PROT_READ) != 0:
+                        raise OSError(ctypes.get_errno(), "mprotect read-only")
+                    rc = libc.setsockopt(s_tgt.fileno(), socket.SOL_SOCKET, option, ctypes.c_void_p(ptr), len(value))
+                    err = ctypes.get_errno()
+                    unchanged = page[:len(value)] == value
+                    if readonly and libc.mprotect(ptr, mmap.PAGESIZE, mmap.PROT_READ | mmap.PROT_WRITE) != 0:
+                        raise OSError(ctypes.get_errno(), "mprotect restore")
+                    if rc != -1 or err != errno.ENODEV or not unchanged:
+                        print(f"FAIL: bind option={option} readonly={readonly} rc={rc} errno={err} unchanged={unchanged}")
+                        sys.exit(1)
+            page.close()
+
+            # A file-backed mapping that has not yet been read exercises the
+            # kprobe's in-atomic user access when the page is not resident in
+            # this process. The kernel must not accept the hidden bind.
+            with tempfile.TemporaryFile() as backing:
+                backing.write(b"vpn0\0" + b"\0" * (mmap.PAGESIZE - 5))
+                backing.flush()
+                libc.mmap.restype = ctypes.c_void_p
+                libc.mmap.argtypes = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int,
+                                      ctypes.c_int, ctypes.c_int, ctypes.c_longlong)
+                libc.munmap.argtypes = (ctypes.c_void_p, ctypes.c_size_t)
+                cold = libc.mmap(None, mmap.PAGESIZE, mmap.PROT_READ, mmap.MAP_PRIVATE,
+                                 backing.fileno(), 0)
+                if cold == ctypes.c_void_p(-1).value:
+                    raise OSError(ctypes.get_errno(), "mmap cold input")
+                rc = libc.setsockopt(s_tgt.fileno(), socket.SOL_SOCKET, SO_BINDTODEVICE,
+                                     ctypes.c_void_p(cold), 5)
+                err = ctypes.get_errno()
+                libc.munmap(cold, mmap.PAGESIZE)
+                if rc != -1 or err != errno.ENODEV:
+                    print(f"FAIL: cold-page bind rc={rc} errno={err}")
                     sys.exit(1)
 
             sys.exit(0)
@@ -347,6 +466,18 @@ def test_getsockname():
         print(f"FAIL: getsockname IPv6 bind: {e}")
         return False
 
+    try:
+        phys4 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        phys4.bind(("10.0.2.15", 0))
+        phys6 = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        phys6.bind(("fd00:2::1", 0))
+        mapped = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        mapped.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        mapped.bind(("::ffff:10.9.0.1", 0))
+    except OSError as e:
+        print(f"FAIL: getsockname physical/mapped bind: {e}")
+        return False
+
     # Drop privileges to target UID (115555)
     pid = safe_fork()
     if pid == 0:
@@ -369,6 +500,36 @@ def test_getsockname():
             if ip6 == "fd00:9::1":
                 print(f"FAIL: getsockname IPv6 target: got unshielded VPN IP '{ip6}'")
                 sys.exit(1)
+
+            if phys4.getsockname()[0] != "10.0.2.15":
+                print(f"FAIL: physical IPv4 changed: {phys4.getsockname()}")
+                sys.exit(1)
+            if ipaddress.IPv6Address(phys6.getsockname()[0]) != ipaddress.IPv6Address("fd00:2::1"):
+                print(f"FAIL: physical IPv6 changed: {phys6.getsockname()}")
+                sys.exit(1)
+            mapped_ip = ipaddress.IPv6Address(mapped.getsockname()[0])
+            if mapped_ip.ipv4_mapped is None or str(mapped_ip.ipv4_mapped) == "10.9.0.1":
+                print(f"FAIL: mapped VPN IPv4 not hidden or family changed: {mapped_ip}")
+                sys.exit(1)
+
+            # A truncated sockaddr can still contain the complete address;
+            # it must agree with the same socket's full-length result.
+            libc = ctypes.CDLL(None, use_errno=True)
+            for sock, length, offset, family, expected in (
+                (s_v4, 8, 4, socket.AF_INET, ip4),
+                (s_v6, 24, 8, socket.AF_INET6, ip6),
+                (mapped, 24, 8, socket.AF_INET6, str(mapped_ip)),
+            ):
+                buf = ctypes.create_string_buffer(length)
+                size = ctypes.c_uint(length)
+                if libc.getsockname(sock.fileno(), buf, ctypes.byref(size)) != 0:
+                    print(f"FAIL: short getsockname errno={ctypes.get_errno()}")
+                    sys.exit(1)
+                address_len = 4 if family == socket.AF_INET else 16
+                short_addr = socket.inet_ntop(family, buf.raw[offset:offset + address_len])
+                if ipaddress.ip_address(short_addr) != ipaddress.ip_address(expected):
+                    print(f"FAIL: short getsockname address {short_addr} != {expected}")
+                    sys.exit(1)
 
             sys.exit(0)
         except Exception as e:
@@ -934,6 +1095,103 @@ def test_proc_sys_net():
     return True
 
 
+def route_lookup(address, fib_match=False):
+    request = struct.pack("=IHHII", 36, 26, 1, 91, 0)
+    request += struct.pack("=BBBBBBBBI", socket.AF_INET, 32, 0, 0, 0, 0, 0, 0, 0x2000 if fib_match else 0)
+    request += struct.pack("=HH4s", 8, 1, socket.inet_aton(address))
+    with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE) as nl:
+        nl.settimeout(3)
+        nl.send(request)
+        data = nl.recv(8192)
+    if len(data) < 20:
+        raise AssertionError(f"short route reply length={len(data)}")
+    length, msg_type, flags, seq, pid = struct.unpack_from("=IHHII", data)
+    if seq != 91 or length > len(data):
+        raise AssertionError(f"invalid route reply length={length} seq={seq}")
+    if msg_type == 2:
+        return ("error", -struct.unpack_from("=i", data, 16)[0])
+    if msg_type != 24 or length < 28:
+        raise AssertionError(f"unexpected route message type={msg_type} length={length}")
+    pos = 28
+    index = 0
+    while pos + 4 <= length:
+        alen, atype = struct.unpack_from("=HH", data, pos)
+        if alen < 4 or pos + alen > length:
+            raise AssertionError("invalid route attribute")
+        if atype & 0x3fff == 4 and alen >= 8:
+            index = struct.unpack_from("=I", data, pos + 4)[0]
+        pos += (alen + 3) & ~3
+    return ("route", index)
+
+
+def test_point_route(vpn0_idx):
+    try:
+        hidden = route_lookup("10.9.9.1")
+        visible = route_lookup("10.0.2.2")
+        fib_root = route_lookup("10.9.9.1", True)
+        fib_visible = route_lookup("10.0.2.2", True)
+        if hidden != ("route", vpn0_idx) or visible[0] != "route" or fib_root != ("route", vpn0_idx) or fib_visible[0] != "route":
+            raise AssertionError(f"root hidden={hidden} visible={visible} fib_hidden={fib_root} fib_visible={fib_visible}")
+        pid = safe_fork()
+        if pid == 0:
+            try:
+                os.setuid(115555)
+                got_hidden = route_lookup("10.9.9.1")
+                got_visible = route_lookup("10.0.2.2")
+                if got_hidden != ("error", errno.ENETUNREACH) or got_visible != visible:
+                    raise AssertionError(f"target hidden={got_hidden} visible={got_visible} root_visible={visible}")
+                fib_hidden = route_lookup("10.9.9.1", True)
+                fib_got_visible = route_lookup("10.0.2.2", True)
+                if fib_hidden != ("error", errno.ENETUNREACH) or fib_got_visible != fib_visible:
+                    raise AssertionError(f"target FIB_MATCH hidden={fib_hidden} visible={fib_got_visible} root_visible={fib_visible}")
+                print(f"[point route] hidden={got_hidden} visible={got_visible}")
+                sys.exit(0)
+            except Exception as e:
+                print(f"FAIL: point route child: {e}")
+                sys.exit(1)
+        return os.waitpid(pid, 0)[1] == 0
+    except Exception as e:
+        print(f"FAIL: point route fixture: {e}")
+        return False
+
+
+def test_tcp_cover_mss(requested=0):
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(4)
+        if requested:
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG, requested)
+        s.connect(("10.77.0.2", 45678))
+        root_info = s.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 104)
+        root_mss = struct.unpack_from("I", root_info, 16)[0]
+        root_mtu = s.getsockopt(socket.IPPROTO_IP, 14)
+        pid = safe_fork()
+        if pid == 0:
+            try:
+                os.setuid(115555)
+                info = s.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 104)
+                shorts = [s.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, n) for n in (17, 18, 19, 20)]
+                mss = s.getsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG)
+                mtu = s.getsockopt(socket.IPPROTO_IP, 14)
+                snd = struct.unpack_from("I", info, 16)[0]
+                pmtu = struct.unpack_from("I", info, 60)[0]
+                if mtu != 1500 or pmtu != mtu or snd != mss or (any(short[16:] != info[16:len(short)] for short in shorts)) or (not requested and snd <= root_mss) or (requested and snd != root_mss) or root_mtu != 1200:
+                    print(f"FAIL: cover TCP root_mtu={root_mtu} root_mss={root_mss} mtu={mtu} pmtu={pmtu} snd={snd} maxseg={mss} shorts={[v[16:].hex() for v in shorts]} requested={requested}")
+                    sys.exit(1)
+                print(f"[tcp cover] root_mtu={root_mtu} root_mss={root_mss} target_mtu={mtu} target_mss={snd}")
+                sys.exit(0)
+            except Exception as e:
+                print(f"FAIL: cover TCP child: {e}")
+                sys.exit(1)
+        _, status = os.waitpid(pid, 0)
+        s.send(b"x")
+        s.close()
+        return status == 0
+    except Exception as e:
+        print(f"FAIL: cover TCP fixture: {e}")
+        return False
+
+
 def main():
     try:
         vpn0_idx = socket.if_nametoindex("vpn0")
@@ -963,6 +1221,21 @@ def main():
         success = False
     else:
         print("RESULT getsockopt=PASS")
+
+    if tuple(int(x) for x in platform.release().split("-")[0].split(".")[:2]) >= (5, 10):
+        if not (test_tcp_cover_mss() and test_tcp_cover_mss(1000)):
+            print("RESULT tcp_cover_mss=FAIL")
+            success = False
+        else:
+            print("RESULT tcp_cover_mss=PASS")
+    else:
+        print("tcp_cover_mss skipped: unsupported kernel")
+
+    if not test_point_route(vpn0_idx):
+        print("RESULT point_route=FAIL")
+        success = False
+    else:
+        print("RESULT point_route=PASS")
 
     # Run getsockname
     if not test_getsockname():
