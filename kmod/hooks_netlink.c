@@ -955,6 +955,125 @@ struct kretprobe rt6_fill_krp = {
     .kp.symbol_name = "rt6_fill_node",
 };
 
+/* Re-run a simple IPv4 route query through the cover interface before the
+ * kernel builds its reply. The cloned request preserves netlink metadata and
+ * leaves the caller's request intact. */
+typedef int (*vh_getroute_fn)(struct sk_buff *, struct nlmsghdr *, struct netlink_ext_ack *);
+typedef struct rtable *(*vh_route_lookup_fn)(struct net *, struct flowi4 *, const struct sk_buff *);
+static vh_getroute_fn vh_original_getroute;
+static vh_route_lookup_fn vh_route_lookup;
+static bool vh_getroute_ready;
+
+static noinline __nocfi int vh_call_getroute(struct sk_buff *skb, struct nlmsghdr *nlh,
+                                           struct netlink_ext_ack *extack)
+{
+  int ret = vh_original_getroute(skb, nlh, extack);
+  barrier();
+  return ret;
+}
+
+static noinline __nocfi struct rtable *vh_call_route_lookup(struct net *net,
+                                                             struct flowi4 *fl)
+{
+  struct rtable *rt = vh_route_lookup(net, fl, NULL);
+  barrier();
+  return rt;
+}
+
+static noinline int vh_getroute(struct sk_buff *skb, struct nlmsghdr *nlh,
+                                struct netlink_ext_ack *extack)
+{
+  struct rtmsg *rtm;
+  struct rtattr *attr;
+  struct flowi4 fl = {};
+  struct rtable *rt;
+  struct sk_buff *copy;
+  struct nlmsghdr *copy_nlh;
+  struct rtattr *oif;
+  struct net *net;
+  int cover, ret;
+  bool hidden;
+  uid_t uid = from_kuid(&init_user_ns, current_uid());
+
+  if (!skb || !skb->sk || !nlh || !vh_route_lookup ||
+      !is_hook_active(HOOK_RT_FILL, uid) || !is_target_uid_val(uid))
+    goto original;
+  cover = atomic_read(&global_cover_ifindex);
+  if (cover <= 0 || is_active_vpn_ifindex(cover) ||
+      (void *)nlh != (void *)skb->data || skb_is_nonlinear(skb) ||
+      nlh->nlmsg_type != RTM_GETROUTE || (nlh->nlmsg_flags & NLM_F_DUMP) ||
+      nlh->nlmsg_len != NLMSG_LENGTH(sizeof(struct rtmsg)) + RTA_LENGTH(sizeof(__be32)) ||
+      NLMSG_ALIGN(nlh->nlmsg_len) != skb->len)
+    goto original;
+  rtm = NLMSG_DATA(nlh);
+  attr = RTM_RTA(rtm);
+  if (rtm->rtm_family != AF_INET || rtm->rtm_dst_len != 32 ||
+      rtm->rtm_src_len || rtm->rtm_tos ||
+      (attr->rta_type & NLA_TYPE_MASK) != RTA_DST ||
+      attr->rta_len != RTA_LENGTH(sizeof(__be32)))
+    goto original;
+  memcpy(&fl.daddr, RTA_DATA(attr), sizeof(fl.daddr));
+  fl.flowi4_uid = current_uid();
+  fl.flowi4_proto = IPPROTO_UDP;
+  net = sock_net(skb->sk);
+  rt = vh_call_route_lookup(net, &fl);
+  if (IS_ERR(rt))
+    goto original;
+  hidden = rt->dst.dev && is_active_vpn_ifindex(rt->dst.dev->ifindex);
+  ip_rt_put(rt);
+  if (!hidden)
+    goto original;
+  copy = skb_copy_expand(skb, skb_headroom(skb), RTA_SPACE(sizeof(u32)), GFP_KERNEL);
+  if (!copy)
+    goto original;
+  copy->sk = skb->sk;
+  copy_nlh = (struct nlmsghdr *)copy->data;
+  oif = (struct rtattr *)skb_put(copy, RTA_SPACE(sizeof(u32)));
+  oif->rta_type = RTA_OIF;
+  oif->rta_len = RTA_LENGTH(sizeof(u32));
+  memcpy(RTA_DATA(oif), &cover, sizeof(u32));
+  copy_nlh->nlmsg_len += RTA_SPACE(sizeof(u32));
+  ret = vh_call_getroute(copy, copy_nlh, extack);
+  copy->sk = NULL;
+  kfree_skb(copy);
+  return ret;
+original:
+  return vh_call_getroute(skb, nlh, extack);
+}
+
+static int vh_getroute_pre(struct kprobe *kp, struct pt_regs *regs)
+{
+  (void)kp;
+  if (!READ_ONCE(vh_getroute_ready) || within_module(regs->regs[30], THIS_MODULE))
+    return 0;
+  instruction_pointer_set(regs, (unsigned long)vh_getroute);
+  return 1;
+}
+static void vh_getroute_post(struct kprobe *kp, struct pt_regs *regs, unsigned long flags)
+{
+  (void)kp; (void)regs; (void)flags;
+}
+static struct kprobe vh_getroute_kp = {
+  .symbol_name = "inet_rtm_getroute", .pre_handler = vh_getroute_pre,
+  .post_handler = vh_getroute_post,
+};
+int register_getroute_redirect(void)
+{
+  struct kprobe lookup = { .symbol_name = "ip_route_output_key_hash" };
+  int ret = register_kprobe(&lookup);
+  if (ret)
+    return ret;
+  vh_route_lookup = (vh_route_lookup_fn)lookup.addr;
+  unregister_kprobe(&lookup);
+  ret = register_kprobe(&vh_getroute_kp);
+  if (ret)
+    return ret;
+  vh_original_getroute = (vh_getroute_fn)vh_getroute_kp.addr;
+  return 0;
+}
+void enable_getroute_redirect(void) { WRITE_ONCE(vh_getroute_ready, true); }
+void rollback_getroute_redirect(void) { unregister_kprobe(&vh_getroute_kp); }
+
 /* Point route replies are serialized before netlink_unicast, avoiding the
  * LTO-dependent rt_fill_info and inlined rtnl_unicast ABIs. */
 static bool vh_route_reply_has_hidden_oif(struct sk_buff *skb)

@@ -1095,10 +1095,12 @@ def test_proc_sys_net():
     return True
 
 
-def route_lookup(address, fib_match=False):
-    request = struct.pack("=IHHII", 36, 26, 1, 91, 0)
+def route_lookup(address, fib_match=False, oif=0, detailed=False):
+    request = struct.pack("=IHHII", 36 + (8 if oif else 0), 26, 1, 91, 0)
     request += struct.pack("=BBBBBBBBI", socket.AF_INET, 32, 0, 0, 0, 0, 0, 0, 0x2000 if fib_match else 0)
     request += struct.pack("=HH4s", 8, 1, socket.inet_aton(address))
+    if oif:
+        request += struct.pack("=HHI", 8, 4, oif)
     with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE) as nl:
         nl.settimeout(3)
         nl.send(request)
@@ -1114,13 +1116,19 @@ def route_lookup(address, fib_match=False):
         raise AssertionError(f"unexpected route message type={msg_type} length={length}")
     pos = 28
     index = 0
+    attrs = {}
     while pos + 4 <= length:
         alen, atype = struct.unpack_from("=HH", data, pos)
         if alen < 4 or pos + alen > length:
             raise AssertionError("invalid route attribute")
+        # Cache counters vary, and RTA_UID reflects the requesting UID.
+        if atype & 0x3fff not in (12, 25):  # RTA_CACHEINFO, RTA_UID
+            attrs[atype & 0x3fff] = data[pos + 4:pos + alen]
         if atype & 0x3fff == 4 and alen >= 8:
             index = struct.unpack_from("=I", data, pos + 4)[0]
         pos += (alen + 3) & ~3
+    if detailed:
+        return ("route", index, data[16:28], tuple(sorted(attrs.items())))
     return ("route", index)
 
 
@@ -1130,20 +1138,23 @@ def test_point_route(vpn0_idx):
         visible = route_lookup("10.0.2.2")
         fib_root = route_lookup("10.9.9.1", True)
         fib_visible = route_lookup("10.0.2.2", True)
+        cover_index = socket.if_nametoindex("eth0")
+        cover = route_lookup("10.9.9.1", oif=cover_index, detailed=True)
+        fib_cover = route_lookup("10.9.9.1", True, oif=cover_index, detailed=True)
         if hidden != ("route", vpn0_idx) or visible[0] != "route" or fib_root != ("route", vpn0_idx) or fib_visible[0] != "route":
             raise AssertionError(f"root hidden={hidden} visible={visible} fib_hidden={fib_root} fib_visible={fib_visible}")
         pid = safe_fork()
         if pid == 0:
             try:
                 os.setuid(115555)
-                got_hidden = route_lookup("10.9.9.1")
+                got_hidden = route_lookup("10.9.9.1", detailed=True)
                 got_visible = route_lookup("10.0.2.2")
-                if got_hidden != ("error", errno.ENETUNREACH) or got_visible != visible:
-                    raise AssertionError(f"target hidden={got_hidden} visible={got_visible} root_visible={visible}")
-                fib_hidden = route_lookup("10.9.9.1", True)
+                if got_hidden != cover or got_visible != visible:
+                    raise AssertionError(f"target hidden={got_hidden} visible={got_visible} root_visible={visible} cover={cover}")
+                fib_hidden = route_lookup("10.9.9.1", True, detailed=True)
                 fib_got_visible = route_lookup("10.0.2.2", True)
-                if fib_hidden != ("error", errno.ENETUNREACH) or fib_got_visible != fib_visible:
-                    raise AssertionError(f"target FIB_MATCH hidden={fib_hidden} visible={fib_got_visible} root_visible={fib_visible}")
+                if fib_hidden != fib_cover or fib_got_visible != fib_visible:
+                    raise AssertionError(f"target FIB_MATCH hidden={fib_hidden} visible={fib_got_visible} root_visible={fib_visible} cover={fib_cover}")
                 print(f"[point route] hidden={got_hidden} visible={got_visible}")
                 sys.exit(0)
             except Exception as e:

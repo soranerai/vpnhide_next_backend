@@ -2327,10 +2327,22 @@ static int __init vpnhide_init(void) {
     return ret;
   }
 
+  ret = register_getroute_redirect();
+  if (ret) {
+    pr_err(MODNAME ": failed to register getroute redirect: %d\n", ret);
+    unregister_kprobe(&rt_unicast_kp);
+    unregister_kprobe(&inet_gifconf_kp);
+    misc_deregister(&vpnhide_misc);
+    kvfree(kmod_port_stats);
+    kmod_port_stats = NULL;
+    return ret;
+  }
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
   ret = register_getsockopt_redirect();
   if (ret) {
     pr_err(MODNAME ": failed to register getsockopt redirect: %d\n", ret);
+    rollback_getroute_redirect();
     unregister_kprobe(&rt_unicast_kp);
     unregister_kprobe(&inet_gifconf_kp);
     misc_deregister(&vpnhide_misc);
@@ -2346,6 +2358,7 @@ static int __init vpnhide_init(void) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
     rollback_getsockopt_redirect();
 #endif
+    rollback_getroute_redirect();
     unregister_kprobe(&rt_unicast_kp);
     unregister_kprobe(&inet_gifconf_kp);
     misc_deregister(&vpnhide_misc);
@@ -2354,6 +2367,7 @@ static int __init vpnhide_init(void) {
     return ret;
   }
 
+  enable_getroute_redirect();
   #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
   enable_getsockopt_redirect();
   #endif
