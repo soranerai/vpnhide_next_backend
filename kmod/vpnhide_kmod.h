@@ -298,7 +298,9 @@ static inline void sv_add(struct vh_stats_value *dst,
 /* Extern Declarations for kretprobes defined in hook files */
 extern struct kretprobe dev_ioctl_krp;
 extern struct kretprobe devinet_ioctl_krp;
-extern struct kprobe inet_gifconf_kp;
+int register_ifconf_redirect(void);
+void enable_ifconf_redirect(void);
+void rollback_ifconf_redirect(void);
 extern struct kretprobe sys_setsockopt_krp;
 int register_socket_bind_hooks(void);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)

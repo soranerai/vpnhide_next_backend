@@ -75,6 +75,12 @@ if [ -f "$STRIP_BIN" ]; then
     "$STRIP_BIN" "$REPO/kmod/vpnhide-daemon-host"
 fi
 
+# Build a real 32-bit client to exercise the compat ioctl ABI.
+COMPAT_CLANG=$(find "$NDK_HOME" -name "armv7a-linux-androideabi29-clang" | head -n 1)
+[ -n "$COMPAT_CLANG" ] || { echo "ERROR: NDK armv7 clang not found"; exit 1; }
+mkdir -p "$HERE/.cache"
+"$COMPAT_CLANG" -fno-emulated-tls -O2 -Wall -static "$HERE/ifconf_compat.c" -o "$HERE/.cache/ifconf-compat"
+
 # 3. Determine podman/docker executable
 DOCKER_CMD="podman"
 if ! command -v podman >/dev/null 2>&1; then

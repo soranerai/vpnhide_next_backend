@@ -50,3 +50,5 @@ GKI_KernelSU_SUSFS_VPNHIDE_NEXT
 scripts/vpnhide_next_private.code-workspace
 .ruff_cache
 .claude
+vpn-table-probe
+vpnhide-upstream

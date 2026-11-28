@@ -1,4 +1,5 @@
 #include "vpnhide_kmod.h"
+#include <linux/compat.h>
 
 /* --- dev_ioctl hook --- */
 
@@ -67,42 +68,168 @@ struct kretprobe devinet_ioctl_krp = {
     .kp.symbol_name = "devinet_ioctl",
 };
 
-/* --- SIOCGIFCONF filtering before copying entries to userspace --- */
+/* SIOCGIFCONF must filter before the kernel writes any entries. Redirect the
+ * socket file callbacks rather than inlineable dev_ifconf/inet_gifconf. */
+typedef long (*vh_sock_ioctl_fn)(struct file *, unsigned int, unsigned long);
+typedef int (*vh_inet_gifconf_fn)(struct net_device *, char __user *, int, int);
+static vh_sock_ioctl_fn vh_orig_sock_ioctl;
+#ifdef CONFIG_COMPAT
+static vh_sock_ioctl_fn vh_orig_compat_sock_ioctl;
+#endif
+static vh_inet_gifconf_fn vh_inet_gifconf;
+static bool vh_ifconf_ready;
 
-/* dev_ifconf calls inet_gifconf once per network device for both the NULL
- * size query and the actual output. Skipping the hidden device at entry keeps
- * the count and list consistent without touching unused userspace memory.
- * The caller holds RTNL, so the device remains valid throughout the call. */
-static int inet_gifconf_pre(struct kprobe *kp, struct pt_regs *regs) {
-  struct net_device *dev = (struct net_device *)regs->regs[0];
+static noinline __nocfi long vh_call_sock_ioctl(vh_sock_ioctl_fn fn, struct file *file,
+                                                unsigned int cmd, unsigned long arg)
+{
+  long ret = fn(file, cmd, arg);
+  barrier();
+  return ret;
+}
+static noinline __nocfi int vh_call_inet_gifconf(struct net_device *dev,
+                                                  char __user *buf, int len, int size)
+{
+  int ret = vh_inet_gifconf(dev, buf, len, size);
+  barrier();
+  return ret;
+}
+
+static long vh_ifconf(struct file *file, unsigned long arg, bool compat)
+{
+  struct socket *sock = file ? file->private_data : NULL;
+  struct net_device *dev;
+  struct ifconf ifc;
+  char __user *buf;
+  int len, total = 0, done, size;
+#ifdef CONFIG_COMPAT
+  struct compat_ifconf ifc32;
+#endif
+  if (!sock || !sock->sk)
+    return -ENOTSOCK;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
+  /* Older native sock_ioctl first gives the protocol its ioctl. Compat has
+   * a separate SIOCGIFCONF dispatch and does not do this. */
+  if (!compat) {
+    int err = READ_ONCE(sock->ops)->ioctl(sock, SIOCGIFCONF, arg);
+    if (err != -ENOIOCTLCMD)
+      return err;
+  }
+#endif
+#ifdef CONFIG_COMPAT
+  if (compat) {
+    if (copy_from_user(&ifc32, (void __user *)arg, sizeof(ifc32)))
+      return -EFAULT;
+    buf = compat_ptr(ifc32.ifcbuf);
+    len = ifc32.ifc_len;
+    size = sizeof(struct compat_ifreq);
+  } else
+#endif
+  {
+    if (copy_from_user(&ifc, (void __user *)arg, sizeof(ifc)))
+      return -EFAULT;
+    buf = ifc.ifc_buf;
+    len = ifc.ifc_len;
+    size = sizeof(struct ifreq);
+  }
+  rtnl_lock();
+  for_each_netdev(sock_net(sock->sk), dev) {
+    if (is_active_vpn_ifindex(dev->ifindex)) {
+      record_kmod_intercept(from_kuid(&init_user_ns, current_uid()), 0);
+      continue;
+    }
+    done = vh_call_inet_gifconf(dev, buf ? buf + total : NULL,
+                                buf ? len - total : 0, size);
+    if (done < 0) {
+      rtnl_unlock();
+      return -EFAULT;
+    }
+    total += done;
+  }
+  rtnl_unlock();
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
+#ifdef CONFIG_COMPAT
+  if (compat) {
+    ifc32.ifc_len = total;
+    return copy_to_user((void __user *)arg, &ifc32, sizeof(ifc32)) ? -EFAULT : 0;
+  }
+#endif
+  ifc.ifc_len = total;
+  return copy_to_user((void __user *)arg, &ifc, sizeof(ifc)) ? -EFAULT : 0;
+#else
+  return put_user(total, (int __user *)arg) ? -EFAULT : 0;
+#endif
+}
+
+static noinline long vh_sock_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
   uid_t uid = from_kuid(&init_user_ns, current_uid());
-
-  (void)kp;
-  if (!dev || !is_hook_active(HOOK_SOCK_IOCTL, uid) || !is_target_uid_val(uid) ||
-      !is_active_vpn_ifindex(dev->ifindex))
+  if (cmd == SIOCGIFCONF && is_hook_active(HOOK_SOCK_IOCTL, uid) && is_target_uid_val(uid))
+    return vh_ifconf(file, arg, in_compat_syscall());
+  return vh_call_sock_ioctl(vh_orig_sock_ioctl, file, cmd, arg);
+}
+#ifdef CONFIG_COMPAT
+static noinline long vh_compat_sock_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+  uid_t uid = from_kuid(&init_user_ns, current_uid());
+  if (cmd == SIOCGIFCONF && is_hook_active(HOOK_SOCK_IOCTL, uid) && is_target_uid_val(uid))
+    return vh_ifconf(file, arg, true);
+  return vh_call_sock_ioctl(vh_orig_compat_sock_ioctl, file, cmd, arg);
+}
+#endif
+static int vh_ifconf_pre(struct kprobe *kp, struct pt_regs *regs)
+{
+  if (!READ_ONCE(vh_ifconf_ready) || within_module(regs->regs[30], THIS_MODULE))
     return 0;
-
-  record_kmod_intercept(uid, 0);
-  /* inet_gifconf returns the number of bytes written. Zero entries is the
-   * same result it would return for a device without IPv4 addresses. */
-  regs->regs[0] = 0;
-  regs->pc = regs->regs[30];
+#ifdef CONFIG_COMPAT
+  if (kp->addr == (kprobe_opcode_t *)vh_orig_compat_sock_ioctl)
+    instruction_pointer_set(regs, (unsigned long)vh_compat_sock_ioctl);
+  else
+#endif
+    instruction_pointer_set(regs, (unsigned long)vh_sock_ioctl);
   return 1;
 }
-
-/* A post-handler prevents optimized probes from ignoring the PC change. */
-static void inet_gifconf_post(struct kprobe *kp, struct pt_regs *regs,
-                              unsigned long flags) {
-  (void)kp;
-  (void)regs;
-  (void)flags;
+static void vh_ifconf_post(struct kprobe *kp, struct pt_regs *regs, unsigned long flags)
+{
+  (void)kp; (void)regs; (void)flags;
 }
-
-struct kprobe inet_gifconf_kp = {
-    .symbol_name = "inet_gifconf",
-    .pre_handler = inet_gifconf_pre,
-    .post_handler = inet_gifconf_post,
+static struct kprobe vh_ifconf_kp = {
+  .symbol_name = "sock_ioctl", .pre_handler = vh_ifconf_pre, .post_handler = vh_ifconf_post,
 };
+#ifdef CONFIG_COMPAT
+static struct kprobe vh_compat_ifconf_kp = {
+  .symbol_name = "compat_sock_ioctl", .pre_handler = vh_ifconf_pre, .post_handler = vh_ifconf_post,
+};
+#endif
+int register_ifconf_redirect(void)
+{
+  struct kprobe lookup = { .symbol_name = "inet_gifconf" };
+  int ret = register_kprobe(&lookup);
+  if (ret)
+    return ret;
+  vh_inet_gifconf = (vh_inet_gifconf_fn)lookup.addr;
+  unregister_kprobe(&lookup);
+  ret = register_kprobe(&vh_ifconf_kp);
+  if (ret)
+    return ret;
+  vh_orig_sock_ioctl = (vh_sock_ioctl_fn)vh_ifconf_kp.addr;
+#ifdef CONFIG_COMPAT
+  ret = register_kprobe(&vh_compat_ifconf_kp);
+  if (ret) {
+    unregister_kprobe(&vh_ifconf_kp);
+    return ret;
+  }
+  vh_orig_compat_sock_ioctl = (vh_sock_ioctl_fn)vh_compat_ifconf_kp.addr;
+#endif
+  return 0;
+}
+void enable_ifconf_redirect(void) { WRITE_ONCE(vh_ifconf_ready, true); }
+void rollback_ifconf_redirect(void)
+{
+#ifdef CONFIG_COMPAT
+  unregister_kprobe(&vh_compat_ifconf_kp);
+#endif
+  unregister_kprobe(&vh_ifconf_kp);
+}
 
 /* --- Netlink link/address info hooks --- */
 

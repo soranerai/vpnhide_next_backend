@@ -60,6 +60,24 @@ def check_ifconf(fd, hidden):
         raise AssertionError(f"short ifconf: errno={ctypes.get_errno()}")
     if limited.length < 0 or limited.length > 80 or bytes(small)[limited.length :] != bytes([0xA5]) * (160 - limited.length):
         raise AssertionError(f"short ifconf modified tail: length={limited.length}")
+    # The kernel must report EFAULT for an inaccessible output buffer, without
+    # changing the caller's ifconf length or an adjacent sentinel mapping.
+    page = mmap.mmap(-1, mmap.PAGESIZE, prot=mmap.PROT_READ | mmap.PROT_WRITE)
+    ptr = ctypes.addressof(ctypes.c_char.from_buffer(page))
+    libc.mprotect.argtypes = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int)
+    blocked = Ifconf(mmap.PAGESIZE, ptr)
+    if libc.mprotect(ptr, mmap.PAGESIZE, 0) != 0:
+        raise OSError(ctypes.get_errno(), "ifconf mprotect")
+    rc = libc.ioctl(fd, SIOCGIFCONF, ctypes.byref(blocked))
+    err = ctypes.get_errno()
+    if libc.mprotect(ptr, mmap.PAGESIZE, mmap.PROT_READ | mmap.PROT_WRITE) != 0:
+        raise OSError(ctypes.get_errno(), "ifconf mprotect restore")
+    page.close()
+    if rc != -1 or err != errno.EFAULT or blocked.length != mmap.PAGESIZE:
+        raise AssertionError(f"ifconf fault rc={rc} errno={err} length={blocked.length}")
+    empty = Ifconf(0, ctypes.addressof(buf))
+    if libc.ioctl(fd, SIOCGIFCONF, ctypes.byref(empty)) != 0 or empty.length != 0:
+        raise AssertionError(f"zero-capacity ifconf rc/length={empty.length}")
     print(f"[ifconf] hidden={hidden} size={query.length} visible={names}; tails intact")
 
 

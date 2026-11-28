@@ -107,6 +107,7 @@ fi
 ip link add vpn0 type dummy 2>/dev/null
 ip link set vpn0 up 2>/dev/null
 ip addr add 10.9.0.1/24 dev vpn0 2>/dev/null
+ip addr add 10.9.0.2/24 dev vpn0 2>/dev/null
 ip route add 10.9.9.0/24 dev vpn0 2>/dev/null
 ip -6 addr add fd00:9::1/64 dev vpn0 2>/dev/null
 ip -6 route add fd00:99::/64 dev vpn0 2>/dev/null
@@ -193,6 +194,18 @@ while read -r line; do
 	esac
 done < /tmp/py_res.log
 
+if [ -x /ifconf-compat ]; then
+    if /ifconf-compat; then
+        echo "RESULT ifconf_compat=PASS"
+        PASS=$((PASS + 1))
+    else
+        echo "RESULT ifconf_compat=FAIL"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "ifconf_compat=SKIP (32-bit fixture unavailable)"
+fi
+
 # --- end-to-end allowlist check --------------------------------------------
 apply_allowlist
 _al_status=$(timeout 2 cat /dev/vpnhide_ctrl 2>/dev/null || true)
@@ -224,6 +237,16 @@ while read -r line; do
 		"RESULT "*=FAIL*) FAIL=$((FAIL + 1)) ;;
 	esac
 done < /tmp/py_allowlist_res.log
+
+if [ -x /ifconf-compat ]; then
+    if /ifconf-compat; then
+        echo "RESULT ifconf_compat_allowlist=PASS"
+        PASS=$((PASS + 1))
+    else
+        echo "RESULT ifconf_compat_allowlist=FAIL"
+        FAIL=$((FAIL + 1))
+    fi
+fi
 
 PANIC=$(dmesg | grep -ci 'Unable to handle\|Internal error\|Oops\|BUG:\|Kernel panic')
 echo "=== DAEMON LOG ==="

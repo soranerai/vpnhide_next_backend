@@ -2308,9 +2308,9 @@ static int __init vpnhide_init(void) {
     return ret;
   }
 
-  ret = register_kprobe(&inet_gifconf_kp);
+  ret = register_ifconf_redirect();
   if (ret) {
-    pr_err(MODNAME ": failed to register inet_gifconf kprobe: %d\n", ret);
+    pr_err(MODNAME ": failed to register ifconf redirect: %d\n", ret);
     misc_deregister(&vpnhide_misc);
     kvfree(kmod_port_stats);
     kmod_port_stats = NULL;
@@ -2320,7 +2320,7 @@ static int __init vpnhide_init(void) {
   ret = register_kprobe(&rt_unicast_kp);
   if (ret) {
     pr_err(MODNAME ": failed to register netlink_unicast kprobe: %d\n", ret);
-    unregister_kprobe(&inet_gifconf_kp);
+    rollback_ifconf_redirect();
     misc_deregister(&vpnhide_misc);
     kvfree(kmod_port_stats);
     kmod_port_stats = NULL;
@@ -2331,7 +2331,7 @@ static int __init vpnhide_init(void) {
   if (ret) {
     pr_err(MODNAME ": failed to register getroute redirect: %d\n", ret);
     unregister_kprobe(&rt_unicast_kp);
-    unregister_kprobe(&inet_gifconf_kp);
+    rollback_ifconf_redirect();
     misc_deregister(&vpnhide_misc);
     kvfree(kmod_port_stats);
     kmod_port_stats = NULL;
@@ -2344,7 +2344,7 @@ static int __init vpnhide_init(void) {
     pr_err(MODNAME ": failed to register getsockopt redirect: %d\n", ret);
     rollback_getroute_redirect();
     unregister_kprobe(&rt_unicast_kp);
-    unregister_kprobe(&inet_gifconf_kp);
+    rollback_ifconf_redirect();
     misc_deregister(&vpnhide_misc);
     kvfree(kmod_port_stats);
     kmod_port_stats = NULL;
@@ -2360,13 +2360,14 @@ static int __init vpnhide_init(void) {
 #endif
     rollback_getroute_redirect();
     unregister_kprobe(&rt_unicast_kp);
-    unregister_kprobe(&inet_gifconf_kp);
+    rollback_ifconf_redirect();
     misc_deregister(&vpnhide_misc);
     kvfree(kmod_port_stats);
     kmod_port_stats = NULL;
     return ret;
   }
 
+  enable_ifconf_redirect();
   enable_getroute_redirect();
   #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
   enable_getsockopt_redirect();
@@ -2429,7 +2430,7 @@ static void __exit __maybe_unused vpnhide_exit(void) {
   int i;
 
   unregister_kprobe(&rt_unicast_kp);
-  unregister_kprobe(&inet_gifconf_kp);
+  rollback_ifconf_redirect();
   for (i = 0; i < ARRAY_SIZE(probes); i++) {
     if (probes[i].registered) {
       unregister_kretprobe(probes[i].krp);
