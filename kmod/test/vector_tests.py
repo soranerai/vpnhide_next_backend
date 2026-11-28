@@ -1221,6 +1221,61 @@ def test_tcp_cover_mss(requested=0):
         return False
 
 
+def test_tc_qdisc(vpn0_idx):
+    """A complete qdisc dump hides vpn0 only for the target UID."""
+    def dump():
+        sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE)
+        sock.settimeout(5)
+        try:
+            sock.bind((0, 0))
+            tcmsg = struct.pack("=BxxxiIII", socket.AF_UNSPEC, 0, 0, 0, 0)
+            sock.send(struct.pack("=IHHII", 16 + len(tcmsg), 38, 0x301, 1, 0) + tcmsg)
+            indexes = set()
+            while True:
+                data, _, flags, _ = sock.recvmsg(65536)
+                if flags & socket.MSG_TRUNC:
+                    raise AssertionError("truncated qdisc dump")
+                offset = 0
+                while offset + 16 <= len(data):
+                    length, kind, nlflags, seq, _ = struct.unpack_from("=IHHII", data, offset)
+                    if length < 16 or offset + length > len(data):
+                        raise AssertionError("invalid netlink message")
+                    if seq == 1 and kind == 3:
+                        if nlflags & 0x10:
+                            raise AssertionError("interrupted qdisc dump")
+                        return indexes
+                    if seq == 1 and kind == 2:
+                        raise AssertionError("netlink error: " + str(struct.unpack_from("=i", data, offset + 16)[0]))
+                    if seq == 1 and kind == 36 and length >= 32:
+                        indexes.add(struct.unpack_from("=i", data, offset + 20)[0])
+                    offset += (length + 3) & ~3
+        finally:
+            sock.close()
+    try:
+        visible = dump()
+        if vpn0_idx not in visible:
+            raise AssertionError("vpn0 qdisc fixture missing: " + str(visible))
+        pid = safe_fork()
+        if pid == 0:
+            try:
+                os.setuid(115555)
+                target = dump()
+                if vpn0_idx in target:
+                    raise AssertionError("hidden index in qdisc dump: " + str(target))
+                if not (target & (visible - {vpn0_idx})):
+                    raise AssertionError("visible qdiscs missing: " + str(target))
+                print("[tc_qdisc] target indexes:", sorted(target))
+                sys.exit(0)
+            except Exception as e:
+                print("FAIL: tc_qdisc target:", e)
+                sys.exit(1)
+        _, status = os.waitpid(pid, 0)
+        return status == 0
+    except Exception as e:
+        print("FAIL: tc_qdisc:", e)
+        return False
+
+
 def main():
     try:
         vpn0_idx = socket.if_nametoindex("vpn0")
@@ -1229,6 +1284,12 @@ def main():
         sys.exit(1)
 
     success = True
+
+    if not test_tc_qdisc(vpn0_idx):
+        print("RESULT tc_qdisc=FAIL")
+        success = False
+    else:
+        print("RESULT tc_qdisc=PASS")
 
     # Run dev_ioctl
     if not test_dev_ioctl(vpn0_idx):

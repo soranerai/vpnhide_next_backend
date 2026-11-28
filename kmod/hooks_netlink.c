@@ -1300,7 +1300,8 @@ static int tc_fill_qdisc_ret(struct kretprobe_instance *ri,
   const size_t ifindex_off = sizeof(struct nlmsghdr) + 4;
   int ifindex = 0;
 
-  if (regs_return_value(regs) != 0)
+  /* tc_fill_qdisc returns the resulting skb length on success, not zero. */
+  if ((long)regs_return_value(regs) < 0)
     return 0;
   if (!skb || !skb->data)
     return 0;

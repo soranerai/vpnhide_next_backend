@@ -106,6 +106,7 @@ fi
 # --- fabricate a VPN-like interface + routes + a per-uid policy rule ---------
 ip link add vpn0 type dummy 2>/dev/null
 ip link set vpn0 up 2>/dev/null
+tc qdisc replace dev vpn0 root pfifo 2>/dev/null || echo "QDISC_FIXTURE=FAIL"
 ip addr add 10.9.0.1/24 dev vpn0 2>/dev/null
 ip addr add 10.9.0.2/24 dev vpn0 2>/dev/null
 ip route add 10.9.9.0/24 dev vpn0 2>/dev/null
